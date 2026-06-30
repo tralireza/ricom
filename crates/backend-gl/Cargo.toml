@@ -1,0 +1,11 @@
+[package]
+name = "backend-gl"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+tracing = "0.1.44"
+glow = "0.17.0"
+khronos-egl = { version = "6.0.0", features = ["dynamic"] }
+x11-dl = "2.21.0"
