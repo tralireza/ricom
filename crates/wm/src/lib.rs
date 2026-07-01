@@ -35,6 +35,12 @@ pub struct Win {
     /// Animated whole-window opacity. `fade.current()` is what to display now;
     /// `fade.target()` is the goal (from `_NET_WM_WINDOW_OPACITY`, default 1.0).
     pub fade: Fade,
+    /// Fading out (unmapped/destroyed) — kept in the composite set until the fade
+    /// reaches 0, then reaped. See [`WindowStack::begin_fade_out`].
+    pub closing: bool,
+    /// The X window is gone (DestroyNotify), so on fade-out completion it is
+    /// removed from the stack rather than just released (kept if merely unmapped).
+    pub destroyed: bool,
 }
 
 impl Win {
@@ -59,6 +65,8 @@ impl Win {
             override_redirect,
             map_state: if mapped { MapState::Mapped } else { MapState::Unmapped },
             fade: Fade::settled(1.0),
+            closing: false,
+            destroyed: false,
         }
     }
 
@@ -104,6 +112,12 @@ impl WindowStack {
         self.iter_bottom_to_top().filter(|w| w.is_mapped())
     }
 
+    /// Windows to composite, bottom-to-top: those mapped, plus those fading out
+    /// (unmapped/destroyed but not yet fully transparent).
+    pub fn visible_bottom_to_top(&self) -> impl Iterator<Item = &Win> {
+        self.iter_bottom_to_top().filter(|w| w.is_mapped() || w.closing)
+    }
+
     pub fn mapped_count(&self) -> usize {
         self.mapped_bottom_to_top().count()
     }
@@ -136,11 +150,49 @@ impl WindowStack {
     }
 
     /// Begin fading a window in from fully transparent to `target` over
-    /// `duration` seconds (a window just mapped). No-op if untracked.
+    /// `duration` seconds (a window just mapped). Cancels any pending fade-out.
+    /// No-op if untracked.
     pub fn fade_in(&mut self, id: WindowId, target: f64, duration: f64) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.fade = Fade::animating(0.0, target, duration);
+            w.closing = false;
+            w.destroyed = false;
         }
+    }
+
+    /// Begin fading a window out to fully transparent (it was unmapped, or
+    /// destroyed if `destroyed`). Returns `true` if there is something still
+    /// visible to fade (so the caller keeps its pixmap and runs the frame clock);
+    /// `false` if it's already invisible/untracked and can be dropped immediately.
+    pub fn begin_fade_out(&mut self, id: WindowId, duration: f64, destroyed: bool) -> bool {
+        match self.wins.get_mut(&id) {
+            Some(w) if w.fade.current() > 0.0 => {
+                w.closing = true;
+                w.destroyed |= destroyed;
+                w.fade.retarget(0.0, duration);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Clear a window's closing flag (its fade-out completed but the window still
+    /// exists — merely unmapped, not destroyed).
+    pub fn clear_closing(&mut self, id: WindowId) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.closing = false;
+        }
+    }
+
+    /// Closing windows whose fade-out has finished (fully transparent), as
+    /// `(id, destroyed)`. The caller releases their resources and either removes
+    /// them (destroyed) or clears their closing flag (still-mapped-able).
+    pub fn finished_fadeouts(&self) -> Vec<(WindowId, bool)> {
+        self.wins
+            .values()
+            .filter(|w| w.closing && !w.fade.is_animating() && w.fade.current() <= 0.0)
+            .map(|w| (w.id, w.destroyed))
+            .collect()
     }
 
     /// Ease a window toward a new opacity from its current displayed value
@@ -306,6 +358,52 @@ mod tests {
         assert!(mid > 0.0 && mid < 1.0);
         assert!(!s.advance_fades(0.2)); // past the end -> settled
         assert_eq!(s.get(1).unwrap().fade.current(), 1.0);
+    }
+
+    #[test]
+    fn fade_out_unmapped_stays_visible_then_reaps() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        s.set_mapped(1, false); // unmapped...
+        assert!(s.begin_fade_out(1, 0.2, false)); // ...but fading out
+        assert!(s.get(1).unwrap().closing && !s.get(1).unwrap().destroyed);
+        // unmapped yet still composited while fading
+        assert_eq!(s.visible_bottom_to_top().count(), 1);
+        assert!(s.advance_fades(0.1));
+        assert!(s.finished_fadeouts().is_empty());
+        assert!(!s.advance_fades(0.2)); // finishes
+        assert_eq!(s.finished_fadeouts(), vec![(1, false)]);
+        s.clear_closing(1); // not destroyed -> keep in stack, just cleared
+        assert!(s.get(1).is_some());
+        assert_eq!(s.visible_bottom_to_top().count(), 0); // unmapped, not closing
+    }
+
+    #[test]
+    fn destroy_fade_out_marks_for_removal() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        assert!(s.begin_fade_out(1, 0.2, true)); // destroyed
+        s.advance_fades(0.3); // finish
+        assert_eq!(s.finished_fadeouts(), vec![(1, true)]);
+    }
+
+    #[test]
+    fn fade_in_cancels_pending_fade_out() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        s.begin_fade_out(1, 0.2, true);
+        s.fade_in(1, 1.0, 0.2); // window re-mapped mid-fade-out
+        assert!(!s.get(1).unwrap().closing);
+        assert!(!s.get(1).unwrap().destroyed);
+    }
+
+    #[test]
+    fn begin_fade_out_noop_when_already_invisible() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        s.set_opacity_settled(1, 0.0); // already fully transparent
+        assert!(!s.begin_fade_out(1, 0.2, false));
+        assert!(!s.get(1).unwrap().closing);
     }
 
     #[test]
