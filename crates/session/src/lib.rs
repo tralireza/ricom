@@ -364,8 +364,10 @@ impl App {
             self.acquire_gfx(id);
         }
         let _ = self.x.flush();
-        self.dirty = true;
         tracing::info!("redirected — compositing");
+        // Paint immediately: otherwise the overlay we just mapped sits unpainted
+        // over the (previously bypassing) fullscreen window for a frame — a flash.
+        self.composite();
     }
 
     /// Leave compositing: free pixmaps, unredirect the screen, and unmap the
@@ -453,13 +455,15 @@ impl App {
             Event::MapNotify(e) if e.window != self.overlay => {
                 tracing::debug!(window = e.window, "map");
                 self.windows.set_mapped(e.window, true);
+                // Start the fade-in *before* (re)painting, so if this map triggers
+                // an unredir->redirect transition (redir_start paints immediately),
+                // that first frame already shows the window at 0 — no full-opacity flash.
+                let o = self.read_opacity(e.window);
+                self.windows.fade_in(e.window, o, FADE_DURATION);
                 self.update_redirection();
                 if self.redirected && !self.gfx.contains_key(&e.window) {
                     self.acquire_gfx(e.window);
                 }
-                // Fade the newly-mapped window in from transparent to its opacity.
-                let o = self.read_opacity(e.window);
-                self.windows.fade_in(e.window, o, FADE_DURATION);
                 self.ensure_frame_timer();
                 self.dirty = true;
             }
