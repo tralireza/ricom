@@ -124,6 +124,7 @@ impl App {
     fn acquire_gfx(&mut self, win: WindowId) {
         let pixmap = self.x.name_window_pixmap(win).map_err(|e| tracing::warn!("name pixmap {win}: {e}")).ok();
         let damage = self.x.create_damage(win).map_err(|e| tracing::warn!("create damage {win}: {e}")).ok();
+        tracing::debug!(window = win, ?pixmap, ?damage, "acquire gfx");
         if let Some(old) = self.gfx.insert(win, WinGfx { pixmap, damage }) {
             self.free_gfx(old);
         }
@@ -131,6 +132,7 @@ impl App {
 
     fn release_gfx(&mut self, win: WindowId) {
         if let Some(g) = self.gfx.remove(&win) {
+            tracing::debug!(window = win, "release gfx");
             self.free_gfx(g);
         }
     }
@@ -146,6 +148,7 @@ impl App {
 
     /// Re-name the pixmap after a resize (the old one is stale), keeping damage.
     fn rebind_pixmap(&mut self, win: WindowId) {
+        tracing::debug!(window = win, "rebind pixmap (resize)");
         let fresh = self.x.name_window_pixmap(win).ok();
         let old = match self.gfx.get_mut(&win) {
             Some(g) => std::mem::replace(&mut g.pixmap, fresh),
@@ -182,6 +185,7 @@ impl App {
                 ));
             }
         }
+        tracing::trace!(items = items.len(), "composite");
         if let Err(e) = backend.present_windows(&items, self.x.root_width as i32, self.x.root_height as i32) {
             tracing::error!("composite failed: {e}");
         }
@@ -212,7 +216,9 @@ impl App {
 
     /// Re-evaluate the redirect decision and transition if it changed.
     fn update_redirection(&mut self) {
-        match (self.should_unredirect(), self.redirected) {
+        let want = self.should_unredirect();
+        tracing::debug!(want_unredirect = want, redirected = self.redirected, "redir check");
+        match (want, self.redirected) {
             (true, true) => self.redir_stop(),
             (false, false) => self.redir_start(),
             _ => {}
@@ -281,17 +287,20 @@ impl App {
     fn handle_event(&mut self, ev: Event) {
         match ev {
             Event::CreateNotify(e) if e.window != self.overlay => {
+                tracing::debug!(window = e.window, x = e.x, y = e.y, w = e.width, h = e.height, "create");
                 self.windows.add_top(Win::new(
                     e.window, e.x, e.y, e.width, e.height, e.border_width, e.override_redirect, false,
                 ));
             }
             Event::DestroyNotify(e) => {
+                tracing::debug!(window = e.window, "destroy");
                 self.windows.remove(e.window);
                 self.release_gfx(e.window);
                 self.update_redirection();
                 self.dirty = true;
             }
             Event::MapNotify(e) if e.window != self.overlay => {
+                tracing::debug!(window = e.window, "map");
                 self.windows.set_mapped(e.window, true);
                 self.update_redirection();
                 if self.redirected && !self.gfx.contains_key(&e.window) {
@@ -300,6 +309,7 @@ impl App {
                 self.dirty = true;
             }
             Event::UnmapNotify(e) => {
+                tracing::debug!(window = e.window, "unmap");
                 self.windows.set_mapped(e.window, false);
                 self.release_gfx(e.window);
                 self.update_redirection();
@@ -311,6 +321,10 @@ impl App {
                     .windows
                     .get(e.window)
                     .is_some_and(|w| w.width != e.width || w.height != e.height);
+                tracing::debug!(
+                    window = e.window, x = e.x, y = e.y, w = e.width, h = e.height,
+                    above = e.above_sibling, resized, "configure"
+                );
                 self.windows
                     .configure(e.window, e.x, e.y, e.width, e.height, e.border_width, above);
                 // Restack or resize can change which window is topmost/fullscreen.
@@ -322,6 +336,7 @@ impl App {
             }
             Event::ReparentNotify(e) => {
                 if e.parent != self.x.root {
+                    tracing::debug!(window = e.window, parent = e.parent, "reparent (off-root)");
                     self.windows.remove(e.window);
                     self.release_gfx(e.window);
                     self.update_redirection();
@@ -329,7 +344,9 @@ impl App {
                 }
             }
             Event::CirculateNotify(e) => {
-                if e.place == Place::ON_TOP {
+                let on_top = e.place == Place::ON_TOP;
+                tracing::debug!(window = e.window, on_top, "circulate");
+                if on_top {
                     self.windows.raise(e.window);
                 } else {
                     self.windows.lower(e.window);
@@ -338,6 +355,7 @@ impl App {
                 self.dirty = true;
             }
             Event::DamageNotify(e) => {
+                tracing::trace!(damage = e.damage, "damage");
                 let _ = self.x.subtract_damage(e.damage);
                 self.dirty = true;
             }

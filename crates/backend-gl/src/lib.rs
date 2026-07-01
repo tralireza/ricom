@@ -331,6 +331,7 @@ impl GlBackend {
         screen_w: i32,
         screen_h: i32,
     ) -> Result<()> {
+        tracing::trace!(items = items.len(), screen_w, screen_h, "present");
         unsafe {
             self.gl.viewport(0, 0, screen_w, screen_h);
             self.gl.clear_color(0.05, 0.05, 0.07, 1.0);
