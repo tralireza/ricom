@@ -18,9 +18,14 @@ Working today:
   (`EGLImage` → `glEGLImageTargetTexture2DOES`), a GLSL blit, and `eglSwapBuffers` with
   `swap_interval(1)` for vsync.
 - **Renderer** — composite the mapped window stack back-to-front, **damage-driven** redraw loop.
+- **Resolution changes** — follows RandR screen-size changes (`xrandr`) and re-composites at the new size.
+- **unredir-if-possible** — when one window covers the whole screen (e.g. fullscreen video), ricom
+  unredirects and steps aside so it page-flips straight to the display (compositor cost → ~0); it drops
+  back to compositing the instant a smaller window sits on top (e.g. a corner overlay), so that case
+  stays tear-free.
 
-Validated on an Intel HD Graphics 630 (Mesa) at 1920×1080@60: tear-free fullscreen + windowed
-video, performing on par with picom for that workload.
+Validated on an Intel HD Graphics 630 (Mesa): tear-free fullscreen + windowed video at 1920×1080@60
+(on par with picom), and 3840×2160@30 with fullscreen bypass.
 
 **Not yet implemented** (beyond the MVP): effects (shadow, fade, blur, rounded corners, dimming),
 the `use-damage` partial-repaint optimisation, animations, a config file, the xrender/glx
@@ -82,6 +87,12 @@ the blit, and the vsync present; **region** is the pixman-style damage maths; an
 ties them together in the event loop. (Today every frame is a full-screen repaint — `region`
 is there for the `use-damage` partial-repaint optimisation on the roadmap.)
 
+When one window covers the whole screen with nothing on top (e.g. fullscreen video), ricom
+**unredirects** — it unmaps the overlay and steps out of the way so that window page-flips directly to
+the display, dropping the compositor's GPU and memory-bandwidth cost to ~0 (`unredir-if-possible`). The
+moment a smaller window appears on top (a corner overlay), it re-redirects and resumes compositing, so
+the overlay-over-video case stays tear-free.
+
 ## Architecture
 
 A Cargo workspace whose root package is the `ricom` binary; the library crates live under
@@ -123,6 +134,8 @@ Diagnostics:
 DISPLAY=:0 ./target/release/ricom --gl-check    # headless EGL/GL smoke test (no screen impact)
 DISPLAY=:0 ./target/release/ricom --paint-test  # clear the overlay to a colour
 DISPLAY=:0 ./target/release/ricom --blit-test   # composite all windows for 5s
+./target/release/ricom --help                   # usage + examples (no X needed)
+./target/release/ricom --version                # print version
 ```
 
 `RUST_LOG=debug` raises log verbosity.
