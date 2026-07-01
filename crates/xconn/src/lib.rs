@@ -212,6 +212,17 @@ impl XConn {
         Ok(())
     }
 
+    /// Ask for RandR screen-change notifications on the root so we learn when the
+    /// resolution changes (e.g. via `xrandr`). Delivered as `RandrScreenChangeNotify`,
+    /// whose `width`/`height` carry the new screen size.
+    pub fn select_screen_change(&self) -> Result<()> {
+        use x11rb::protocol::randr::{ConnectionExt as _, NotifyMask};
+        self.conn
+            .randr_select_input(self.root, NotifyMask::SCREEN_CHANGE)
+            .context("randr_select_input(SCREEN_CHANGE)")?;
+        Ok(())
+    }
+
     /// MANUAL-redirect all top-levels. NOTE: after this the server stops drawing
     /// the redirected windows — the compositor must paint or the screen freezes.
     pub fn redirect_subwindows(&self) -> Result<()> {
