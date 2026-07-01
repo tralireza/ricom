@@ -6,13 +6,12 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.103"
 backend-gl = { version = "0.1.0", path = "crates/backend-gl" }
-serde = { version = "1.0.228", features = ["derive"] }
+config = { version = "0.1.0", path = "crates/config" }
 session = { version = "0.1.0", path = "crates/session" }
-toml = "1.1.2"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 xconn = { version = "0.1.0", path = "crates/xconn" }
 
 [workspace]
 resolver = "2"
-members = ["crates/session", "crates/xconn", "crates/region", "crates/wm", "crates/backend-gl"]
+members = ["crates/session", "crates/xconn", "crates/region", "crates/wm", "crates/backend-gl", "crates/config"]

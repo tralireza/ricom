@@ -76,9 +76,24 @@ void main() {
 }
 "#;
 
-/// Drop-shadow parameters (constants for now; config-driven on the roadmap).
-const SHADOW_RADIUS: f32 = 12.0; // falloff distance to the left/bottom (px)
-const SHADOW_STRENGTH: f32 = 0.45; // peak shadow alpha
+/// Runtime render parameters (from the config file): set when the backend is
+/// created and swapped in on config reload via [`GlBackend::set_render_params`].
+/// Defaults reproduce the previously compiled-in constants.
+#[derive(Debug, Clone, Copy)]
+pub struct RenderParams {
+    /// Drop-shadow falloff distance to the left/bottom (px).
+    pub shadow_radius: f32,
+    /// Peak shadow alpha.
+    pub shadow_strength: f32,
+    /// Composite background colour (RGB), shown where no window covers.
+    pub background: [f32; 3],
+}
+
+impl Default for RenderParams {
+    fn default() -> Self {
+        RenderParams { shadow_radius: 12.0, shadow_strength: 0.45, background: [0.05, 0.05, 0.07] }
+    }
+}
 
 /// One window to composite: its named pixmap, on-screen rect (top-left origin,
 /// pixels, border included), whole-window opacity (`0.0..=1.0`), and whether to
@@ -225,12 +240,13 @@ pub struct GlBackend {
     s_inner: Option<glow::NativeUniformLocation>,
     s_shadow: Option<glow::NativeUniformLocation>,
     image_target: ImageTargetTexture2DOes,
+    render: RenderParams,
 }
 
 impl GlBackend {
     /// Create an EGL window surface on X window `window` (X visual `visual_id`),
     /// a current GL context with vsync, and the blit program + quad.
-    pub fn new(window: u32, visual_id: u32) -> Result<Self> {
+    pub fn new(window: u32, visual_id: u32, render: RenderParams) -> Result<Self> {
         let xlib = x11_dl::xlib::Xlib::open().map_err(|e| anyhow!("dlopen libX11: {e}"))?;
         // Must precede the first Xlib call: lets libX11 install its locks so Mesa's
         // driver threads don't trip the "Xlib is not thread-safe" stderr warning.
@@ -327,8 +343,14 @@ impl GlBackend {
         Ok(GlBackend {
             xlib, xdisplay, egl, display, surface, context, gl,
             program, vao, u_rect, u_screen, u_tex, u_opacity,
-            shadow_program, s_rect, s_screen, s_inner, s_shadow, image_target,
+            shadow_program, s_rect, s_screen, s_inner, s_shadow, image_target, render,
         })
+    }
+
+    /// Swap in new render parameters (shadow size/strength, background) — used on
+    /// config reload. Takes effect on the next `present_windows`.
+    pub fn set_render_params(&mut self, render: RenderParams) {
+        self.render = render;
     }
 
     /// Clear the surface to a colour and present.
@@ -373,7 +395,8 @@ impl GlBackend {
             let e_bind = self.gl.get_error();
 
             self.gl.viewport(0, 0, screen_w, screen_h);
-            self.gl.clear_color(0.05, 0.05, 0.07, 1.0);
+            let bg = self.render.background;
+            self.gl.clear_color(bg[0], bg[1], bg[2], 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
 
             self.gl.use_program(Some(self.program));
@@ -405,9 +428,10 @@ impl GlBackend {
     /// its opacity, present once. Items that fail to bind are skipped.
     pub fn present_windows(&self, items: &[Quad], screen_w: i32, screen_h: i32) -> Result<()> {
         tracing::trace!(items = items.len(), screen_w, screen_h, "present");
+        let RenderParams { shadow_radius, shadow_strength, background } = self.render;
         unsafe {
             self.gl.viewport(0, 0, screen_w, screen_h);
-            self.gl.clear_color(0.05, 0.05, 0.07, 1.0);
+            self.gl.clear_color(background[0], background[1], background[2], 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
             // Premultiplied-alpha "over" so per-window opacity (and the black
             // shadows) blend onto the clear and the windows already drawn beneath.
@@ -418,7 +442,7 @@ impl GlBackend {
             // Shadow program's per-frame constants.
             self.gl.use_program(Some(self.shadow_program));
             self.gl.uniform_2_f32(self.s_screen.as_ref(), screen_w as f32, screen_h as f32);
-            self.gl.uniform_2_f32(self.s_shadow.as_ref(), SHADOW_RADIUS, SHADOW_STRENGTH);
+            self.gl.uniform_2_f32(self.s_shadow.as_ref(), shadow_radius, shadow_strength);
             // Blit program's per-frame constants.
             self.gl.use_program(Some(self.program));
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
@@ -434,10 +458,10 @@ impl GlBackend {
                     // Quad = bounding box of the left+bottom L: extend left and down by the radius.
                     self.gl.uniform_4_f32(
                         self.s_rect.as_ref(),
-                        fx - SHADOW_RADIUS,
+                        fx - shadow_radius,
                         fy,
-                        fw + SHADOW_RADIUS,
-                        fh + SHADOW_RADIUS,
+                        fw + shadow_radius,
+                        fh + shadow_radius,
                     );
                     self.gl.uniform_4_f32(self.s_inner.as_ref(), fx, fy, fw, fh);
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);

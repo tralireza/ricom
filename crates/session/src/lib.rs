@@ -9,26 +9,32 @@
 
 use std::collections::HashMap;
 use std::os::fd::AsFd;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use calloop::generic::Generic;
+#[cfg(target_os = "linux")]
+use calloop::signals::{Signal, Signals};
 use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{Place, Window};
 
-use backend_gl::{GlBackend, Quad};
+use backend_gl::{GlBackend, Quad, RenderParams};
+use config::Config;
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
 
-/// Fade duration for map-in and opacity changes (seconds). Config-driven later.
-const FADE_DURATION: f64 = 0.2;
-
-/// Skip drop shadows for windows smaller than this (px) — avoids specks under
-/// tiny override-redirect helper windows (e.g. mpv's 1x1 input windows).
-const SHADOW_MIN_SIZE: i32 = 24;
+/// Build the GL backend's render parameters from the config.
+fn render_params(cfg: &Config) -> RenderParams {
+    RenderParams {
+        shadow_radius: cfg.shadow.radius,
+        shadow_strength: cfg.shadow.strength,
+        background: cfg.background,
+    }
+}
 
 /// Per-window X resources used for compositing.
 #[derive(Default)]
@@ -58,11 +64,18 @@ pub struct App {
     frame_timer: Option<RegistrationToken>,
     /// Wall-clock of the previous frame-clock tick, for computing `dt`.
     last_frame: Option<Instant>,
+    /// Effect settings (fade, shadow, unredir, background) from the config file.
+    config: Config,
+    /// Where the config was loaded from, so `SIGHUP` re-reads the same source.
+    /// Only consulted by the Linux-only reload path.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    config_path: Option<PathBuf>,
 }
 
 impl App {
-    /// Connect to X and negotiate the extensions we depend on.
-    pub fn new() -> Result<Self> {
+    /// Connect to X and negotiate the extensions we depend on. `config` holds the
+    /// effect settings; `config_path` is remembered for `SIGHUP` reloads.
+    pub fn new(config: Config, config_path: Option<PathBuf>) -> Result<Self> {
         let x = XConn::connect()?;
         x.setup_extensions()?;
         Ok(App {
@@ -76,7 +89,39 @@ impl App {
             loop_handle: None,
             frame_timer: None,
             last_frame: None,
+            config,
+            config_path,
         })
+    }
+
+    /// Fade duration in seconds, or `0.0` when fading is disabled (a zero-duration
+    /// `Fade` settles instantly, so callers need no separate on/off branch).
+    fn fade_duration(&self) -> f64 {
+        if self.config.fade.enabled {
+            self.config.fade.duration
+        } else {
+            0.0
+        }
+    }
+
+    /// Re-read the config (from the same source) and apply it live. Called on
+    /// `SIGHUP` (Linux only — the signal source needs `signalfd`). A parse error
+    /// is logged and the running config is kept unchanged.
+    #[cfg(target_os = "linux")]
+    fn reload_config(&mut self) {
+        match Config::load(self.config_path.as_deref()) {
+            Ok(cfg) => {
+                tracing::info!("config reloaded");
+                self.config = cfg;
+                if let Some(b) = self.backend.as_mut() {
+                    b.set_render_params(render_params(&self.config));
+                }
+                // unredir may have toggled; re-evaluate, then repaint.
+                self.update_redirection();
+                self.dirty = true;
+            }
+            Err(e) => tracing::error!("config reload failed, keeping current: {e}"),
+        }
     }
 
     /// Become the CM, redirect + acquire the overlay, build the GL backend, then
@@ -91,7 +136,7 @@ impl App {
         let visual = self.x.window_visual(self.overlay)?;
         self.x.redirect_subwindows()?;
         self.redirected = true;
-        self.backend = Some(GlBackend::new(self.overlay, visual)?);
+        self.backend = Some(GlBackend::new(self.overlay, visual, render_params(&self.config))?);
 
         // Seed the stack + per-window resources from the current tree.
         for w in self.x.list_tree()? {
@@ -138,6 +183,16 @@ impl App {
                 Ok(PostAction::Continue)
             })
             .map_err(|e| anyhow::anyhow!("insert X source: {e}"))?;
+
+        // SIGHUP -> reload the config file live (fade/shadow/unredir/background).
+        // Linux-only: calloop's signal source is built on signalfd.
+        #[cfg(target_os = "linux")]
+        {
+            let signals = Signals::new(&[Signal::SIGHUP]).context("create SIGHUP source")?;
+            handle
+                .insert_source(signals, |_event, _meta, app: &mut App| app.reload_config())
+                .map_err(|e| anyhow::anyhow!("insert signal source: {e}"))?;
+        }
 
         // Prime the pump: setup already flushed, which may have buffered events
         // inside x11rb that will never re-trigger the fd watch. Drain them (and
@@ -298,7 +353,10 @@ impl App {
                     opacity: w.fade.current() as f32,
                     // Drop the shadow the instant a window starts closing, so it
                     // disappears on close/hide rather than lingering through the fade-out.
-                    shadow: qw >= SHADOW_MIN_SIZE && qh >= SHADOW_MIN_SIZE && !w.closing,
+                    shadow: self.config.shadow.enabled
+                        && qw >= self.config.shadow.min_size
+                        && qh >= self.config.shadow.min_size
+                        && !w.closing,
                 });
             }
         }
@@ -314,6 +372,11 @@ impl App {
     /// topmost window is small (e.g. a corner overlay) this is false, so we keep
     /// compositing — which is exactly the case that would otherwise tear.
     fn should_unredirect(&self) -> bool {
+        // Config can disable unredir entirely: always composite, even a lone
+        // fullscreen window (never step aside to let it page-flip).
+        if !self.config.unredir {
+            return false;
+        }
         let (rw, rh) = (self.x.root_width as i32, self.x.root_height as i32);
         let Some(top) = self
             .windows
@@ -441,8 +504,9 @@ impl App {
                 // A CompositeNameWindowPixmap pixmap outlives the window, so we can
                 // keep compositing the last frame and fade it out; the window is
                 // reaped from the stack once transparent. Nothing visible -> drop now.
+                let d = self.fade_duration();
                 if self.gfx.contains_key(&e.window)
-                    && self.windows.begin_fade_out(e.window, FADE_DURATION, true)
+                    && self.windows.begin_fade_out(e.window, d, true)
                 {
                     self.ensure_frame_timer();
                 } else {
@@ -459,7 +523,8 @@ impl App {
                 // an unredir->redirect transition (redir_start paints immediately),
                 // that first frame already shows the window at 0 — no full-opacity flash.
                 let o = self.read_opacity(e.window);
-                self.windows.fade_in(e.window, o, FADE_DURATION);
+                let d = self.fade_duration();
+                self.windows.fade_in(e.window, o, d);
                 self.update_redirection();
                 if self.redirected && !self.gfx.contains_key(&e.window) {
                     self.acquire_gfx(e.window);
@@ -471,8 +536,9 @@ impl App {
                 tracing::debug!(window = e.window, "unmap");
                 self.windows.set_mapped(e.window, false);
                 // Fade the last frame out if we have it (keep the pixmap); else drop now.
+                let d = self.fade_duration();
                 if self.gfx.contains_key(&e.window)
-                    && self.windows.begin_fade_out(e.window, FADE_DURATION, false)
+                    && self.windows.begin_fade_out(e.window, d, false)
                 {
                     self.ensure_frame_timer();
                 } else {
@@ -525,8 +591,9 @@ impl App {
                 // removed) reads back as absent → refresh restores full opacity.
                 if self.x.atom("_NET_WM_WINDOW_OPACITY").is_ok_and(|a| a == e.atom) {
                     let o = self.read_opacity(e.window);
+                    let d = self.fade_duration();
                     tracing::debug!(window = e.window, opacity = o, "opacity property changed");
-                    self.windows.retarget_opacity(e.window, o, FADE_DURATION);
+                    self.windows.retarget_opacity(e.window, o, d);
                     self.ensure_frame_timer();
                     self.dirty = true;
                 }

@@ -1,0 +1,21 @@
+# ricom configuration (TOML). Copy to ~/.config/ricom/ricom.toml and edit.
+# Every key is optional — omitted keys fall back to these built-in defaults.
+# Reload a running ricom live with:  kill -HUP $(pidof ricom)
+
+# unredir-if-possible: let a lone fullscreen window bypass the compositor and
+# page-flip straight to the display (compositor cost ~0). Set to false to always
+# composite — even when a single fullscreen window is the only thing on screen.
+unredir = true
+
+# Composite background colour (RGB, 0.0-1.0), seen where no window covers.
+background = [0.05, 0.05, 0.07]
+
+[fade]
+enabled = true
+duration = 0.2      # seconds (fade in on map, out on unmap/destroy)
+
+[shadow]
+enabled = true
+radius = 12.0       # left/bottom falloff distance (px)
+strength = 0.45     # peak shadow alpha (0.0-1.0)
+min_size = 24       # skip shadows for windows smaller than this (px)

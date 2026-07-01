@@ -4,7 +4,7 @@ use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
 const HELP: &str = "\
-ricom — a small X11 compositor (EGL/GL, tear-free vsync)
+ricom — a minimalistic X11 compositor (EGL/GL, tear-free vsync)
 
 USAGE:
     ricom [OPTION]
@@ -20,6 +20,8 @@ OPTIONS:
     --opacity-test [FRAC]
                     Like --blit-test but draw every window at opacity FRAC
                     (0.0..1.0, default 0.5) — exercises the alpha-blend path.
+    --config <PATH> Use this config file instead of the default location.
+    --print-config  Print the effective config as TOML and exit (no X needed).
     -h, --help      Print this help and exit.
     -V, --version   Print version and exit.
 
@@ -27,12 +29,17 @@ ENVIRONMENT:
     DISPLAY         X display to connect to (e.g. :0). Required.
     RUST_LOG        Log level: error|warn|info|debug|trace (default: info).
 
+CONFIG:
+    TOML read from $XDG_CONFIG_HOME/ricom/ricom.toml (or ~/.config/ricom/ricom.toml)
+    if present, else built-in defaults. Send SIGHUP (`kill -HUP <pid>`) to reload live.
+
 EXAMPLES:
     DISPLAY=:0 ricom                   # run as the compositor
     DISPLAY=:0 ricom --gl-check        # verify EGL/GL works on this GPU
     RUST_LOG=debug DISPLAY=:0 ricom    # run with debug logging
     DISPLAY=:0 ricom --blit-test       # one-shot: composite current windows for 5s
     DISPLAY=:0 ricom --opacity-test 0.5   # composite current windows at 50% opacity
+    ricom --print-config               # show effective settings and exit
 
 Stop any other compositor first (e.g. `pkill -x picom`), since ricom must own
 _NET_WM_CM_S0.
@@ -51,7 +58,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
     // Reject unknown flags so a typo doesn't silently launch the compositor.
-    const FLAGS: &[&str] = &["--gl-check", "--paint-test", "--blit-test", "--opacity-test"];
+    const FLAGS: &[&str] =
+        &["--gl-check", "--paint-test", "--blit-test", "--opacity-test", "--config", "--print-config"];
     if let Some(bad) = args[1..]
         .iter()
         .find(|a| a.starts_with('-') && !FLAGS.contains(&a.as_str()))
@@ -94,8 +102,28 @@ fn main() -> Result<()> {
         return composite_windows_test(frac);
     }
 
+    // Config: `--config <path>` overrides the default XDG location.
+    let config_path = args
+        .iter()
+        .position(|a| a == "--config")
+        .and_then(|i| args.get(i + 1))
+        .map(std::path::PathBuf::from);
+    let cfg = match config::Config::load(config_path.as_deref()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("ricom: {e:#}");
+            std::process::exit(2);
+        }
+    };
+
+    // `ricom --print-config` dumps the effective settings as TOML and exits.
+    if args.iter().any(|a| a == "--print-config") {
+        print!("{}", cfg.to_toml());
+        return Ok(());
+    }
+
     tracing::info!("ricom starting");
-    let mut app = session::App::new()?;
+    let mut app = session::App::new(cfg, config_path)?;
     app.run()?;
     Ok(())
 }
@@ -112,7 +140,7 @@ fn paint_test() -> Result<()> {
     tracing::info!(overlay, visual, "composite overlay acquired (input-passthrough)");
     x.flush()?;
     {
-        let backend = backend_gl::GlBackend::new(overlay, visual)?;
+        let backend = backend_gl::GlBackend::new(overlay, visual, backend_gl::RenderParams::default())?;
         for _ in 0..3 {
             backend.clear_present(0.06, 0.45, 0.55, 1.0)?;
         }
@@ -170,7 +198,7 @@ fn composite_windows_test(opacity: f32) -> Result<()> {
     tracing::info!(count = items.len(), opacity, "compositing mapped windows");
     x.flush()?;
     {
-        let backend = backend_gl::GlBackend::new(overlay, visual)?;
+        let backend = backend_gl::GlBackend::new(overlay, visual, backend_gl::RenderParams::default())?;
         let start = std::time::Instant::now();
         while start.elapsed().as_secs() < 5 {
             backend.present_windows(&items, x.root_width as i32, x.root_height as i32)?;

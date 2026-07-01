@@ -153,17 +153,40 @@ DISPLAY=:0 ./target/release/ricom --blit-test   # composite all windows for 5s
 > Running `ricom` acquires `_NET_WM_CM_S0`; stop any other compositor (`pkill -x picom`) first.
 > On exit the X server auto-releases the redirect, so the screen returns to normal drawing.
 
+## Configuration
+
+ricom reads an optional TOML file from `$XDG_CONFIG_HOME/ricom/ricom.toml` (falling back to
+`~/.config/ricom/ricom.toml`); with no file it uses built-in defaults. Pass `--config <path>` to
+use a different file, `--print-config` to dump the effective settings, and **`kill -HUP $(pidof
+ricom)`** to reload live — no restart. Every key is optional and falls back to its default:
+
+```toml
+unredir = true                  # false = always composite, even a lone fullscreen window
+background = [0.05, 0.05, 0.07]  # composite background colour (RGB, seen where no window covers)
+
+[fade]
+enabled = true
+duration = 0.2                  # seconds (fade in on map, out on unmap/destroy)
+
+[shadow]
+enabled = true
+radius = 12.0                   # left/bottom falloff distance (px)
+strength = 0.45                 # peak shadow alpha
+min_size = 24                   # skip shadows for windows smaller than this (px)
+```
+
+See [`ricom.toml.example`](ricom.toml.example).
+
 ## Roadmap
 
-Done: per-window opacity, fade in/out, and left+bottom drop shadows.
+Done: per-window opacity, fade in/out, left+bottom drop shadows, and a TOML config file with
+live (SIGHUP) reload.
 
 Next:
 
 1. `use-damage` partial repaint — repaint only damaged regions (biggest win on mostly-static screens).
-2. Config file — make the effect parameters (fade duration, shadow radius/offset/strength, unredir
-   toggle) tunable instead of compile-time constants.
-3. Blur, rounded corners, and window rules.
-4. Animations (picom-style transition scripts).
+2. Blur, rounded corners, and window rules.
+3. Animations (picom-style transition scripts).
 
 ## License
 
