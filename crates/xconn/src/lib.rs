@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use anyhow::{bail, Context, Result};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xproto::{
-    Atom, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux, EventMask, MapState,
-    Window, WindowClass,
+    Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux, EventMask,
+    MapState, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -331,6 +331,37 @@ impl XConn {
         self.conn
             .damage_subtract(damage, 0u32, 0u32)
             .context("damage_subtract")?;
+        Ok(())
+    }
+
+    /// Read `_NET_WM_WINDOW_OPACITY` — a CARDINAL in `0..=0xFFFF_FFFF` where
+    /// `0xFFFF_FFFF` is fully opaque — as a `0.0..=1.0` fraction. Returns `None`
+    /// when the property is absent (the caller then treats the window as opaque).
+    pub fn get_window_opacity(&self, win: Window) -> Result<Option<f64>> {
+        let prop = self.atom("_NET_WM_WINDOW_OPACITY")?;
+        let reply = self
+            .conn
+            .get_property(false, win, prop, AtomEnum::CARDINAL, 0, 1)
+            .context("get_property(_NET_WM_WINDOW_OPACITY)")?
+            .reply()
+            .context("get_property(_NET_WM_WINDOW_OPACITY) reply")?;
+        Ok(reply
+            .value32()
+            .and_then(|mut it| it.next())
+            .map(|v| v as f64 / u32::MAX as f64))
+    }
+
+    /// Ask the server to deliver `PropertyNotify` for this window, so we learn
+    /// when e.g. `_NET_WM_WINDOW_OPACITY` changes at runtime. Event masks are
+    /// per-client, so this does not disturb the owning client's own selection.
+    /// May fail (async `BadWindow`) if the window vanishes — callers tolerate it.
+    pub fn select_property_changes(&self, win: Window) -> Result<()> {
+        self.conn
+            .change_window_attributes(
+                win,
+                &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+            )
+            .context("select PropertyChange")?;
         Ok(())
     }
 }

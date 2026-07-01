@@ -17,6 +17,9 @@ OPTIONS:
     --gl-check      Headless EGL/GL smoke test: print GPU vendor/renderer/version, exit.
     --paint-test    Clear the composite overlay to a solid colour for 4s, then exit.
     --blit-test     Composite all mapped windows onto the overlay for 5s, then exit.
+    --opacity-test [FRAC]
+                    Like --blit-test but draw every window at opacity FRAC
+                    (0.0..1.0, default 0.5) — exercises the alpha-blend path.
     -h, --help      Print this help and exit.
     -V, --version   Print version and exit.
 
@@ -29,6 +32,7 @@ EXAMPLES:
     DISPLAY=:0 ricom --gl-check        # verify EGL/GL works on this GPU
     RUST_LOG=debug DISPLAY=:0 ricom    # run with debug logging
     DISPLAY=:0 ricom --blit-test       # one-shot: composite current windows for 5s
+    DISPLAY=:0 ricom --opacity-test 0.5   # composite current windows at 50% opacity
 
 Stop any other compositor first (e.g. `pkill -x picom`), since ricom must own
 _NET_WM_CM_S0.
@@ -47,7 +51,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     // Reject unknown flags so a typo doesn't silently launch the compositor.
-    const FLAGS: &[&str] = &["--gl-check", "--paint-test", "--blit-test"];
+    const FLAGS: &[&str] = &["--gl-check", "--paint-test", "--blit-test", "--opacity-test"];
     if let Some(bad) = args[1..]
         .iter()
         .find(|a| a.starts_with('-') && !FLAGS.contains(&a.as_str()))
@@ -74,9 +78,20 @@ fn main() -> Result<()> {
         return paint_test();
     }
 
-    // `ricom --blit-test` redirects + blits the largest window's pixmap onto the overlay.
+    // `ricom --blit-test` redirects + composites all mapped windows onto the overlay.
     if args.iter().any(|a| a == "--blit-test") {
-        return blit_test();
+        return composite_windows_test(1.0);
+    }
+
+    // `ricom --opacity-test [FRAC]` composites all windows at a fixed opacity
+    // (0.0..1.0, default 0.5) to exercise the alpha-blend path.
+    if let Some(pos) = args.iter().position(|a| a == "--opacity-test") {
+        let frac = args
+            .get(pos + 1)
+            .and_then(|s| s.parse::<f32>().ok())
+            .unwrap_or(0.5)
+            .clamp(0.0, 1.0);
+        return composite_windows_test(frac);
     }
 
     tracing::info!("ricom starting");
@@ -111,8 +126,11 @@ fn paint_test() -> Result<()> {
 }
 
 /// Increment 2b/3: redirect, then composite ALL mapped windows (bottom-to-top)
-/// onto the overlay via texture-from-pixmap, looped for a few seconds.
-fn blit_test() -> Result<()> {
+/// onto the overlay via texture-from-pixmap, looped for a few seconds. Every
+/// window is drawn at `opacity` (1.0 = the plain --blit-test; <1.0 exercises the
+/// alpha-blend path for --opacity-test).
+fn composite_windows_test(opacity: f32) -> Result<()> {
+    use backend_gl::Quad;
     use xconn::XConn;
     let x = XConn::connect()?;
     x.setup_extensions()?;
@@ -123,7 +141,7 @@ fn blit_test() -> Result<()> {
     x.redirect_subwindows()?; // server stops drawing; ricom owns the screen now
 
     // Name a pixmap for every mapped window (bottom-to-top), excluding the overlay.
-    let mut items: Vec<(u32, i32, i32, i32, i32)> = Vec::new();
+    let mut items: Vec<Quad> = Vec::new();
     let mut pixmaps: Vec<u32> = Vec::new();
     for w in x.list_tree()? {
         if !w.mapped || w.window == overlay {
@@ -134,19 +152,20 @@ fn blit_test() -> Result<()> {
                 // Named pixmap includes the border (size w+2bw); geometry x,y is
                 // already the outer corner, so blit AT (x,y) with the bordered size.
                 let bw = w.border_width as i32;
-                items.push((
-                    pm,
-                    w.x as i32,
-                    w.y as i32,
-                    w.width as i32 + 2 * bw,
-                    w.height as i32 + 2 * bw,
-                ));
+                items.push(Quad {
+                    pixmap: pm,
+                    x: w.x as i32,
+                    y: w.y as i32,
+                    w: w.width as i32 + 2 * bw,
+                    h: w.height as i32 + 2 * bw,
+                    opacity,
+                });
                 pixmaps.push(pm);
             }
             Err(e) => tracing::warn!("name pixmap for {}: {e}", w.window),
         }
     }
-    tracing::info!(count = items.len(), "compositing mapped windows");
+    tracing::info!(count = items.len(), opacity, "compositing mapped windows");
     x.flush()?;
     {
         let backend = backend_gl::GlBackend::new(overlay, visual)?;

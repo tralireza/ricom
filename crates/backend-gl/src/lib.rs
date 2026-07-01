@@ -35,9 +35,24 @@ void main() {
 const BLIT_FS: &str = r#"#version 330 core
 in vec2 v_tex;
 uniform sampler2D u_tex;
+uniform float u_opacity;              // whole-window opacity, 0..1
 out vec4 frag;
-void main() { frag = vec4(texture(u_tex, v_tex).rgb, 1.0); }
+// Premultiplied-alpha output: paired with glBlendFunc(ONE, ONE_MINUS_SRC_ALPHA)
+// over an opaque clear this yields  dst = rgb*a + dst*(1-a)  — straight "over".
+void main() { frag = vec4(texture(u_tex, v_tex).rgb * u_opacity, u_opacity); }
 "#;
+
+/// One window to composite: its named pixmap, on-screen rect (top-left origin,
+/// pixels, border included), and whole-window opacity (`0.0..=1.0`).
+#[derive(Debug, Clone, Copy)]
+pub struct Quad {
+    pub pixmap: u32,
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+    pub opacity: f32,
+}
 
 #[derive(Debug, Clone)]
 pub struct GlInfo {
@@ -162,6 +177,7 @@ pub struct GlBackend {
     u_rect: Option<glow::NativeUniformLocation>,
     u_screen: Option<glow::NativeUniformLocation>,
     u_tex: Option<glow::NativeUniformLocation>,
+    u_opacity: Option<glow::NativeUniformLocation>,
     image_target: ImageTargetTexture2DOes,
 }
 
@@ -227,7 +243,7 @@ impl GlBackend {
         };
 
         // Blit program + unit-quad VAO.
-        let (program, vao, u_rect, u_screen, u_tex) = unsafe {
+        let (program, vao, u_rect, u_screen, u_tex, u_opacity) = unsafe {
             let program = make_program(&gl, BLIT_VS, BLIT_FS)?;
             let vao = gl.create_vertex_array().map_err(|e| anyhow!("vao: {e}"))?;
             gl.bind_vertex_array(Some(vao));
@@ -245,13 +261,14 @@ impl GlBackend {
                 gl.get_uniform_location(program, "u_rect"),
                 gl.get_uniform_location(program, "u_screen"),
                 gl.get_uniform_location(program, "u_tex"),
+                gl.get_uniform_location(program, "u_opacity"),
             )
         };
         tracing::info!(%renderer, window, "GL window backend ready (blit program loaded)");
 
         Ok(GlBackend {
             xlib, xdisplay, egl, display, surface, context, gl,
-            program, vao, u_rect, u_screen, u_tex, image_target,
+            program, vao, u_rect, u_screen, u_tex, u_opacity, image_target,
         })
     }
 
@@ -270,6 +287,7 @@ impl GlBackend {
     /// Bind an X window's pixmap as a GL texture and blit it at `(x,y,w,h)` over
     /// a cleared overlay, then present. (Single-window path; the renderer will
     /// loop this over the stack without clearing between windows.)
+    #[allow(clippy::too_many_arguments)]
     pub fn present_window_pixmap(
         &self,
         pixmap: u32,
@@ -303,6 +321,7 @@ impl GlBackend {
             self.gl.uniform_4_f32(self.u_rect.as_ref(), x as f32, y as f32, w as f32, h as f32);
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
+            self.gl.uniform_1_f32(self.u_opacity.as_ref(), 1.0);
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_vertex_array(None);
@@ -323,26 +342,25 @@ impl GlBackend {
         Ok(())
     }
 
-    /// Composite a stack of windows: clear once, blit each `(pixmap, x, y, w, h)`
-    /// bottom-to-top, present once. Items that fail to bind are skipped.
-    pub fn present_windows(
-        &self,
-        items: &[(u32, i32, i32, i32, i32)],
-        screen_w: i32,
-        screen_h: i32,
-    ) -> Result<()> {
+    /// Composite a stack of [`Quad`]s: clear once, blit each bottom-to-top with
+    /// its opacity, present once. Items that fail to bind are skipped.
+    pub fn present_windows(&self, items: &[Quad], screen_w: i32, screen_h: i32) -> Result<()> {
         tracing::trace!(items = items.len(), screen_w, screen_h, "present");
         unsafe {
             self.gl.viewport(0, 0, screen_w, screen_h);
             self.gl.clear_color(0.05, 0.05, 0.07, 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
+            // Premultiplied-alpha "over" so per-window opacity blends onto the
+            // (opaque) clear and the windows already drawn beneath.
+            self.gl.enable(glow::BLEND);
+            self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
             self.gl.use_program(Some(self.program));
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
             self.gl.active_texture(glow::TEXTURE0);
             self.gl.bind_vertex_array(Some(self.vao));
         }
-        for &(pixmap, x, y, w, h) in items {
+        for &Quad { pixmap, x, y, w, h, opacity } in items {
             let buffer =
                 unsafe { egl::ClientBuffer::from_ptr((pixmap as usize) as egl::EGLClientBuffer) };
             let no_ctx = unsafe { egl::Context::from_ptr(egl::NO_CONTEXT) };
@@ -372,6 +390,7 @@ impl GlBackend {
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
                 (self.image_target)(glow::TEXTURE_2D, image.as_ptr() as *const c_void);
                 self.gl.uniform_4_f32(self.u_rect.as_ref(), x as f32, y as f32, w as f32, h as f32);
+                self.gl.uniform_1_f32(self.u_opacity.as_ref(), opacity);
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 self.gl.delete_texture(tex);
             }

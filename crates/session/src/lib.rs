@@ -17,7 +17,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{Place, Window};
 
-use backend_gl::GlBackend;
+use backend_gl::{GlBackend, Quad};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
 
@@ -82,6 +82,8 @@ impl App {
             self.windows.add_top(Win::new(
                 w.window, w.x, w.y, w.width, w.height, w.border_width, false, w.mapped,
             ));
+            let _ = self.x.select_property_changes(w.window);
+            self.refresh_opacity(w.window);
             if w.mapped {
                 self.acquire_gfx(w.window);
             }
@@ -118,6 +120,20 @@ impl App {
 
         event_loop.run(None, self, |_app| {}).context("event loop")?;
         Ok(())
+    }
+
+    /// Read a window's `_NET_WM_WINDOW_OPACITY` and store it on the model
+    /// (defaulting to fully opaque when absent or on error), then mark dirty.
+    fn refresh_opacity(&mut self, win: WindowId) {
+        let opacity = match self.x.get_window_opacity(win) {
+            Ok(o) => o.unwrap_or(1.0),
+            Err(e) => {
+                tracing::debug!(window = win, "opacity read failed: {e}");
+                1.0
+            }
+        };
+        self.windows.set_opacity(win, opacity);
+        self.dirty = true;
     }
 
     /// Name a pixmap + create a damage object for a (now-mapped) window.
@@ -169,20 +185,21 @@ impl App {
         let Some(backend) = self.backend.as_ref() else {
             return;
         };
-        let mut items: Vec<(u32, i32, i32, i32, i32)> = Vec::new();
+        let mut items: Vec<Quad> = Vec::new();
         for w in self.windows.mapped_bottom_to_top() {
             if w.id == self.overlay {
                 continue;
             }
             if let Some(pm) = self.gfx.get(&w.id).and_then(|g| g.pixmap) {
                 let bw = w.border_width as i32;
-                items.push((
-                    pm,
-                    w.x as i32,
-                    w.y as i32,
-                    w.width as i32 + 2 * bw,
-                    w.height as i32 + 2 * bw,
-                ));
+                items.push(Quad {
+                    pixmap: pm,
+                    x: w.x as i32,
+                    y: w.y as i32,
+                    w: w.width as i32 + 2 * bw,
+                    h: w.height as i32 + 2 * bw,
+                    opacity: w.opacity as f32,
+                });
             }
         }
         tracing::trace!(items = items.len(), "composite");
@@ -291,6 +308,8 @@ impl App {
                 self.windows.add_top(Win::new(
                     e.window, e.x, e.y, e.width, e.height, e.border_width, e.override_redirect, false,
                 ));
+                let _ = self.x.select_property_changes(e.window);
+                self.refresh_opacity(e.window);
             }
             Event::DestroyNotify(e) => {
                 tracing::debug!(window = e.window, "destroy");
@@ -306,6 +325,7 @@ impl App {
                 if self.redirected && !self.gfx.contains_key(&e.window) {
                     self.acquire_gfx(e.window);
                 }
+                self.refresh_opacity(e.window);
                 self.dirty = true;
             }
             Event::UnmapNotify(e) => {
@@ -353,6 +373,14 @@ impl App {
                 }
                 self.update_redirection();
                 self.dirty = true;
+            }
+            Event::PropertyNotify(e) => {
+                // Only _NET_WM_WINDOW_OPACITY concerns us; a Delete (property
+                // removed) reads back as absent → refresh restores full opacity.
+                if self.x.atom("_NET_WM_WINDOW_OPACITY").is_ok_and(|a| a == e.atom) {
+                    tracing::debug!(window = e.window, "opacity property changed");
+                    self.refresh_opacity(e.window);
+                }
             }
             Event::DamageNotify(e) => {
                 tracing::trace!(damage = e.damage, "damage");
