@@ -9,10 +9,12 @@
 
 use std::collections::HashMap;
 use std::os::fd::AsFd;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use calloop::generic::Generic;
-use calloop::{EventLoop, Interest, Mode, PostAction};
+use calloop::timer::{TimeoutAction, Timer};
+use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{Place, Window};
@@ -20,6 +22,9 @@ use x11rb::protocol::xproto::{Place, Window};
 use backend_gl::{GlBackend, Quad};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
+
+/// Fade duration for map-in and opacity changes (seconds). Config-driven later.
+const FADE_DURATION: f64 = 0.2;
 
 /// Per-window X resources used for compositing.
 #[derive(Default)]
@@ -42,6 +47,13 @@ pub struct App {
     /// have unredirected + unmapped the overlay so a fullscreen window bypasses
     /// the compositor (unredir-if-possible).
     redirected: bool,
+    /// calloop handle, kept so event handlers can (re)arm the fade frame clock.
+    loop_handle: Option<LoopHandle<'static, App>>,
+    /// The frame-clock timer while any window is fading; `None` when settled, so
+    /// there are zero timer wakeups on an idle screen.
+    frame_timer: Option<RegistrationToken>,
+    /// Wall-clock of the previous frame-clock tick, for computing `dt`.
+    last_frame: Option<Instant>,
 }
 
 impl App {
@@ -57,6 +69,9 @@ impl App {
             gfx: HashMap::new(),
             dirty: true,
             redirected: false,
+            loop_handle: None,
+            frame_timer: None,
+            last_frame: None,
         })
     }
 
@@ -83,7 +98,9 @@ impl App {
                 w.window, w.x, w.y, w.width, w.height, w.border_width, false, w.mapped,
             ));
             let _ = self.x.select_property_changes(w.window);
-            self.refresh_opacity(w.window);
+            // Already on screen at startup — show at its opacity with no fade-in.
+            let o = self.read_opacity(w.window);
+            self.windows.set_opacity_settled(w.window, o);
             if w.mapped {
                 self.acquire_gfx(w.window);
             }
@@ -98,8 +115,9 @@ impl App {
             "ricom compositing (Ctrl-C to quit)"
         );
 
-        let mut event_loop: EventLoop<App> = EventLoop::try_new().context("create event loop")?;
+        let mut event_loop: EventLoop<'static, App> = EventLoop::try_new().context("create event loop")?;
         let handle = event_loop.handle();
+        self.loop_handle = Some(handle.clone());
         let fd = self
             .x
             .conn
@@ -109,11 +127,10 @@ impl App {
             .context("clone X connection fd")?;
         handle
             .insert_source(Generic::new(fd, Interest::READ, Mode::Level), |_r, _fd, app: &mut App| {
+                // Just drain (which marks dirty on damage); the single composite
+                // for this loop iteration happens in the run callback below, so
+                // damage + fade-tick coalesce into one vsync-paced repaint.
                 app.drain_x_events();
-                if app.dirty {
-                    app.composite();
-                    app.dirty = false;
-                }
                 Ok(PostAction::Continue)
             })
             .map_err(|e| anyhow::anyhow!("insert X source: {e}"))?;
@@ -127,22 +144,64 @@ impl App {
             self.dirty = false;
         }
 
-        event_loop.run(None, self, |_app| {}).context("event loop")?;
+        // One composite per loop iteration, after all sources (X events, fade
+        // ticks) have run — coalesces every trigger into a single vsync-paced repaint.
+        event_loop
+            .run(None, self, |app| {
+                if app.dirty {
+                    app.composite();
+                    app.dirty = false;
+                }
+            })
+            .context("event loop")?;
         Ok(())
     }
 
-    /// Read a window's `_NET_WM_WINDOW_OPACITY` and store it on the model
-    /// (defaulting to fully opaque when absent or on error), then mark dirty.
-    fn refresh_opacity(&mut self, win: WindowId) {
-        let opacity = match self.x.get_window_opacity(win) {
+    /// Read a window's `_NET_WM_WINDOW_OPACITY` as a `0.0..=1.0` fraction,
+    /// defaulting to fully opaque when the property is absent or unreadable.
+    fn read_opacity(&self, win: WindowId) -> f64 {
+        match self.x.get_window_opacity(win) {
             Ok(o) => o.unwrap_or(1.0),
             Err(e) => {
                 tracing::debug!(window = win, "opacity read failed: {e}");
                 1.0
             }
+        }
+    }
+
+    /// Arm the fade frame clock if it isn't already running: a `calloop` timer
+    /// that advances every window's fade and recomposites each tick, dropping
+    /// itself once all fades settle (so an idle screen has no timer wakeups).
+    fn ensure_frame_timer(&mut self) {
+        if self.frame_timer.is_some() {
+            return;
+        }
+        let Some(handle) = self.loop_handle.clone() else {
+            return;
         };
-        self.windows.set_opacity(win, opacity);
-        self.dirty = true;
+        self.last_frame = None;
+        let token = handle.insert_source(Timer::immediate(), |_deadline, _meta, app: &mut App| {
+            let now = Instant::now();
+            let dt = app.last_frame.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
+            app.last_frame = Some(now);
+            let animating = app.windows.advance_fades(dt);
+            tracing::trace!(dt, animating, "fade tick");
+            app.dirty = true; // repaint happens once, in the run callback
+            if animating {
+                // While compositing, eglSwapBuffers(vsync) paces us to the refresh
+                // rate, so an immediate re-arm self-throttles; when unredirected
+                // there is no swap to block on, so step to avoid busy-looping.
+                let step = if app.redirected { Duration::ZERO } else { Duration::from_millis(16) };
+                TimeoutAction::ToDuration(step)
+            } else {
+                app.frame_timer = None;
+                TimeoutAction::Drop
+            }
+        });
+        match token {
+            Ok(tok) => self.frame_timer = Some(tok),
+            Err(e) => tracing::error!("insert frame timer: {e}"),
+        }
     }
 
     /// Name a pixmap + create a damage object for a (now-mapped) window.
@@ -207,7 +266,7 @@ impl App {
                     y: w.y as i32,
                     w: w.width as i32 + 2 * bw,
                     h: w.height as i32 + 2 * bw,
-                    opacity: w.opacity as f32,
+                    opacity: w.fade.current() as f32,
                 });
             }
         }
@@ -338,7 +397,9 @@ impl App {
                     e.window, e.x, e.y, e.width, e.height, e.border_width, e.override_redirect, false,
                 ));
                 let _ = self.x.select_property_changes(e.window);
-                self.refresh_opacity(e.window);
+                // Not visible yet — record its opacity; the fade-in starts on map.
+                let o = self.read_opacity(e.window);
+                self.windows.set_opacity_settled(e.window, o);
             }
             Event::DestroyNotify(e) => {
                 tracing::debug!(window = e.window, "destroy");
@@ -354,7 +415,10 @@ impl App {
                 if self.redirected && !self.gfx.contains_key(&e.window) {
                     self.acquire_gfx(e.window);
                 }
-                self.refresh_opacity(e.window);
+                // Fade the newly-mapped window in from transparent to its opacity.
+                let o = self.read_opacity(e.window);
+                self.windows.fade_in(e.window, o, FADE_DURATION);
+                self.ensure_frame_timer();
                 self.dirty = true;
             }
             Event::UnmapNotify(e) => {
@@ -407,8 +471,11 @@ impl App {
                 // Only _NET_WM_WINDOW_OPACITY concerns us; a Delete (property
                 // removed) reads back as absent → refresh restores full opacity.
                 if self.x.atom("_NET_WM_WINDOW_OPACITY").is_ok_and(|a| a == e.atom) {
-                    tracing::debug!(window = e.window, "opacity property changed");
-                    self.refresh_opacity(e.window);
+                    let o = self.read_opacity(e.window);
+                    tracing::debug!(window = e.window, opacity = o, "opacity property changed");
+                    self.windows.retarget_opacity(e.window, o, FADE_DURATION);
+                    self.ensure_frame_timer();
+                    self.dirty = true;
                 }
             }
             Event::DamageNotify(e) => {
