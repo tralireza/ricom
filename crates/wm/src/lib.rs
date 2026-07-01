@@ -9,6 +9,9 @@
 
 use std::collections::HashMap;
 
+pub mod anim;
+use anim::Fade;
+
 /// An X window id.
 pub type WindowId = u32;
 
@@ -29,9 +32,9 @@ pub struct Win {
     pub border_width: u16,
     pub override_redirect: bool,
     pub map_state: MapState,
-    /// Whole-window opacity, `0.0..=1.0` (from `_NET_WM_WINDOW_OPACITY`).
-    /// `1.0` = fully opaque (the default when the property is absent).
-    pub opacity: f64,
+    /// Animated whole-window opacity. `fade.current()` is what to display now;
+    /// `fade.target()` is the goal (from `_NET_WM_WINDOW_OPACITY`, default 1.0).
+    pub fade: Fade,
 }
 
 impl Win {
@@ -55,7 +58,7 @@ impl Win {
             border_width,
             override_redirect,
             map_state: if mapped { MapState::Mapped } else { MapState::Unmapped },
-            opacity: 1.0,
+            fade: Fade::settled(1.0),
         }
     }
 
@@ -124,11 +127,40 @@ impl WindowStack {
         }
     }
 
-    /// Set a window's whole-window opacity (`0.0..=1.0`); no-op if untracked.
-    pub fn set_opacity(&mut self, id: WindowId, opacity: f64) {
+    /// Set a window's opacity immediately, no fade (already-visible windows at
+    /// startup, or an unmapped window's initial value). No-op if untracked.
+    pub fn set_opacity_settled(&mut self, id: WindowId, opacity: f64) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.opacity = opacity;
+            w.fade = Fade::settled(opacity);
         }
+    }
+
+    /// Begin fading a window in from fully transparent to `target` over
+    /// `duration` seconds (a window just mapped). No-op if untracked.
+    pub fn fade_in(&mut self, id: WindowId, target: f64, duration: f64) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.fade = Fade::animating(0.0, target, duration);
+        }
+    }
+
+    /// Ease a window toward a new opacity from its current displayed value
+    /// (a live `_NET_WM_WINDOW_OPACITY` change). No-op if untracked.
+    pub fn retarget_opacity(&mut self, id: WindowId, target: f64, duration: f64) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.fade.retarget(target, duration);
+        }
+    }
+
+    /// Advance every window's fade by `dt` seconds; returns whether any window
+    /// is still animating (i.e. the frame clock should keep running).
+    pub fn advance_fades(&mut self, dt: f64) -> bool {
+        let mut animating = false;
+        for w in self.wins.values_mut() {
+            if w.fade.advance(dt) {
+                animating = true;
+            }
+        }
+        animating
     }
 
     /// Update geometry and restack relative to `above` (the sibling this window
@@ -251,14 +283,29 @@ mod tests {
     }
 
     #[test]
-    fn opacity_defaults_opaque_and_updates() {
+    fn opacity_defaults_opaque_and_settles() {
         let mut s = WindowStack::new();
         s.add_top(win(1, true));
-        assert_eq!(s.get(1).unwrap().opacity, 1.0); // default: fully opaque
-        s.set_opacity(1, 0.5);
-        assert_eq!(s.get(1).unwrap().opacity, 0.5);
-        s.set_opacity(99, 0.25); // untracked id -> no-op, no panic
+        assert_eq!(s.get(1).unwrap().fade.current(), 1.0); // default: fully opaque
+        s.set_opacity_settled(1, 0.5);
+        assert_eq!(s.get(1).unwrap().fade.current(), 0.5);
+        assert!(!s.get(1).unwrap().fade.is_animating());
+        s.set_opacity_settled(99, 0.25); // untracked id -> no-op, no panic
         assert!(s.get(99).is_none());
+    }
+
+    #[test]
+    fn fade_in_animates_then_settles() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        s.fade_in(1, 1.0, 0.2);
+        assert_eq!(s.get(1).unwrap().fade.current(), 0.0); // starts transparent
+        assert!(s.get(1).unwrap().fade.is_animating());
+        assert!(s.advance_fades(0.1)); // still going
+        let mid = s.get(1).unwrap().fade.current();
+        assert!(mid > 0.0 && mid < 1.0);
+        assert!(!s.advance_fades(0.2)); // past the end -> settled
+        assert_eq!(s.get(1).unwrap().fade.current(), 1.0);
     }
 
     #[test]
