@@ -33,6 +33,7 @@ fn render_params(cfg: &Config) -> RenderParams {
         shadow_radius: cfg.shadow.radius,
         shadow_strength: cfg.shadow.strength,
         background: cfg.background,
+        corner_radius: cfg.corner_radius,
     }
 }
 

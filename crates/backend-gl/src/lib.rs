@@ -36,10 +36,24 @@ const BLIT_FS: &str = r#"#version 330 core
 in vec2 v_tex;
 uniform sampler2D u_tex;
 uniform float u_opacity;              // whole-window opacity, 0..1
+uniform vec4 u_rect;                  // window rect x,y,w,h (px) — shared with the vertex shader
+uniform float u_corner;              // corner radius (px); 0 = square
 out vec4 frag;
 // Premultiplied-alpha output: paired with glBlendFunc(ONE, ONE_MINUS_SRC_ALPHA)
 // over an opaque clear this yields  dst = rgb*a + dst*(1-a)  — straight "over".
-void main() { frag = vec4(texture(u_tex, v_tex).rgb * u_opacity, u_opacity); }
+void main() {
+    float a = u_opacity;
+    if (u_corner > 0.0) {
+        // Rounded-box mask: fade alpha to 0 outside the rounded rectangle so the
+        // corners reveal what's beneath. `d` is the signed distance outside it.
+        vec2 hs = u_rect.zw * 0.5;
+        float r = min(u_corner, min(hs.x, hs.y));
+        vec2 p = abs(v_tex * u_rect.zw - hs);
+        float d = length(max(p - (hs - r), vec2(0.0))) - r;
+        a *= 1.0 - smoothstep(-0.5, 0.5, d);   // ~1px antialiased edge
+    }
+    frag = vec4(texture(u_tex, v_tex).rgb * a, a);
+}
 "#;
 
 /// Soft drop-shadow fragment shader (reuses [`BLIT_VS`], so it also has `u_rect`
@@ -52,24 +66,34 @@ in vec2 v_tex;
 uniform vec4 u_rect;     // shadow quad: x, y, w, h  (px, top-left origin)
 uniform vec4 u_inner;    // caster window rect: x, y, w, h  (px)
 uniform vec2 u_shadow;   // x = radius (falloff px), y = strength (max alpha)
+uniform float u_scorner; // window corner radius (px) — match the blit's rounding
 out vec4 frag;
 void main() {
     vec2 p  = u_rect.xy + v_tex * u_rect.zw;   // fragment pixel position
     vec2 lo = u_inner.xy;
     vec2 hi = u_inner.xy + u_inner.zw;
-    float r = u_shadow.x;
+    float r  = u_shadow.x;
+    float cr = min(u_scorner, min(u_inner.z, u_inner.w) * 0.5); // clamped corner radius
+    float t  = max(cr, r); // where a band ends at the top-left / bottom-right:
+                           // the corner bend when rounded, else a soft taper by r
     float dist = 1e9;
-    // Distance to the left edge segment, shortened at the top by r, cast only
-    // to the left — so the band rounds off before the top-left corner.
+    // Left edge segment: ends at the top-left corner bend and at the bottom-left
+    // arc — cast only to the left.
     if (p.x <= lo.x) {
-        float cy = clamp(p.y, lo.y + r, hi.y);
+        float cy = clamp(p.y, lo.y + t, hi.y - cr);
         dist = min(dist, length(vec2(lo.x - p.x, p.y - cy)));
     }
-    // Distance to the bottom edge segment, shortened at the right by r, cast
-    // only below — so the band rounds off before the bottom-right corner.
+    // Bottom edge segment: starts after the bottom-left arc, ends at the
+    // bottom-right corner bend — cast only below.
     if (p.y >= hi.y) {
-        float cx = clamp(p.x, lo.x, hi.x - r);
+        float cx = clamp(p.x, lo.x + cr, hi.x - t);
         dist = min(dist, length(vec2(p.x - cx, p.y - hi.y)));
+    }
+    // Bottom-left corner: hug the window's rounded corner (arc of radius cr),
+    // so the shadow follows it instead of the square corner.
+    vec2 cc = vec2(lo.x + cr, hi.y - cr);
+    if (p.x <= cc.x && p.y >= cc.y) {
+        dist = min(dist, max(length(p - cc) - cr, 0.0));
     }
     float a = u_shadow.y * (1.0 - smoothstep(0.0, r, dist));
     frag = vec4(0.0, 0.0, 0.0, a);
@@ -87,11 +111,18 @@ pub struct RenderParams {
     pub shadow_strength: f32,
     /// Composite background colour (RGB), shown where no window covers.
     pub background: [f32; 3],
+    /// Window corner radius (px); `0.0` = square.
+    pub corner_radius: f32,
 }
 
 impl Default for RenderParams {
     fn default() -> Self {
-        RenderParams { shadow_radius: 12.0, shadow_strength: 0.45, background: [0.05, 0.05, 0.07] }
+        RenderParams {
+            shadow_radius: 12.0,
+            shadow_strength: 0.45,
+            background: [0.05, 0.05, 0.07],
+            corner_radius: 0.0,
+        }
     }
 }
 
@@ -233,12 +264,14 @@ pub struct GlBackend {
     u_screen: Option<glow::NativeUniformLocation>,
     u_tex: Option<glow::NativeUniformLocation>,
     u_opacity: Option<glow::NativeUniformLocation>,
+    u_corner: Option<glow::NativeUniformLocation>,
     // Drop-shadow program (shares the unit-quad VAO and BLIT_VS).
     shadow_program: glow::NativeProgram,
     s_rect: Option<glow::NativeUniformLocation>,
     s_screen: Option<glow::NativeUniformLocation>,
     s_inner: Option<glow::NativeUniformLocation>,
     s_shadow: Option<glow::NativeUniformLocation>,
+    s_corner: Option<glow::NativeUniformLocation>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
 }
@@ -305,7 +338,7 @@ impl GlBackend {
         };
 
         // Blit program + unit-quad VAO.
-        let (program, vao, u_rect, u_screen, u_tex, u_opacity) = unsafe {
+        let (program, vao, u_rect, u_screen, u_tex, u_opacity, u_corner) = unsafe {
             let program = make_program(&gl, BLIT_VS, BLIT_FS)?;
             let vao = gl.create_vertex_array().map_err(|e| anyhow!("vao: {e}"))?;
             gl.bind_vertex_array(Some(vao));
@@ -324,11 +357,12 @@ impl GlBackend {
                 gl.get_uniform_location(program, "u_screen"),
                 gl.get_uniform_location(program, "u_tex"),
                 gl.get_uniform_location(program, "u_opacity"),
+                gl.get_uniform_location(program, "u_corner"),
             )
         };
 
         // Shadow program: same vertex shader (unit quad -> u_rect), shadow FS.
-        let (shadow_program, s_rect, s_screen, s_inner, s_shadow) = unsafe {
+        let (shadow_program, s_rect, s_screen, s_inner, s_shadow, s_corner) = unsafe {
             let sp = make_program(&gl, BLIT_VS, SHADOW_FS)?;
             (
                 sp,
@@ -336,14 +370,15 @@ impl GlBackend {
                 gl.get_uniform_location(sp, "u_screen"),
                 gl.get_uniform_location(sp, "u_inner"),
                 gl.get_uniform_location(sp, "u_shadow"),
+                gl.get_uniform_location(sp, "u_scorner"),
             )
         };
         tracing::info!(%renderer, window, "GL window backend ready (blit + shadow programs loaded)");
 
         Ok(GlBackend {
             xlib, xdisplay, egl, display, surface, context, gl,
-            program, vao, u_rect, u_screen, u_tex, u_opacity,
-            shadow_program, s_rect, s_screen, s_inner, s_shadow, image_target, render,
+            program, vao, u_rect, u_screen, u_tex, u_opacity, u_corner,
+            shadow_program, s_rect, s_screen, s_inner, s_shadow, s_corner, image_target, render,
         })
     }
 
@@ -404,6 +439,7 @@ impl GlBackend {
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
             self.gl.uniform_1_f32(self.u_opacity.as_ref(), 1.0);
+            self.gl.uniform_1_f32(self.u_corner.as_ref(), 0.0);
             self.gl.bind_vertex_array(Some(self.vao));
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
             self.gl.bind_vertex_array(None);
@@ -428,7 +464,7 @@ impl GlBackend {
     /// its opacity, present once. Items that fail to bind are skipped.
     pub fn present_windows(&self, items: &[Quad], screen_w: i32, screen_h: i32) -> Result<()> {
         tracing::trace!(items = items.len(), screen_w, screen_h, "present");
-        let RenderParams { shadow_radius, shadow_strength, background } = self.render;
+        let RenderParams { shadow_radius, shadow_strength, background, corner_radius } = self.render;
         unsafe {
             self.gl.viewport(0, 0, screen_w, screen_h);
             self.gl.clear_color(background[0], background[1], background[2], 1.0);
@@ -443,10 +479,12 @@ impl GlBackend {
             self.gl.use_program(Some(self.shadow_program));
             self.gl.uniform_2_f32(self.s_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_2_f32(self.s_shadow.as_ref(), shadow_radius, shadow_strength);
+            self.gl.uniform_1_f32(self.s_corner.as_ref(), corner_radius);
             // Blit program's per-frame constants.
             self.gl.use_program(Some(self.program));
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
+            self.gl.uniform_1_f32(self.u_corner.as_ref(), corner_radius);
         }
         for &Quad { pixmap, x, y, w, h, opacity, shadow } in items {
             // Drop shadow first, so the window is drawn on top of its own shadow

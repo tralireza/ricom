@@ -19,6 +19,8 @@ pub struct Config {
     pub unredir: bool,
     /// Composite background colour (RGB, `0.0..=1.0`), seen where no window covers.
     pub background: [f32; 3],
+    /// Window corner radius in px. `0.0` (default) = square corners.
+    pub corner_radius: f32,
     pub fade: Fade,
     pub shadow: Shadow,
 }
@@ -50,6 +52,7 @@ impl Default for Config {
         Config {
             unredir: true,
             background: [0.05, 0.05, 0.07],
+            corner_radius: 0.0,
             fade: Fade::default(),
             shadow: Shadow::default(),
         }
@@ -115,6 +118,7 @@ mod tests {
         let c = Config::default();
         assert!(c.unredir);
         assert_eq!(c.background, [0.05, 0.05, 0.07]);
+        assert_eq!(c.corner_radius, 0.0);
         assert_eq!((c.fade.enabled, c.fade.duration), (true, 0.2));
         assert_eq!(
             (c.shadow.enabled, c.shadow.radius, c.shadow.strength, c.shadow.min_size),
@@ -127,6 +131,7 @@ mod tests {
         let t = r#"
 unredir = false
 background = [0.1, 0.2, 0.3]
+corner_radius = 8.0
 [fade]
 enabled = false
 duration = 0.4
@@ -139,6 +144,7 @@ min_size = 40
         let c: Config = toml::from_str(t).unwrap();
         assert!(!c.unredir);
         assert_eq!(c.background, [0.1, 0.2, 0.3]);
+        assert_eq!(c.corner_radius, 8.0);
         assert_eq!((c.fade.enabled, c.fade.duration), (false, 0.4));
         assert_eq!((c.shadow.radius, c.shadow.min_size), (30.0, 40));
     }

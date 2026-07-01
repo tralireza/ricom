@@ -163,6 +163,7 @@ ricom)`** to reload live — no restart. Every key is optional and falls back to
 ```toml
 unredir = true                  # false = always composite, even a lone fullscreen window
 background = [0.05, 0.05, 0.07]  # composite background colour (RGB, seen where no window covers)
+corner_radius = 0.0             # window corner radius in px (0 = square)
 
 [fade]
 enabled = true
