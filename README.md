@@ -6,6 +6,12 @@ A small **X11 compositor written in Rust** — a from-scratch reimplementation o
 `ricom` redirects the screen and composites all windows onto the X composite overlay using
 **OpenGL via EGL** (texture-from-pixmap), presenting tear-free with vsync.
 
+## Screenshots
+
+![ricom compositing — per-window opacity, fades, and drop shadows](screenshots/ricom.png)
+
+*Per-window opacity, fade in/out, and left+bottom drop shadows — composited tear-free.*
+
 ## Status — MVP (compositing core)
 
 Working today:
