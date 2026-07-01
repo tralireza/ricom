@@ -118,6 +118,15 @@ impl App {
             })
             .map_err(|e| anyhow::anyhow!("insert X source: {e}"))?;
 
+        // Prime the pump: setup already flushed, which may have buffered events
+        // inside x11rb that will never re-trigger the fd watch. Drain them (and
+        // repaint) before blocking so we don't start out stalled.
+        self.drain_x_events();
+        if self.dirty {
+            self.composite();
+            self.dirty = false;
+        }
+
         event_loop.run(None, self, |_app| {}).context("event loop")?;
         Ok(())
     }
@@ -287,18 +296,38 @@ impl App {
         tracing::info!("unredirected — fullscreen bypass");
     }
 
+    /// Drain all pending X events and flush our replies/requests.
+    ///
+    /// x11rb's `flush()` itself does a non-blocking socket read and enqueues any
+    /// newly-arrived events into its *internal* queue. So a naive
+    /// "drain-until-empty, then flush once" strands the events that flush just
+    /// read: the OS socket is now empty, calloop's fd watch never signals again,
+    /// and those events (e.g. a DamageNotify) sit unprocessed until unrelated
+    /// socket traffic happens to wake us. That is the video-freeze bug — a
+    /// DRI3/GL client produces little fresh socket traffic after redirect, so
+    /// the loop stalls. Loop flush+drain until a whole pass yields nothing, so
+    /// no event is ever left buffered and every queued request is sent.
     fn drain_x_events(&mut self) {
         loop {
-            match self.x.conn.poll_for_event() {
-                Ok(Some(ev)) => self.handle_event(ev),
-                Ok(None) => break,
-                Err(e) => {
-                    tracing::error!("X connection error: {e}");
-                    break;
+            let _ = self.x.flush();
+            let mut progressed = false;
+            loop {
+                match self.x.conn.poll_for_event() {
+                    Ok(Some(ev)) => {
+                        self.handle_event(ev);
+                        progressed = true;
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::error!("X connection error: {e}");
+                        return;
+                    }
                 }
             }
+            if !progressed {
+                break;
+            }
         }
-        let _ = self.x.flush();
     }
 
     fn handle_event(&mut self, ev: Event) {
