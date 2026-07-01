@@ -29,9 +29,13 @@ pub struct Win {
     pub border_width: u16,
     pub override_redirect: bool,
     pub map_state: MapState,
+    /// Whole-window opacity, `0.0..=1.0` (from `_NET_WM_WINDOW_OPACITY`).
+    /// `1.0` = fully opaque (the default when the property is absent).
+    pub opacity: f64,
 }
 
 impl Win {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: WindowId,
         x: i16,
@@ -51,6 +55,7 @@ impl Win {
             border_width,
             override_redirect,
             map_state: if mapped { MapState::Mapped } else { MapState::Unmapped },
+            opacity: 1.0,
         }
     }
 
@@ -119,8 +124,16 @@ impl WindowStack {
         }
     }
 
+    /// Set a window's whole-window opacity (`0.0..=1.0`); no-op if untracked.
+    pub fn set_opacity(&mut self, id: WindowId, opacity: f64) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.opacity = opacity;
+        }
+    }
+
     /// Update geometry and restack relative to `above` (the sibling this window
     /// is now directly on top of; `None` means bottom of the stack).
+    #[allow(clippy::too_many_arguments)]
     pub fn configure(
         &mut self,
         id: WindowId,
@@ -235,6 +248,17 @@ mod tests {
         // restack 3 to bottom
         s.configure(3, 0, 0, 100, 100, 0, None);
         assert_eq!(order(&s), vec![3, 2, 1]);
+    }
+
+    #[test]
+    fn opacity_defaults_opaque_and_updates() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        assert_eq!(s.get(1).unwrap().opacity, 1.0); // default: fully opaque
+        s.set_opacity(1, 0.5);
+        assert_eq!(s.get(1).unwrap().opacity, 0.5);
+        s.set_opacity(99, 0.25); // untracked id -> no-op, no panic
+        assert!(s.get(99).is_none());
     }
 
     #[test]
