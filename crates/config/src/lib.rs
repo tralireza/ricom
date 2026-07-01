@@ -96,6 +96,29 @@ impl Config {
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).unwrap_or_else(|e| format!("# serialise error: {e}\n"))
     }
+
+    /// Field-by-field changes from `prev` to `self`, as `"field old→new"` strings
+    /// (empty if identical). Used to report what a reload actually changed.
+    pub fn diff(&self, prev: &Config) -> Vec<String> {
+        let mut out = Vec::new();
+        macro_rules! chg {
+            ($label:expr, $old:expr, $new:expr) => {
+                if $old != $new {
+                    out.push(format!("{} {:?}→{:?}", $label, $old, $new));
+                }
+            };
+        }
+        chg!("unredir", prev.unredir, self.unredir);
+        chg!("background", prev.background, self.background);
+        chg!("corner_radius", prev.corner_radius, self.corner_radius);
+        chg!("fade.enabled", prev.fade.enabled, self.fade.enabled);
+        chg!("fade.duration", prev.fade.duration, self.fade.duration);
+        chg!("shadow.enabled", prev.shadow.enabled, self.shadow.enabled);
+        chg!("shadow.radius", prev.shadow.radius, self.shadow.radius);
+        chg!("shadow.strength", prev.shadow.strength, self.shadow.strength);
+        chg!("shadow.min_size", prev.shadow.min_size, self.shadow.min_size);
+        out
+    }
 }
 
 /// Default config path: `$XDG_CONFIG_HOME/ricom/ricom.toml`, else
@@ -168,6 +191,19 @@ min_size = 40
     #[test]
     fn wrong_type_errors() {
         assert!(toml::from_str::<Config>("unredir = \"yes\"\n").is_err());
+    }
+
+    #[test]
+    fn diff_reports_changed_fields_only() {
+        let a = Config::default();
+        assert!(a.diff(&a).is_empty()); // identical -> no changes
+        let mut b = Config::default();
+        b.shadow.radius = 30.0;
+        b.unredir = false;
+        let d = b.diff(&a);
+        assert_eq!(d.len(), 2);
+        assert!(d.iter().any(|s| s.contains("shadow.radius") && s.contains("30.0")));
+        assert!(d.iter().any(|s| s.contains("unredir") && s.contains("false")));
     }
 
     #[test]

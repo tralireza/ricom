@@ -112,7 +112,18 @@ impl App {
     fn reload_config(&mut self) {
         match Config::load(self.config_path.as_deref()) {
             Ok(cfg) => {
-                tracing::info!("config reloaded");
+                let source = self
+                    .config_path
+                    .clone()
+                    .or_else(config::default_path)
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "defaults".to_string());
+                let changes = cfg.diff(&self.config);
+                if changes.is_empty() {
+                    tracing::info!(%source, "config reloaded — no changes");
+                } else {
+                    tracing::info!(%source, changes = %changes.join(", "), "config reloaded");
+                }
                 self.config = cfg;
                 if let Some(b) = self.backend.as_mut() {
                     b.set_render_params(render_params(&self.config));
