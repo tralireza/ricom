@@ -260,6 +260,18 @@ impl XConn {
         Ok(())
     }
 
+    /// Map / unmap a window — used to show/hide the composite overlay when
+    /// toggling redirection for fullscreen bypass (picom's redir_start/stop).
+    pub fn map_window(&self, win: Window) -> Result<()> {
+        self.conn.map_window(win).context("map_window")?;
+        Ok(())
+    }
+
+    pub fn unmap_window(&self, win: Window) -> Result<()> {
+        self.conn.unmap_window(win).context("unmap_window")?;
+        Ok(())
+    }
+
     /// The X visual id a window was created with.
     pub fn window_visual(&self, win: Window) -> Result<u32> {
         let attr = self.conn.get_window_attributes(win)?.reply()?;

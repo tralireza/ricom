@@ -38,6 +38,10 @@ pub struct App {
     backend: Option<GlBackend>,
     gfx: HashMap<WindowId, WinGfx>,
     dirty: bool,
+    /// Whether the screen is redirected (i.e. we are compositing). When false we
+    /// have unredirected + unmapped the overlay so a fullscreen window bypasses
+    /// the compositor (unredir-if-possible).
+    redirected: bool,
 }
 
 impl App {
@@ -52,6 +56,7 @@ impl App {
             backend: None,
             gfx: HashMap::new(),
             dirty: true,
+            redirected: false,
         })
     }
 
@@ -66,6 +71,7 @@ impl App {
         self.x.overlay_input_passthrough(self.overlay)?;
         let visual = self.x.window_visual(self.overlay)?;
         self.x.redirect_subwindows()?;
+        self.redirected = true;
         self.backend = Some(GlBackend::new(self.overlay, visual)?);
 
         // Seed the stack + per-window resources from the current tree.
@@ -80,10 +86,13 @@ impl App {
                 self.acquire_gfx(w.window);
             }
         }
+        // A window may already be fullscreen at startup — pick the redirect state now.
+        self.update_redirection();
         self.x.flush()?;
         self.composite();
         tracing::info!(
             mapped = self.windows.mapped_count(),
+            redirected = self.redirected,
             "ricom compositing (Ctrl-C to quit)"
         );
 
@@ -149,6 +158,11 @@ impl App {
 
     /// Composite the mapped window stack (bottom-to-top) onto the overlay.
     fn composite(&self) {
+        // Nothing to paint while unredirected: the overlay is unmapped and the
+        // fullscreen window draws straight to the screen.
+        if !self.redirected {
+            return;
+        }
         let Some(backend) = self.backend.as_ref() else {
             return;
         };
@@ -171,6 +185,83 @@ impl App {
         if let Err(e) = backend.present_windows(&items, self.x.root_width as i32, self.x.root_height as i32) {
             tracing::error!("composite failed: {e}");
         }
+    }
+
+    /// unredir-if-possible: should the screen be unredirected? True when the
+    /// topmost mapped window covers the whole screen (a fullscreen app such as
+    /// mpv) — it can then page-flip directly and bypass the compositor. If the
+    /// topmost window is small (e.g. a corner overlay) this is false, so we keep
+    /// compositing — which is exactly the case that would otherwise tear.
+    fn should_unredirect(&self) -> bool {
+        let (rw, rh) = (self.x.root_width as i32, self.x.root_height as i32);
+        let Some(top) = self
+            .windows
+            .mapped_bottom_to_top()
+            .filter(|w| w.id != self.overlay)
+            .last()
+        else {
+            return false;
+        };
+        let bw = top.border_width as i32;
+        let (x, y) = (top.x as i32, top.y as i32);
+        x <= 0
+            && y <= 0
+            && x + top.width as i32 + 2 * bw >= rw
+            && y + top.height as i32 + 2 * bw >= rh
+    }
+
+    /// Re-evaluate the redirect decision and transition if it changed.
+    fn update_redirection(&mut self) {
+        match (self.should_unredirect(), self.redirected) {
+            (true, true) => self.redir_stop(),
+            (false, false) => self.redir_start(),
+            _ => {}
+        }
+    }
+
+    /// Enter compositing: map the overlay, redirect the screen, (re)bind pixmaps.
+    fn redir_start(&mut self) {
+        if self.redirected {
+            return;
+        }
+        let _ = self.x.map_window(self.overlay);
+        if let Err(e) = self.x.redirect_subwindows() {
+            tracing::error!("redirect_subwindows: {e}");
+            let _ = self.x.unmap_window(self.overlay);
+            return;
+        }
+        self.redirected = true;
+        let mapped: Vec<WindowId> = self
+            .windows
+            .mapped_bottom_to_top()
+            .filter(|w| w.id != self.overlay)
+            .map(|w| w.id)
+            .collect();
+        for id in mapped {
+            self.acquire_gfx(id);
+        }
+        let _ = self.x.flush();
+        self.dirty = true;
+        tracing::info!("redirected — compositing");
+    }
+
+    /// Leave compositing: free pixmaps, unredirect the screen, and unmap the
+    /// overlay so the fullscreen window draws straight to the display.
+    fn redir_stop(&mut self) {
+        if !self.redirected {
+            return;
+        }
+        let ids: Vec<WindowId> = self.gfx.keys().copied().collect();
+        for id in ids {
+            self.release_gfx(id);
+        }
+        if let Err(e) = self.x.unredirect_subwindows() {
+            tracing::error!("unredirect_subwindows: {e}");
+        }
+        let _ = self.x.unmap_window(self.overlay);
+        let _ = self.x.flush();
+        self.redirected = false;
+        tracing::info!("unredirected — fullscreen bypass");
     }
 
     fn drain_x_events(&mut self) {
@@ -197,16 +288,21 @@ impl App {
             Event::DestroyNotify(e) => {
                 self.windows.remove(e.window);
                 self.release_gfx(e.window);
+                self.update_redirection();
                 self.dirty = true;
             }
             Event::MapNotify(e) if e.window != self.overlay => {
                 self.windows.set_mapped(e.window, true);
-                self.acquire_gfx(e.window);
+                self.update_redirection();
+                if self.redirected && !self.gfx.contains_key(&e.window) {
+                    self.acquire_gfx(e.window);
+                }
                 self.dirty = true;
             }
             Event::UnmapNotify(e) => {
                 self.windows.set_mapped(e.window, false);
                 self.release_gfx(e.window);
+                self.update_redirection();
                 self.dirty = true;
             }
             Event::ConfigureNotify(e) => {
@@ -217,7 +313,9 @@ impl App {
                     .is_some_and(|w| w.width != e.width || w.height != e.height);
                 self.windows
                     .configure(e.window, e.x, e.y, e.width, e.height, e.border_width, above);
-                if resized && self.gfx.contains_key(&e.window) {
+                // Restack or resize can change which window is topmost/fullscreen.
+                self.update_redirection();
+                if self.redirected && resized && self.gfx.contains_key(&e.window) {
                     self.rebind_pixmap(e.window);
                 }
                 self.dirty = true;
@@ -226,6 +324,7 @@ impl App {
                 if e.parent != self.x.root {
                     self.windows.remove(e.window);
                     self.release_gfx(e.window);
+                    self.update_redirection();
                     self.dirty = true;
                 }
             }
@@ -235,6 +334,7 @@ impl App {
                 } else {
                     self.windows.lower(e.window);
                 }
+                self.update_redirection();
                 self.dirty = true;
             }
             Event::DamageNotify(e) => {
@@ -254,6 +354,8 @@ impl App {
                     self.x.root_width = e.width;
                     self.x.root_height = e.height;
                 }
+                // A new resolution changes the fullscreen threshold — re-decide.
+                self.update_redirection();
                 self.dirty = true;
             }
             _ => {}
