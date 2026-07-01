@@ -185,6 +185,9 @@ impl App {
             let dt = app.last_frame.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
             app.last_frame = Some(now);
             let animating = app.windows.advance_fades(dt);
+            if app.reap_finished_fadeouts() {
+                app.update_redirection(); // a reaped window can change the top window
+            }
             tracing::trace!(dt, animating, "fade tick");
             app.dirty = true; // repaint happens once, in the run callback
             if animating {
@@ -221,6 +224,26 @@ impl App {
         }
     }
 
+    /// Reap windows whose fade-out has completed: free their resources, and drop
+    /// destroyed ones from the stack (keep merely-unmapped ones, cleared). Returns
+    /// whether any were reaped, so the caller can re-check the redirect decision.
+    fn reap_finished_fadeouts(&mut self) -> bool {
+        let finished = self.windows.finished_fadeouts();
+        if finished.is_empty() {
+            return false;
+        }
+        for (id, destroyed) in finished {
+            tracing::debug!(window = id, destroyed, "fade-out complete");
+            self.release_gfx(id);
+            if destroyed {
+                self.windows.remove(id);
+            } else {
+                self.windows.clear_closing(id);
+            }
+        }
+        true
+    }
+
     fn free_gfx(&self, g: WinGfx) {
         if let Some(p) = g.pixmap {
             let _ = self.x.free_pixmap(p);
@@ -243,7 +266,8 @@ impl App {
         }
     }
 
-    /// Composite the mapped window stack (bottom-to-top) onto the overlay.
+    /// Composite the visible window stack (bottom-to-top) onto the overlay —
+    /// mapped windows plus any fading out.
     fn composite(&self) {
         // Nothing to paint while unredirected: the overlay is unmapped and the
         // fullscreen window draws straight to the screen.
@@ -254,7 +278,7 @@ impl App {
             return;
         };
         let mut items: Vec<Quad> = Vec::new();
-        for w in self.windows.mapped_bottom_to_top() {
+        for w in self.windows.visible_bottom_to_top() {
             if w.id == self.overlay {
                 continue;
             }
@@ -403,8 +427,18 @@ impl App {
             }
             Event::DestroyNotify(e) => {
                 tracing::debug!(window = e.window, "destroy");
-                self.windows.remove(e.window);
-                self.release_gfx(e.window);
+                self.windows.set_mapped(e.window, false);
+                // A CompositeNameWindowPixmap pixmap outlives the window, so we can
+                // keep compositing the last frame and fade it out; the window is
+                // reaped from the stack once transparent. Nothing visible -> drop now.
+                if self.gfx.contains_key(&e.window)
+                    && self.windows.begin_fade_out(e.window, FADE_DURATION, true)
+                {
+                    self.ensure_frame_timer();
+                } else {
+                    self.windows.remove(e.window);
+                    self.release_gfx(e.window);
+                }
                 self.update_redirection();
                 self.dirty = true;
             }
@@ -424,7 +458,14 @@ impl App {
             Event::UnmapNotify(e) => {
                 tracing::debug!(window = e.window, "unmap");
                 self.windows.set_mapped(e.window, false);
-                self.release_gfx(e.window);
+                // Fade the last frame out if we have it (keep the pixmap); else drop now.
+                if self.gfx.contains_key(&e.window)
+                    && self.windows.begin_fade_out(e.window, FADE_DURATION, false)
+                {
+                    self.ensure_frame_timer();
+                } else {
+                    self.release_gfx(e.window);
+                }
                 self.update_redirection();
                 self.dirty = true;
             }
