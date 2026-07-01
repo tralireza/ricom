@@ -1,6 +1,6 @@
 # ricom
 
-A small **X11 compositor written in Rust** — a from-scratch reimplementation of the core of
+A **minimalistic X11 compositor written in Rust** — a from-scratch reimplementation of the core of
 [picom](https://github.com/yshui/picom).
 
 `ricom` redirects the screen and composites all windows onto the X composite overlay using
@@ -12,7 +12,7 @@ A small **X11 compositor written in Rust** — a from-scratch reimplementation o
 
 *Per-window opacity, fade in/out, and left+bottom drop shadows — composited tear-free.*
 
-## Status — MVP (compositing core)
+## Status
 
 Working today:
 
@@ -23,19 +23,23 @@ Working today:
 - **GL backend** — an EGL context on the composite overlay, **texture-from-pixmap**
   (`EGLImage` → `glEGLImageTargetTexture2DOES`), a GLSL blit, and `eglSwapBuffers` with
   `swap_interval(1)` for vsync.
-- **Renderer** — composite the mapped window stack back-to-front, **damage-driven** redraw loop.
+- **Renderer** — composite the visible window stack (mapped + fading-out) back-to-front with
+  per-window opacity and drop shadows; **damage-driven**, plus a frame clock while anything animates.
 - **Resolution changes** — follows RandR screen-size changes (`xrandr`) and re-composites at the new size.
 - **unredir-if-possible** — when one window covers the whole screen (e.g. fullscreen video), ricom
   unredirects and steps aside so it page-flips straight to the display (compositor cost → ~0); it drops
   back to compositing the instant a smaller window sits on top (e.g. a corner overlay), so that case
   stays tear-free.
+- **Effects** — **per-window opacity** (`_NET_WM_WINDOW_OPACITY`), **fades** in on map and out on
+  unmap/destroy (200 ms ease-out on a `calloop` frame clock; a closing window's last frame is kept and
+  faded), and soft **left+bottom drop shadows**.
 
-Validated on an Intel HD Graphics 630 (Mesa): tear-free fullscreen + windowed video at 1920×1080@60
-(on par with picom), and 3840×2160@30 with fullscreen bypass.
+Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
+1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented** (beyond the MVP): effects (shadow, fade, blur, rounded corners, dimming),
-the `use-damage` partial-repaint optimisation, animations, a config file, the xrender/glx
-backends, and D-Bus IPC. See [Roadmap](#roadmap).
+**Not yet implemented:** blur, rounded corners, window dimming, the `use-damage` partial-repaint
+optimisation, animations, a config file, and the xrender/glx backends + D-Bus IPC. See
+[Roadmap](#roadmap).
 
 ## How it works
 
@@ -151,11 +155,15 @@ DISPLAY=:0 ./target/release/ricom --blit-test   # composite all windows for 5s
 
 ## Roadmap
 
+Done: per-window opacity, fade in/out, and left+bottom drop shadows.
+
+Next:
+
 1. `use-damage` partial repaint — repaint only damaged regions (biggest win on mostly-static screens).
-2. Effects: shadow, fade, per-window opacity.
-3. Config file.
-4. Blur, rounded corners, window rules.
-5. Animations (picom-style transition scripts).
+2. Config file — make the effect parameters (fade duration, shadow radius/offset/strength, unredir
+   toggle) tunable instead of compile-time constants.
+3. Blur, rounded corners, and window rules.
+4. Animations (picom-style transition scripts).
 
 ## License
 
