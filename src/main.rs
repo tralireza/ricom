@@ -152,13 +152,15 @@ fn composite_windows_test(opacity: f32) -> Result<()> {
                 // Named pixmap includes the border (size w+2bw); geometry x,y is
                 // already the outer corner, so blit AT (x,y) with the bordered size.
                 let bw = w.border_width as i32;
+                let (qw, qh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
                 items.push(Quad {
                     pixmap: pm,
                     x: w.x as i32,
                     y: w.y as i32,
-                    w: w.width as i32 + 2 * bw,
-                    h: w.height as i32 + 2 * bw,
+                    w: qw,
+                    h: qh,
                     opacity,
+                    shadow: qw >= 24 && qh >= 24,
                 });
                 pixmaps.push(pm);
             }

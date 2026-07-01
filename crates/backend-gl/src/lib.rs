@@ -42,8 +42,47 @@ out vec4 frag;
 void main() { frag = vec4(texture(u_tex, v_tex).rgb * u_opacity, u_opacity); }
 "#;
 
+/// Soft drop-shadow fragment shader (reuses [`BLIT_VS`], so it also has `u_rect`
+/// = the shadow quad and `u_screen`). Casts only to the **left** and **bottom**
+/// of the window (light from the top-right), fading off over the radius with a
+/// rounded bottom-left corner. Output is premultiplied black for the same
+/// ONE/ONE_MINUS_SRC_ALPHA blend as the blit.
+const SHADOW_FS: &str = r#"#version 330 core
+in vec2 v_tex;
+uniform vec4 u_rect;     // shadow quad: x, y, w, h  (px, top-left origin)
+uniform vec4 u_inner;    // caster window rect: x, y, w, h  (px)
+uniform vec2 u_shadow;   // x = radius (falloff px), y = strength (max alpha)
+out vec4 frag;
+void main() {
+    vec2 p  = u_rect.xy + v_tex * u_rect.zw;   // fragment pixel position
+    vec2 lo = u_inner.xy;
+    vec2 hi = u_inner.xy + u_inner.zw;
+    float r = u_shadow.x;
+    float dist = 1e9;
+    // Distance to the left edge segment, shortened at the top by r, cast only
+    // to the left — so the band rounds off before the top-left corner.
+    if (p.x <= lo.x) {
+        float cy = clamp(p.y, lo.y + r, hi.y);
+        dist = min(dist, length(vec2(lo.x - p.x, p.y - cy)));
+    }
+    // Distance to the bottom edge segment, shortened at the right by r, cast
+    // only below — so the band rounds off before the bottom-right corner.
+    if (p.y >= hi.y) {
+        float cx = clamp(p.x, lo.x, hi.x - r);
+        dist = min(dist, length(vec2(p.x - cx, p.y - hi.y)));
+    }
+    float a = u_shadow.y * (1.0 - smoothstep(0.0, r, dist));
+    frag = vec4(0.0, 0.0, 0.0, a);
+}
+"#;
+
+/// Drop-shadow parameters (constants for now; config-driven on the roadmap).
+const SHADOW_RADIUS: f32 = 12.0; // falloff distance to the left/bottom (px)
+const SHADOW_STRENGTH: f32 = 0.45; // peak shadow alpha
+
 /// One window to composite: its named pixmap, on-screen rect (top-left origin,
-/// pixels, border included), and whole-window opacity (`0.0..=1.0`).
+/// pixels, border included), whole-window opacity (`0.0..=1.0`), and whether to
+/// draw a drop shadow behind it.
 #[derive(Debug, Clone, Copy)]
 pub struct Quad {
     pub pixmap: u32,
@@ -52,6 +91,7 @@ pub struct Quad {
     pub w: i32,
     pub h: i32,
     pub opacity: f32,
+    pub shadow: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +218,12 @@ pub struct GlBackend {
     u_screen: Option<glow::NativeUniformLocation>,
     u_tex: Option<glow::NativeUniformLocation>,
     u_opacity: Option<glow::NativeUniformLocation>,
+    // Drop-shadow program (shares the unit-quad VAO and BLIT_VS).
+    shadow_program: glow::NativeProgram,
+    s_rect: Option<glow::NativeUniformLocation>,
+    s_screen: Option<glow::NativeUniformLocation>,
+    s_inner: Option<glow::NativeUniformLocation>,
+    s_shadow: Option<glow::NativeUniformLocation>,
     image_target: ImageTargetTexture2DOes,
 }
 
@@ -264,11 +310,24 @@ impl GlBackend {
                 gl.get_uniform_location(program, "u_opacity"),
             )
         };
-        tracing::info!(%renderer, window, "GL window backend ready (blit program loaded)");
+
+        // Shadow program: same vertex shader (unit quad -> u_rect), shadow FS.
+        let (shadow_program, s_rect, s_screen, s_inner, s_shadow) = unsafe {
+            let sp = make_program(&gl, BLIT_VS, SHADOW_FS)?;
+            (
+                sp,
+                gl.get_uniform_location(sp, "u_rect"),
+                gl.get_uniform_location(sp, "u_screen"),
+                gl.get_uniform_location(sp, "u_inner"),
+                gl.get_uniform_location(sp, "u_shadow"),
+            )
+        };
+        tracing::info!(%renderer, window, "GL window backend ready (blit + shadow programs loaded)");
 
         Ok(GlBackend {
             xlib, xdisplay, egl, display, surface, context, gl,
-            program, vao, u_rect, u_screen, u_tex, u_opacity, image_target,
+            program, vao, u_rect, u_screen, u_tex, u_opacity,
+            shadow_program, s_rect, s_screen, s_inner, s_shadow, image_target,
         })
     }
 
@@ -350,17 +409,40 @@ impl GlBackend {
             self.gl.viewport(0, 0, screen_w, screen_h);
             self.gl.clear_color(0.05, 0.05, 0.07, 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
-            // Premultiplied-alpha "over" so per-window opacity blends onto the
-            // (opaque) clear and the windows already drawn beneath.
+            // Premultiplied-alpha "over" so per-window opacity (and the black
+            // shadows) blend onto the clear and the windows already drawn beneath.
             self.gl.enable(glow::BLEND);
             self.gl.blend_func(glow::ONE, glow::ONE_MINUS_SRC_ALPHA);
+            self.gl.active_texture(glow::TEXTURE0);
+            self.gl.bind_vertex_array(Some(self.vao));
+            // Shadow program's per-frame constants.
+            self.gl.use_program(Some(self.shadow_program));
+            self.gl.uniform_2_f32(self.s_screen.as_ref(), screen_w as f32, screen_h as f32);
+            self.gl.uniform_2_f32(self.s_shadow.as_ref(), SHADOW_RADIUS, SHADOW_STRENGTH);
+            // Blit program's per-frame constants.
             self.gl.use_program(Some(self.program));
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
-            self.gl.active_texture(glow::TEXTURE0);
-            self.gl.bind_vertex_array(Some(self.vao));
         }
-        for &Quad { pixmap, x, y, w, h, opacity } in items {
+        for &Quad { pixmap, x, y, w, h, opacity, shadow } in items {
+            // Drop shadow first, so the window is drawn on top of its own shadow
+            // and each window's shadow is cast over whatever is already beneath it.
+            if shadow {
+                let (fx, fy, fw, fh) = (x as f32, y as f32, w as f32, h as f32);
+                unsafe {
+                    self.gl.use_program(Some(self.shadow_program));
+                    // Quad = bounding box of the left+bottom L: extend left and down by the radius.
+                    self.gl.uniform_4_f32(
+                        self.s_rect.as_ref(),
+                        fx - SHADOW_RADIUS,
+                        fy,
+                        fw + SHADOW_RADIUS,
+                        fh + SHADOW_RADIUS,
+                    );
+                    self.gl.uniform_4_f32(self.s_inner.as_ref(), fx, fy, fw, fh);
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+            }
             let buffer =
                 unsafe { egl::ClientBuffer::from_ptr((pixmap as usize) as egl::EGLClientBuffer) };
             let no_ctx = unsafe { egl::Context::from_ptr(egl::NO_CONTEXT) };
@@ -383,6 +465,7 @@ impl GlBackend {
                         continue;
                     }
                 };
+                self.gl.use_program(Some(self.program)); // back to blit (shadow may have switched it)
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
