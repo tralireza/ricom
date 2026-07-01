@@ -32,7 +32,7 @@ Working today:
   stays tear-free.
 - **Effects** — **per-window opacity** (`_NET_WM_WINDOW_OPACITY`), **fades** in on map and out on
   unmap/destroy (200 ms ease-out on a `calloop` frame clock; a closing window's last frame is kept and
-  faded), and soft **left+bottom drop shadows**.
+  faded), soft **left+bottom drop shadows**, and **rounded corners** (shadow follows the corner).
 
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
@@ -180,13 +180,13 @@ See [`ricom.toml.example`](ricom.toml.example).
 
 ## Roadmap
 
-Done: per-window opacity, fade in/out, left+bottom drop shadows, and a TOML config file with
+Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, and a TOML config file with
 live (SIGHUP) reload.
 
 Next:
 
 1. `use-damage` partial repaint — repaint only damaged regions (biggest win on mostly-static screens).
-2. Blur, rounded corners, and window rules.
+2. Blur and window rules.
 3. Animations (picom-style transition scripts).
 
 ## License
