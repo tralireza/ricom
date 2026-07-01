@@ -34,6 +34,9 @@ fn render_params(cfg: &Config) -> RenderParams {
         shadow_strength: cfg.shadow.strength,
         background: cfg.background,
         corner_radius: cfg.corner_radius,
+        blur_enabled: cfg.blur.enabled,
+        blur_passes: cfg.blur.passes,
+        blur_radius: cfg.blur.radius,
     }
 }
 
@@ -369,6 +372,10 @@ impl App {
                         && qw >= self.config.shadow.min_size
                         && qh >= self.config.shadow.min_size
                         && !w.closing,
+                    // Frost the backdrop only for translucent windows (opaque ones
+                    // hide their backdrop). Uses the animated opacity, so a window
+                    // fading toward opaque stops blurring as it solidifies.
+                    blur: self.config.blur.enabled && w.fade.current() < 1.0,
                 });
             }
         }

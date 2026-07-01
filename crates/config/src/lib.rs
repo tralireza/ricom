@@ -23,6 +23,19 @@ pub struct Config {
     pub corner_radius: f32,
     pub fade: Fade,
     pub shadow: Shadow,
+    pub blur: Blur,
+}
+
+/// Background blur behind translucent windows (frosted glass).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Blur {
+    /// Off by default — it's extra GPU work; opt in.
+    pub enabled: bool,
+    /// Dual-Kawase iterations (more = wider/softer blur).
+    pub passes: i32,
+    /// Sample offset per pass (px); scales the blur reach.
+    pub radius: f32,
 }
 
 /// Window fade-in (on map) / fade-out (on unmap/destroy).
@@ -55,7 +68,14 @@ impl Default for Config {
             corner_radius: 0.0,
             fade: Fade::default(),
             shadow: Shadow::default(),
+            blur: Blur::default(),
         }
+    }
+}
+
+impl Default for Blur {
+    fn default() -> Self {
+        Blur { enabled: false, passes: 3, radius: 4.0 }
     }
 }
 
@@ -117,6 +137,9 @@ impl Config {
         chg!("shadow.radius", prev.shadow.radius, self.shadow.radius);
         chg!("shadow.strength", prev.shadow.strength, self.shadow.strength);
         chg!("shadow.min_size", prev.shadow.min_size, self.shadow.min_size);
+        chg!("blur.enabled", prev.blur.enabled, self.blur.enabled);
+        chg!("blur.passes", prev.blur.passes, self.blur.passes);
+        chg!("blur.radius", prev.blur.radius, self.blur.radius);
         out
     }
 }
@@ -147,6 +170,7 @@ mod tests {
             (c.shadow.enabled, c.shadow.radius, c.shadow.strength, c.shadow.min_size),
             (true, 12.0, 0.45, 24)
         );
+        assert_eq!((c.blur.enabled, c.blur.passes, c.blur.radius), (false, 3, 4.0));
     }
 
     #[test]
@@ -163,6 +187,10 @@ enabled = true
 radius = 30.0
 strength = 0.7
 min_size = 40
+[blur]
+enabled = true
+passes = 5
+radius = 6.0
 "#;
         let c: Config = toml::from_str(t).unwrap();
         assert!(!c.unredir);
@@ -170,6 +198,7 @@ min_size = 40
         assert_eq!(c.corner_radius, 8.0);
         assert_eq!((c.fade.enabled, c.fade.duration), (false, 0.4));
         assert_eq!((c.shadow.radius, c.shadow.min_size), (30.0, 40));
+        assert_eq!((c.blur.enabled, c.blur.passes, c.blur.radius), (true, 5, 6.0));
     }
 
     #[test]

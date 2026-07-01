@@ -189,6 +189,7 @@ fn composite_windows_test(opacity: f32) -> Result<()> {
                     h: qh,
                     opacity,
                     shadow: qw >= 24 && qh >= 24,
+                    blur: false, // diagnostic path: blur is a compositor-runtime effect
                 });
                 pixmaps.push(pm);
             }

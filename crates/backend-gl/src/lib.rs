@@ -6,6 +6,7 @@
 //!   bind an X window's pixmap as a GL texture (EGLImage) and draw it. This is
 //!   the heart of compositing; the renderer drives it over the window stack.
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 
 use anyhow::{anyhow, bail, Result};
@@ -100,6 +101,93 @@ void main() {
 }
 "#;
 
+// --- Background blur (dual-Kawase): downsample + upsample pyramid ---------------
+//
+// The backdrop under a translucent window is copied into a full-res FBO texture,
+// then blurred by repeatedly downsampling (5-tap) and upsampling (8-tap) through a
+// half-res pyramid — the standard efficient compositor blur. Both passes render a
+// screen-filling quad, so this vertex shader just maps the 0..1 unit quad straight
+// to NDC and hands the fragment shader a 0..1 UV.
+const BLUR_VS: &str = r#"#version 330 core
+layout(location = 0) in vec2 a_pos;   // unit quad, 0..1
+out vec2 v_uv;
+void main() {
+    v_uv = a_pos;
+    gl_Position = vec4(a_pos * 2.0 - 1.0, 0.0, 1.0);
+}
+"#;
+
+/// Dual-Kawase downsample (5-tap): sample the larger source into the half-size
+/// target. `u_halfpixel` is 0.5/source-size; `u_offset` scales the blur reach.
+const DOWN_FS: &str = r#"#version 330 core
+in vec2 v_uv;
+uniform sampler2D u_src;
+uniform vec2 u_halfpixel;
+uniform float u_offset;
+out vec4 frag;
+void main() {
+    vec2 o = u_halfpixel * u_offset;
+    vec4 s = texture(u_src, v_uv) * 4.0;
+    s += texture(u_src, v_uv - o);
+    s += texture(u_src, v_uv + o);
+    s += texture(u_src, v_uv + vec2(o.x, -o.y));
+    s += texture(u_src, v_uv - vec2(o.x, -o.y));
+    frag = s / 8.0;
+}
+"#;
+
+/// Dual-Kawase upsample (8-tap): sample the smaller source back up into the
+/// larger target. `u_halfpixel` is 0.5/source-size.
+const UP_FS: &str = r#"#version 330 core
+in vec2 v_uv;
+uniform sampler2D u_src;
+uniform vec2 u_halfpixel;
+uniform float u_offset;
+out vec4 frag;
+void main() {
+    vec2 o = u_halfpixel * u_offset;
+    vec4 s = texture(u_src, v_uv + vec2(-o.x * 2.0, 0.0));
+    s += texture(u_src, v_uv + vec2(-o.x, o.y)) * 2.0;
+    s += texture(u_src, v_uv + vec2(0.0, o.y * 2.0));
+    s += texture(u_src, v_uv + vec2(o.x, o.y)) * 2.0;
+    s += texture(u_src, v_uv + vec2(o.x * 2.0, 0.0));
+    s += texture(u_src, v_uv + vec2(o.x, -o.y)) * 2.0;
+    s += texture(u_src, v_uv + vec2(0.0, -o.y * 2.0));
+    s += texture(u_src, v_uv + vec2(-o.x, -o.y)) * 2.0;
+    frag = s / 12.0;
+}
+"#;
+
+/// Draw the blurred backdrop into a window's rect. Reuses [`BLIT_VS`] to position
+/// the quad (so it has `u_rect`/`u_screen`/`v_tex`), but samples the *full-screen*
+/// blurred texture by `gl_FragCoord` — which shares the framebuffer's bottom-left
+/// origin, so no manual Y-flip is needed. Masked to the same rounded rect as the
+/// window and emitted opaque (premultiplied) so the window blends on top.
+const FROST_FS: &str = r#"#version 330 core
+in vec2 v_tex;
+uniform sampler2D u_tex;   // full-screen blurred backdrop
+uniform vec2 u_screen;
+uniform vec4 u_rect;       // window rect x,y,w,h (px) — shared with BLIT_VS
+uniform float u_corner;    // corner radius (px); 0 = square
+out vec4 frag;
+void main() {
+    vec2 uv = gl_FragCoord.xy / u_screen;
+    float a = 1.0;
+    if (u_corner > 0.0) {
+        vec2 hs = u_rect.zw * 0.5;
+        float r = min(u_corner, min(hs.x, hs.y));
+        vec2 p = abs(v_tex * u_rect.zw - hs);
+        float d = length(max(p - (hs - r), vec2(0.0))) - r;
+        a *= 1.0 - smoothstep(-0.5, 0.5, d);
+    }
+    frag = vec4(texture(u_tex, uv).rgb * a, a);
+}
+"#;
+
+/// Number of pyramid levels allocated (level 0 = full res, level i = size >> i).
+/// Bounds the usable `blur.passes` (down/up steps) at `MAX_BLUR_LEVELS - 1`.
+const MAX_BLUR_LEVELS: i32 = 7;
+
 /// Runtime render parameters (from the config file): set when the backend is
 /// created and swapped in on config reload via [`GlBackend::set_render_params`].
 /// Defaults reproduce the previously compiled-in constants.
@@ -113,6 +201,12 @@ pub struct RenderParams {
     pub background: [f32; 3],
     /// Window corner radius (px); `0.0` = square.
     pub corner_radius: f32,
+    /// Background blur on/off (frost the backdrop behind translucent windows).
+    pub blur_enabled: bool,
+    /// Dual-Kawase iterations (down+up steps); clamped to `MAX_BLUR_LEVELS - 1`.
+    pub blur_passes: i32,
+    /// Blur sample offset per pass (px).
+    pub blur_radius: f32,
 }
 
 impl Default for RenderParams {
@@ -122,6 +216,9 @@ impl Default for RenderParams {
             shadow_strength: 0.45,
             background: [0.05, 0.05, 0.07],
             corner_radius: 0.0,
+            blur_enabled: false,
+            blur_passes: 3,
+            blur_radius: 4.0,
         }
     }
 }
@@ -138,6 +235,9 @@ pub struct Quad {
     pub h: i32,
     pub opacity: f32,
     pub shadow: bool,
+    /// Frost the backdrop under this window (set for translucent windows when
+    /// blur is enabled; ignored for opaque windows whose backdrop is hidden).
+    pub blur: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -249,6 +349,23 @@ pub fn first_light() -> Result<GlInfo> {
     Ok(info)
 }
 
+/// One level of the blur pyramid: an FBO with a colour-texture attachment.
+/// Level 0 is full screen resolution; each subsequent level is half the previous.
+struct BlurLevel {
+    fbo: glow::NativeFramebuffer,
+    tex: glow::NativeTexture,
+    w: i32,
+    h: i32,
+}
+
+/// The lazily-built dual-Kawase pyramid, sized to the current screen and rebuilt
+/// (all levels freed + recreated) when the screen resolution changes.
+struct BlurChain {
+    w: i32,
+    h: i32,
+    levels: Vec<BlurLevel>,
+}
+
 /// An EGL/GL context rendering into a target X window (the composite overlay).
 pub struct GlBackend {
     xlib: x11_dl::xlib::Xlib,
@@ -272,6 +389,22 @@ pub struct GlBackend {
     s_inner: Option<glow::NativeUniformLocation>,
     s_shadow: Option<glow::NativeUniformLocation>,
     s_corner: Option<glow::NativeUniformLocation>,
+    // Dual-Kawase blur: down/up programs (share BLUR_VS) + a frost pass (reuses
+    // BLIT_VS), and a lazily-built FBO pyramid (rebuilt on resize).
+    down_program: glow::NativeProgram,
+    d_src: Option<glow::NativeUniformLocation>,
+    d_halfpixel: Option<glow::NativeUniformLocation>,
+    d_offset: Option<glow::NativeUniformLocation>,
+    up_program: glow::NativeProgram,
+    up_src: Option<glow::NativeUniformLocation>,
+    up_halfpixel: Option<glow::NativeUniformLocation>,
+    up_offset: Option<glow::NativeUniformLocation>,
+    frost_program: glow::NativeProgram,
+    f_tex: Option<glow::NativeUniformLocation>,
+    f_screen: Option<glow::NativeUniformLocation>,
+    f_rect: Option<glow::NativeUniformLocation>,
+    f_corner: Option<glow::NativeUniformLocation>,
+    blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
 }
@@ -373,12 +506,48 @@ impl GlBackend {
                 gl.get_uniform_location(sp, "u_scorner"),
             )
         };
-        tracing::info!(%renderer, window, "GL window backend ready (blit + shadow programs loaded)");
+
+        // Blur programs: dual-Kawase down/up (share BLUR_VS) + a frost pass that
+        // reuses BLIT_VS to place the blurred backdrop under a translucent window.
+        let (down_program, d_src, d_halfpixel, d_offset) = unsafe {
+            let p = make_program(&gl, BLUR_VS, DOWN_FS)?;
+            (
+                p,
+                gl.get_uniform_location(p, "u_src"),
+                gl.get_uniform_location(p, "u_halfpixel"),
+                gl.get_uniform_location(p, "u_offset"),
+            )
+        };
+        let (up_program, up_src, up_halfpixel, up_offset) = unsafe {
+            let p = make_program(&gl, BLUR_VS, UP_FS)?;
+            (
+                p,
+                gl.get_uniform_location(p, "u_src"),
+                gl.get_uniform_location(p, "u_halfpixel"),
+                gl.get_uniform_location(p, "u_offset"),
+            )
+        };
+        let (frost_program, f_tex, f_screen, f_rect, f_corner) = unsafe {
+            let p = make_program(&gl, BLIT_VS, FROST_FS)?;
+            (
+                p,
+                gl.get_uniform_location(p, "u_tex"),
+                gl.get_uniform_location(p, "u_screen"),
+                gl.get_uniform_location(p, "u_rect"),
+                gl.get_uniform_location(p, "u_corner"),
+            )
+        };
+        tracing::info!(%renderer, window, "GL window backend ready (blit + shadow + blur programs loaded)");
 
         Ok(GlBackend {
             xlib, xdisplay, egl, display, surface, context, gl,
             program, vao, u_rect, u_screen, u_tex, u_opacity, u_corner,
-            shadow_program, s_rect, s_screen, s_inner, s_shadow, s_corner, image_target, render,
+            shadow_program, s_rect, s_screen, s_inner, s_shadow, s_corner,
+            down_program, d_src, d_halfpixel, d_offset,
+            up_program, up_src, up_halfpixel, up_offset,
+            frost_program, f_tex, f_screen, f_rect, f_corner,
+            blur: RefCell::new(None),
+            image_target, render,
         })
     }
 
@@ -460,11 +629,131 @@ impl GlBackend {
         Ok(())
     }
 
+    /// Ensure the blur pyramid exists and matches the screen size, rebuilding it
+    /// (freeing old GL objects) on a resolution change. Each level is a
+    /// colour-texture FBO: level 0 is full res, each subsequent level half.
+    fn ensure_blur_chain(&self, sw: i32, sh: i32) {
+        // Already sized to this screen? (Avoid a let-chain — the deploy target's
+        // stable rustc rejects them.)
+        let up_to_date =
+            self.blur.borrow().as_ref().is_some_and(|c| c.w == sw && c.h == sh);
+        if up_to_date {
+            return;
+        }
+        let gl = &self.gl;
+        let mut slot = self.blur.borrow_mut();
+        let mut levels = Vec::with_capacity(MAX_BLUR_LEVELS as usize);
+        unsafe {
+            if let Some(old) = slot.take() {
+                for lvl in old.levels {
+                    gl.delete_framebuffer(lvl.fbo);
+                    gl.delete_texture(lvl.tex);
+                }
+            }
+            for i in 0..MAX_BLUR_LEVELS {
+                let (lw, lh) = ((sw >> i).max(1), (sh >> i).max(1));
+                let tex = match gl.create_texture() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::warn!("blur texture: {e}");
+                        break;
+                    }
+                };
+                gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                gl.tex_image_2d(
+                    glow::TEXTURE_2D, 0, glow::RGBA8 as i32, lw, lh, 0,
+                    glow::RGBA, glow::UNSIGNED_BYTE, glow::PixelUnpackData::Slice(None),
+                );
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
+                gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
+                let fbo = match gl.create_framebuffer() {
+                    Ok(f) => f,
+                    Err(e) => {
+                        gl.delete_texture(tex);
+                        tracing::warn!("blur fbo: {e}");
+                        break;
+                    }
+                };
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(fbo));
+                gl.framebuffer_texture_2d(
+                    glow::FRAMEBUFFER, glow::COLOR_ATTACHMENT0, glow::TEXTURE_2D, Some(tex), 0,
+                );
+                let st = gl.check_framebuffer_status(glow::FRAMEBUFFER);
+                if st != glow::FRAMEBUFFER_COMPLETE {
+                    tracing::warn!("blur FBO level {i} incomplete: 0x{st:04x}");
+                }
+                levels.push(BlurLevel { fbo, tex, w: lw, h: lh });
+            }
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.bind_texture(glow::TEXTURE_2D, None);
+        }
+        tracing::debug!(sw, sh, levels = levels.len(), "blur pyramid (re)built");
+        *slot = Some(BlurChain { w: sw, h: sh, levels });
+    }
+
+    /// Frost the current overlay framebuffer into blur level 0: copy the whole
+    /// composited backdrop, then dual-Kawase down/up `passes` times. Returns the
+    /// blurred level-0 texture (for the frost draw), leaving the default
+    /// framebuffer + full viewport bound and blending re-enabled.
+    fn blur_backdrop(&self, sw: i32, sh: i32, passes: i32, offset: f32) -> Option<glow::NativeTexture> {
+        self.ensure_blur_chain(sw, sh);
+        let slot = self.blur.borrow();
+        let chain = slot.as_ref()?;
+        if chain.levels.len() < 2 {
+            return None;
+        }
+        let passes = passes.clamp(1, chain.levels.len() as i32 - 1) as usize;
+        let gl = &self.gl;
+        unsafe {
+            gl.disable(glow::BLEND);
+            gl.active_texture(glow::TEXTURE0);
+            gl.bind_vertex_array(Some(self.vao));
+
+            // Copy the composited overlay (the backdrop below this window) into level 0.
+            gl.bind_texture(glow::TEXTURE_2D, Some(chain.levels[0].tex));
+            gl.copy_tex_sub_image_2d(glow::TEXTURE_2D, 0, 0, 0, 0, 0, sw, sh);
+
+            // Downsample 0 -> 1 -> ... -> passes.
+            gl.use_program(Some(self.down_program));
+            gl.uniform_1_i32(self.d_src.as_ref(), 0);
+            for i in 0..passes {
+                let (src, dst) = (&chain.levels[i], &chain.levels[i + 1]);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst.fbo));
+                gl.viewport(0, 0, dst.w, dst.h);
+                gl.bind_texture(glow::TEXTURE_2D, Some(src.tex));
+                gl.uniform_2_f32(self.d_halfpixel.as_ref(), 0.5 / src.w as f32, 0.5 / src.h as f32);
+                gl.uniform_1_f32(self.d_offset.as_ref(), offset);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            // Upsample passes -> ... -> 1 -> 0 (blurred result ends up in level 0).
+            gl.use_program(Some(self.up_program));
+            gl.uniform_1_i32(self.up_src.as_ref(), 0);
+            for i in (0..passes).rev() {
+                let (src, dst) = (&chain.levels[i + 1], &chain.levels[i]);
+                gl.bind_framebuffer(glow::FRAMEBUFFER, Some(dst.fbo));
+                gl.viewport(0, 0, dst.w, dst.h);
+                gl.bind_texture(glow::TEXTURE_2D, Some(src.tex));
+                gl.uniform_2_f32(self.up_halfpixel.as_ref(), 0.5 / src.w as f32, 0.5 / src.h as f32);
+                gl.uniform_1_f32(self.up_offset.as_ref(), offset);
+                gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+            }
+            // Restore the overlay's default framebuffer + full viewport for the caller.
+            gl.bind_framebuffer(glow::FRAMEBUFFER, None);
+            gl.viewport(0, 0, sw, sh);
+            gl.enable(glow::BLEND);
+        }
+        Some(chain.levels[0].tex)
+    }
+
     /// Composite a stack of [`Quad`]s: clear once, blit each bottom-to-top with
     /// its opacity, present once. Items that fail to bind are skipped.
     pub fn present_windows(&self, items: &[Quad], screen_w: i32, screen_h: i32) -> Result<()> {
         tracing::trace!(items = items.len(), screen_w, screen_h, "present");
-        let RenderParams { shadow_radius, shadow_strength, background, corner_radius } = self.render;
+        let RenderParams {
+            shadow_radius, shadow_strength, background, corner_radius, blur_passes, blur_radius, ..
+        } = self.render;
         unsafe {
             self.gl.viewport(0, 0, screen_w, screen_h);
             self.gl.clear_color(background[0], background[1], background[2], 1.0);
@@ -486,7 +775,7 @@ impl GlBackend {
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
             self.gl.uniform_1_f32(self.u_corner.as_ref(), corner_radius);
         }
-        for &Quad { pixmap, x, y, w, h, opacity, shadow } in items {
+        for &Quad { pixmap, x, y, w, h, opacity, shadow, blur } in items {
             // Drop shadow first, so the window is drawn on top of its own shadow
             // and each window's shadow is cast over whatever is already beneath it.
             if shadow {
@@ -502,6 +791,25 @@ impl GlBackend {
                         fh + shadow_radius,
                     );
                     self.gl.uniform_4_f32(self.s_inner.as_ref(), fx, fy, fw, fh);
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+            }
+            // Blur next: frost the backdrop beneath this (translucent) window, then
+            // the window blends on top and its transparency reveals the frost.
+            let frost = if blur {
+                self.blur_backdrop(screen_w, screen_h, blur_passes, blur_radius)
+            } else {
+                None
+            };
+            if let Some(btex) = frost {
+                unsafe {
+                    self.gl.use_program(Some(self.frost_program));
+                    self.gl.uniform_2_f32(self.f_screen.as_ref(), screen_w as f32, screen_h as f32);
+                    self.gl.uniform_1_f32(self.f_corner.as_ref(), corner_radius);
+                    self.gl.uniform_1_i32(self.f_tex.as_ref(), 0);
+                    self.gl.active_texture(glow::TEXTURE0);
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(btex));
+                    self.gl.uniform_4_f32(self.f_rect.as_ref(), x as f32, y as f32, w as f32, h as f32);
                     self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 }
             }

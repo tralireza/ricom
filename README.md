@@ -174,6 +174,11 @@ enabled = true
 radius = 12.0                   # left/bottom falloff distance (px)
 strength = 0.45                 # peak shadow alpha
 min_size = 24                   # skip shadows for windows smaller than this (px)
+
+[blur]
+enabled = false                 # frost the backdrop behind translucent windows
+passes = 3                      # dual-Kawase iterations (wider/softer)
+radius = 4.0                    # sample offset per pass (px)
 ```
 
 See [`ricom.toml.example`](ricom.toml.example).
