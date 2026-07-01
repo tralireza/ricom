@@ -60,6 +60,7 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         self.x.become_cm()?;
         self.x.select_root_substructure()?;
+        self.x.select_screen_change()?;
 
         self.overlay = self.x.get_overlay()?;
         self.x.overlay_input_passthrough(self.overlay)?;
@@ -238,6 +239,21 @@ impl App {
             }
             Event::DamageNotify(e) => {
                 let _ = self.x.subtract_damage(e.damage);
+                self.dirty = true;
+            }
+            Event::RandrScreenChangeNotify(e) => {
+                // Screen resized (e.g. xrandr). The composite overlay + EGL surface
+                // track the root automatically; we just refresh the cached size so the
+                // next composite sets the GL viewport + u_screen to the new dimensions.
+                if e.width != self.x.root_width || e.height != self.x.root_height {
+                    tracing::info!(
+                        old_w = self.x.root_width, old_h = self.x.root_height,
+                        new_w = e.width, new_h = e.height,
+                        "root screen size changed"
+                    );
+                    self.x.root_width = e.width;
+                    self.x.root_height = e.height;
+                }
                 self.dirty = true;
             }
             _ => {}

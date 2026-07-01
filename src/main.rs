@@ -3,13 +3,65 @@
 use anyhow::Result;
 use tracing_subscriber::EnvFilter;
 
+const HELP: &str = "\
+ricom — a small X11 compositor (EGL/GL, tear-free vsync)
+
+USAGE:
+    ricom [OPTION]
+
+With no option, ricom runs as the compositor: it becomes the compositing
+manager (_NET_WM_CM_S0), redirects the screen, and composites every window
+onto the X composite overlay until killed (Ctrl-C).
+
+OPTIONS:
+    --gl-check      Headless EGL/GL smoke test: print GPU vendor/renderer/version, exit.
+    --paint-test    Clear the composite overlay to a solid colour for 4s, then exit.
+    --blit-test     Composite all mapped windows onto the overlay for 5s, then exit.
+    -h, --help      Print this help and exit.
+    -V, --version   Print version and exit.
+
+ENVIRONMENT:
+    DISPLAY         X display to connect to (e.g. :0). Required.
+    RUST_LOG        Log level: error|warn|info|debug|trace (default: info).
+
+EXAMPLES:
+    DISPLAY=:0 ricom                   # run as the compositor
+    DISPLAY=:0 ricom --gl-check        # verify EGL/GL works on this GPU
+    RUST_LOG=debug DISPLAY=:0 ricom    # run with debug logging
+    DISPLAY=:0 ricom --blit-test       # one-shot: composite current windows for 5s
+
+Stop any other compositor first (e.g. `pkill -x picom`), since ricom must own
+_NET_WM_CM_S0.
+";
+
 fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
+    // Handle --help / --version first — before logging or any X connection.
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print!("{HELP}");
+        return Ok(());
+    }
+    if args.iter().any(|a| a == "-V" || a == "--version") {
+        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+    // Reject unknown flags so a typo doesn't silently launch the compositor.
+    const FLAGS: &[&str] = &["--gl-check", "--paint-test", "--blit-test"];
+    if let Some(bad) = args[1..]
+        .iter()
+        .find(|a| a.starts_with('-') && !FLAGS.contains(&a.as_str()))
+    {
+        eprintln!("ricom: unknown option '{bad}'\nTry `ricom --help`.");
+        std::process::exit(2);
+    }
+
     // `RUST_LOG=debug ricom` to raise verbosity; defaults to info.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
     // `ricom --gl-check` runs a headless EGL/GL smoke test and exits (no compositor).
-    if std::env::args().any(|a| a == "--gl-check") {
+    if args.iter().any(|a| a == "--gl-check") {
         let info = backend_gl::first_light()?;
         println!("vendor:   {}", info.vendor);
         println!("renderer: {}", info.renderer);
@@ -18,12 +70,12 @@ fn main() -> Result<()> {
     }
 
     // `ricom --paint-test` grabs the composite overlay and clears it to colour via GL.
-    if std::env::args().any(|a| a == "--paint-test") {
+    if args.iter().any(|a| a == "--paint-test") {
         return paint_test();
     }
 
     // `ricom --blit-test` redirects + blits the largest window's pixmap onto the overlay.
-    if std::env::args().any(|a| a == "--blit-test") {
+    if args.iter().any(|a| a == "--blit-test") {
         return blit_test();
     }
 
