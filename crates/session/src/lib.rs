@@ -26,6 +26,10 @@ use xconn::XConn;
 /// Fade duration for map-in and opacity changes (seconds). Config-driven later.
 const FADE_DURATION: f64 = 0.2;
 
+/// Skip drop shadows for windows smaller than this (px) — avoids specks under
+/// tiny override-redirect helper windows (e.g. mpv's 1x1 input windows).
+const SHADOW_MIN_SIZE: i32 = 24;
+
 /// Per-window X resources used for compositing.
 #[derive(Default)]
 struct WinGfx {
@@ -284,13 +288,17 @@ impl App {
             }
             if let Some(pm) = self.gfx.get(&w.id).and_then(|g| g.pixmap) {
                 let bw = w.border_width as i32;
+                let (qw, qh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
                 items.push(Quad {
                     pixmap: pm,
                     x: w.x as i32,
                     y: w.y as i32,
-                    w: w.width as i32 + 2 * bw,
-                    h: w.height as i32 + 2 * bw,
+                    w: qw,
+                    h: qh,
                     opacity: w.fade.current() as f32,
+                    // Drop the shadow the instant a window starts closing, so it
+                    // disappears on close/hide rather than lingering through the fade-out.
+                    shadow: qw >= SHADOW_MIN_SIZE && qh >= SHADOW_MIN_SIZE && !w.closing,
                 });
             }
         }
