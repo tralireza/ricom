@@ -180,6 +180,8 @@ pub struct App {
     hud_corner: HudCorner,
     /// Directional HUD-move hotkeys: `(keycode, modifier_mask, direction)`.
     move_keys: Vec<(u8, u16, Move)>,
+    /// Cached display refresh rate (Hz) for the HUD graph's budget; refreshed on RandR.
+    refresh_hz: f64,
     /// Rolling frame-rate meter, sampled each composite while redirected.
     fps_meter: FpsMeter,
 }
@@ -190,6 +192,7 @@ impl App {
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Result<Self> {
         let x = XConn::connect()?;
         x.setup_extensions()?;
+        let refresh_hz = x.refresh_hz().unwrap_or(60.0);
         Ok(App {
             x,
             windows: WindowStack::new(),
@@ -207,6 +210,7 @@ impl App {
             config_path,
             fps_key: None,
             move_keys: Vec::new(),
+            refresh_hz,
             fps_meter: FpsMeter::new(),
         })
     }
@@ -563,11 +567,10 @@ impl App {
         let hud = if self.show_fps {
             Some(Hud {
                 fps: self.fps_meter.fps(),
-                ms: self.fps_meter.last_ms(),
-                samples: self.fps_meter.samples(),
                 graph: self.config.fps.graph,
                 corner: self.hud_corner,
                 scale: self.config.fps.scale,
+                refresh_hz: self.refresh_hz as f32,
             })
         } else {
             None
@@ -841,6 +844,9 @@ impl App {
                     self.x.root_width = e.width;
                     self.x.root_height = e.height;
                 }
+                // The mode (and thus refresh rate) may have changed — re-read it for
+                // the HUD graph budget, even when the resolution is unchanged.
+                self.refresh_hz = self.x.refresh_hz().unwrap_or(self.refresh_hz);
                 // A new resolution changes the fullscreen threshold — re-decide.
                 self.update_redirection();
                 self.dirty = true;

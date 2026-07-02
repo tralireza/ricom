@@ -265,6 +265,29 @@ impl XConn {
         Ok(())
     }
 
+    /// Current display refresh rate (Hz) from the first enabled CRTC's mode
+    /// (`dot_clock / (htotal * vtotal)`). `None` if RandR reports nothing usable.
+    pub fn refresh_hz(&self) -> Option<f64> {
+        use x11rb::protocol::randr::ConnectionExt as _;
+        let res = self.conn.randr_get_screen_resources_current(self.root).ok()?.reply().ok()?;
+        for &crtc in &res.crtcs {
+            let Ok(cookie) = self.conn.randr_get_crtc_info(crtc, res.config_timestamp) else {
+                continue;
+            };
+            let Ok(info) = cookie.reply() else { continue };
+            if info.mode == 0 {
+                continue; // disabled CRTC
+            }
+            if let Some(m) = res.modes.iter().find(|m| m.id == info.mode) {
+                let total = m.htotal as f64 * m.vtotal as f64;
+                if total > 0.0 {
+                    return Some(m.dot_clock as f64 / total);
+                }
+            }
+        }
+        None
+    }
+
     /// MANUAL-redirect all top-levels. NOTE: after this the server stops drawing
     /// the redirected windows — the compositor must paint or the screen freezes.
     pub fn redirect_subwindows(&self) -> Result<()> {

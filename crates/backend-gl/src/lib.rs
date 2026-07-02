@@ -6,7 +6,8 @@
 //!   bind an X window's pixmap as a GL texture (EGLImage) and draw it. This is
 //!   the heart of compositing; the renderer drives it over the window stack.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::ffi::c_void;
 
 use anyhow::{anyhow, bail, Result};
@@ -22,6 +23,9 @@ type ImageTargetTexture2DOes = unsafe extern "system" fn(target: u32, image: *co
 
 /// `EGL_NATIVE_PIXMAP_KHR` (from EGL_KHR_image_pixmap; not exported by khronos-egl).
 const EGL_NATIVE_PIXMAP_KHR: egl::Enum = 0x30B0;
+
+/// How many recent per-composite render times the HUD graph keeps.
+const HUD_GRAPH_SAMPLES: usize = 120;
 
 const BLIT_VS: &str = r#"#version 330 core
 layout(location = 0) in vec2 a_pos;   // unit quad, 0..1
@@ -260,20 +264,19 @@ pub enum HudCorner {
     BottomRight,
 }
 
-/// One frame's HUD data, drawn by [`GlBackend::present_windows`] when `Some`.
-pub struct Hud<'a> {
-    /// Frames composited in the last second.
+/// One frame's HUD data, drawn by [`GlBackend::present_windows`] when `Some`. The
+/// graph itself is fed by the backend's own GPU render-time samples.
+pub struct Hud {
+    /// Present rate (frames composited in the last second).
     pub fps: u32,
-    /// Most recent frame time (ms).
-    pub ms: f32,
-    /// Recent frame times (ms) for the graph, oldest first.
-    pub samples: &'a [f32],
-    /// Draw the frame-time graph beneath the numbers.
+    /// Draw the render-time graph beneath the numbers.
     pub graph: bool,
     /// Which screen corner to anchor to.
     pub corner: HudCorner,
     /// Extra size multiplier on top of the automatic screen-height scaling.
     pub scale: f32,
+    /// Current display refresh rate (Hz) — one refresh interval is the render budget.
+    pub refresh_hz: f32,
 }
 
 /// Solid-colour fill (HUD panel + graph bars). Reuses `BLIT_VS` (position via
@@ -451,6 +454,14 @@ pub struct GlBackend {
     sol_rect: Option<glow::NativeUniformLocation>,
     sol_screen: Option<glow::NativeUniformLocation>,
     sol_color: Option<glow::NativeUniformLocation>,
+    /// Double-buffered `GL_TIME_ELAPSED` queries for per-composite GPU render time
+    /// (`None` if unsupported). Read two frames later, so reading never stalls.
+    gpu_timers: [Option<glow::NativeQuery>; 2],
+    timer_slot: Cell<usize>,
+    timer_count: Cell<u8>,
+    /// Last measured composite render time (ms) + a ring of recent values (graph).
+    render_ms: Cell<f32>,
+    render_samples: RefCell<VecDeque<f32>>,
 }
 
 impl GlBackend {
@@ -591,6 +602,16 @@ impl GlBackend {
                 gl.get_uniform_location(p, "u_color"),
             )
         };
+        // Double-buffered GPU timer queries for HUD render time (all-or-nothing).
+        let gpu_timers = unsafe {
+            match (gl.create_query(), gl.create_query()) {
+                (Ok(a), Ok(b)) => [Some(a), Some(b)],
+                _ => {
+                    tracing::warn!("GPU timer queries unavailable — HUD render time disabled");
+                    [None, None]
+                }
+            }
+        };
         tracing::info!(%renderer, window, "GL window backend ready (blit + shadow + blur + text + solid programs loaded)");
 
         Ok(GlBackend {
@@ -603,6 +624,11 @@ impl GlBackend {
             blur: RefCell::new(None),
             image_target, render, text,
             solid_program, sol_rect, sol_screen, sol_color,
+            gpu_timers,
+            timer_slot: Cell::new(0),
+            timer_count: Cell::new(0),
+            render_ms: Cell::new(0.0),
+            render_samples: RefCell::new(VecDeque::new()),
         })
     }
 
@@ -819,18 +845,22 @@ impl GlBackend {
     fn draw_hud(&self, hud: &Hud, sw: i32, sh: i32) {
         // Scale the whole HUD with the screen height (1080p = 1×, 4K/2160p = 2×)
         // times the optional config multiplier, so it stays legible at any DPI.
-        // SDF text scales cleanly. `target` is a time budget, so it is not scaled.
+        // SDF text scales cleanly.
         let s = (sh as f32 / 1080.0).max(0.5) * hud.scale;
         let pad = 8.0 * s;
         let margin = 16.0 * s;
         let text_px = 20.0 * s;
-        let target = 1000.0 / 60.0; // vsync budget (ms): graph baseline + colour thresholds
-        let label = format!("{} fps   {:.1} ms", hud.fps, hud.ms);
+        // One refresh interval is the render budget: a composite must finish within
+        // it to hit vsync. Colour by headroom, not by the (content-driven) frame rate.
+        let budget = 1000.0 / hud.refresh_hz.max(1.0);
+        let render_ms = self.render_ms.get();
+        let label = format!("{} fps   {:.1} ms", hud.fps, render_ms);
         let (tw, th) = self.text.measure(text_px, &label);
+        let samples = self.render_samples.borrow();
         let bar_w = 2.0 * s;
         let graph_h = if hud.graph { 34.0 * s } else { 0.0 };
         let graph_gap = if hud.graph { 6.0 * s } else { 0.0 };
-        let graph_w = if hud.graph { (hud.samples.len() as f32 * bar_w).max(tw) } else { 0.0 };
+        let graph_w = if hud.graph { (samples.len() as f32 * bar_w).max(tw) } else { 0.0 };
         let content_w = tw.max(graph_w);
         let panel_w = content_w + pad * 2.0;
         let panel_h = th + graph_gap + graph_h + pad * 2.0;
@@ -842,31 +872,57 @@ impl GlBackend {
         };
         // Panel background.
         self.fill_rect(px, py, panel_w, panel_h, [0.05, 0.05, 0.07, 0.72], sw, sh);
-        // Frame-time graph: one bar per sample, full height at 2× the vsync budget.
-        if hud.graph && !hud.samples.is_empty() {
+        // Render-time graph: one bar per composite, full height = one refresh budget.
+        // Green = plenty of headroom, amber = tight, red = at/over budget (missed vsync).
+        if hud.graph && !samples.is_empty() {
             let gx = px + pad;
             let gy = py + pad + th + graph_gap;
-            for (i, &ms) in hud.samples.iter().enumerate() {
+            for (i, &ms) in samples.iter().enumerate() {
                 let bx = gx + i as f32 * bar_w;
                 if bx + bar_w > gx + content_w {
                     break;
                 }
-                let norm = (ms / (target * 2.0)).clamp(0.0, 1.0);
+                let norm = (ms / budget).clamp(0.0, 1.0);
                 let bh = (norm * graph_h).max(1.0);
-                let col = if ms <= target * 1.1 {
+                let col = if ms <= budget * 0.5 {
                     [0.40, 0.90, 0.50, 0.90]
-                } else if ms <= target * 1.8 {
+                } else if ms <= budget * 0.85 {
                     [0.95, 0.80, 0.30, 0.90]
                 } else {
                     [0.95, 0.40, 0.35, 0.90]
                 };
                 self.fill_rect(bx, gy + (graph_h - bh), (bar_w - 0.5 * s).max(1.0), bh, col, sw, sh);
             }
-            // Baseline line at the vsync budget (norm 0.5 of a 2×-budget scale).
-            self.fill_rect(gx, gy + graph_h * 0.5, content_w, s.max(1.0), [1.0, 1.0, 1.0, 0.22], sw, sh);
+            // Budget ceiling line at the top of the graph (= one refresh interval).
+            self.fill_rect(gx, gy, content_w, s.max(1.0), [1.0, 1.0, 1.0, 0.22], sw, sh);
         }
+        drop(samples);
         // Numbers on top.
         self.text.draw(&self.gl, sw, sh, px + pad, py + pad, text_px, [0.90, 1.0, 0.95, 1.0], &label);
+    }
+
+    /// Read the render-time query that finished ~2 frames ago (so the read never
+    /// stalls the pipeline), and push it to the HUD graph ring. No-op until both
+    /// double-buffered queries have been recorded at least once.
+    fn collect_render_time(&self) {
+        let slot = self.timer_slot.get();
+        let Some(q) = self.gpu_timers[slot] else { return };
+        if self.timer_count.get() < 2 {
+            return; // this slot hasn't been recorded yet
+        }
+        unsafe {
+            if self.gl.get_query_parameter_u32(q, glow::QUERY_RESULT_AVAILABLE) == 0 {
+                return; // not ready (shouldn't happen 2 frames on); keep last value
+            }
+            let ns = self.gl.get_query_parameter_u32(q, glow::QUERY_RESULT);
+            let ms = ns as f32 / 1_000_000.0;
+            self.render_ms.set(ms);
+            let mut ring = self.render_samples.borrow_mut();
+            ring.push_back(ms);
+            while ring.len() > HUD_GRAPH_SAMPLES {
+                ring.pop_front();
+            }
+        }
     }
 
     /// Composite a stack of [`Quad`]s: clear once, blit each bottom-to-top with
@@ -880,10 +936,16 @@ impl GlBackend {
         hud: Option<&Hud>,
     ) -> Result<()> {
         tracing::trace!(items = items.len(), screen_w, screen_h, "present");
+        // Collect the render time measured ~2 frames ago, then time this composite.
+        self.collect_render_time();
+        let timer = self.gpu_timers[self.timer_slot.get()];
         let RenderParams {
             shadow_radius, shadow_strength, background, corner_radius, blur_passes, blur_radius, ..
         } = self.render;
         unsafe {
+            if let Some(q) = timer {
+                self.gl.begin_query(glow::TIME_ELAPSED, q);
+            }
             self.gl.viewport(0, 0, screen_w, screen_h);
             self.gl.clear_color(background[0], background[1], background[2], 1.0);
             self.gl.clear(glow::COLOR_BUFFER_BIT);
@@ -982,7 +1044,17 @@ impl GlBackend {
             self.draw_hud(hud, screen_w, screen_h);
         }
         unsafe {
+            if timer.is_some() {
+                self.gl.end_query(glow::TIME_ELAPSED);
+            }
             self.gl.bind_vertex_array(None);
+        }
+        if timer.is_some() {
+            self.timer_slot.set(1 - self.timer_slot.get());
+            let c = self.timer_count.get();
+            if c < 2 {
+                self.timer_count.set(c + 1);
+            }
         }
         self.egl
             .swap_buffers(self.display, self.surface)
