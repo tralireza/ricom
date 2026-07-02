@@ -47,6 +47,8 @@ Working today:
 - **On-demand FPS HUD** — a global hotkey (`Super+Shift+F` by default) toggles an overlay showing
   FPS, frame-time, and a rolling frame-time graph, drawn with a general **SDF text engine**
   (arbitrary strings, crisp at any size, no runtime font dependency) — ricom's first on-screen text.
+  The hotkey's modifiers + arrow keys move it between corners live, and it auto-scales with resolution
+  (2× at 4K).
 
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
@@ -196,9 +198,10 @@ radius = 4.0                    # sample offset per pass (px)
 
 [fps]
 enabled = false                 # start with the FPS HUD visible (also toggled by the hotkey)
-hotkey = "Super+Shift+F"        # global toggle shortcut (grabbed via XGrabKey)
-corner = "top-right"            # top-left | top-right | bottom-left | bottom-right
+hotkey = "Super+Shift+F"        # toggle shortcut (XGrabKey); its modifiers + arrows move corners live
+corner = "top-right"            # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true                    # rolling frame-time graph under the numbers
+scale = 1.0                     # size multiplier on top of auto screen-height scaling (4K = 2×)
 ```
 
 See [`ricom.toml.example`](ricom.toml.example).

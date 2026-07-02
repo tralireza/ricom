@@ -53,6 +53,9 @@ pub struct Fps {
     pub corner: String,
     /// Draw the rolling frame-time graph beneath the numbers.
     pub graph: bool,
+    /// Extra size multiplier for the HUD, on top of the automatic screen-height
+    /// scaling (`1.0` = auto only; e.g. `1.5` = 1.5× larger).
+    pub scale: f32,
 }
 
 /// Window fade-in (on map) / fade-out (on unmap/destroy).
@@ -104,6 +107,7 @@ impl Default for Fps {
             hotkey: "Super+Shift+F".to_string(),
             corner: "top-right".to_string(),
             graph: true,
+            scale: 1.0,
         }
     }
 }
@@ -173,6 +177,7 @@ impl Config {
         chg!("fps.hotkey", prev.fps.hotkey, self.fps.hotkey);
         chg!("fps.corner", prev.fps.corner, self.fps.corner);
         chg!("fps.graph", prev.fps.graph, self.fps.graph);
+        chg!("fps.scale", prev.fps.scale, self.fps.scale);
         out
     }
 }
@@ -208,6 +213,7 @@ mod tests {
         assert_eq!(c.fps.hotkey, "Super+Shift+F");
         assert_eq!(c.fps.corner, "top-right");
         assert!(c.fps.graph);
+        assert_eq!(c.fps.scale, 1.0);
     }
 
     #[test]
@@ -233,6 +239,7 @@ enabled = true
 hotkey = "Control+Alt+P"
 corner = "bottom-left"
 graph = false
+scale = 2.0
 "#;
         let c: Config = toml::from_str(t).unwrap();
         assert!(!c.unredir);
@@ -245,6 +252,7 @@ graph = false
         assert_eq!(c.fps.hotkey, "Control+Alt+P");
         assert_eq!(c.fps.corner, "bottom-left");
         assert!(!c.fps.graph);
+        assert_eq!(c.fps.scale, 2.0);
     }
 
     #[test]

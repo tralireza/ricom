@@ -30,6 +30,8 @@ radius = 4.0        # sample offset per pass (px)
 
 [fps]
 enabled = false          # start with the on-demand FPS HUD visible (also toggles live via the hotkey)
-hotkey = "Super+Shift+F" # global shortcut to toggle the HUD (grabbed with XGrabKey)
-corner = "top-right"     # top-left | top-right | bottom-left | bottom-right
+hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + arrow keys move it
+                         # between corners live (e.g. Super+Shift+Left)
+corner = "top-right"     # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true             # draw the rolling frame-time graph under the numbers
+scale = 1.0              # size multiplier on top of automatic screen-height scaling (4K = 2x)

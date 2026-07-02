@@ -272,6 +272,8 @@ pub struct Hud<'a> {
     pub graph: bool,
     /// Which screen corner to anchor to.
     pub corner: HudCorner,
+    /// Extra size multiplier on top of the automatic screen-height scaling.
+    pub scale: f32,
 }
 
 /// Solid-colour fill (HUD panel + graph bars). Reuses `BLIT_VS` (position via
@@ -815,15 +817,19 @@ impl GlBackend {
     /// Draw the FPS HUD — a translucent panel, an optional frame-time graph, and
     /// the numbers — anchored to `hud.corner`.
     fn draw_hud(&self, hud: &Hud, sw: i32, sh: i32) {
-        let pad = 8.0f32;
-        let margin = 16.0f32;
-        let text_px = 20.0f32;
+        // Scale the whole HUD with the screen height (1080p = 1×, 4K/2160p = 2×)
+        // times the optional config multiplier, so it stays legible at any DPI.
+        // SDF text scales cleanly. `target` is a time budget, so it is not scaled.
+        let s = (sh as f32 / 1080.0).max(0.5) * hud.scale;
+        let pad = 8.0 * s;
+        let margin = 16.0 * s;
+        let text_px = 20.0 * s;
         let target = 1000.0 / 60.0; // vsync budget (ms): graph baseline + colour thresholds
         let label = format!("{} fps   {:.1} ms", hud.fps, hud.ms);
         let (tw, th) = self.text.measure(text_px, &label);
-        let bar_w = 2.0f32;
-        let graph_h = if hud.graph { 34.0 } else { 0.0 };
-        let graph_gap = if hud.graph { 6.0 } else { 0.0 };
+        let bar_w = 2.0 * s;
+        let graph_h = if hud.graph { 34.0 * s } else { 0.0 };
+        let graph_gap = if hud.graph { 6.0 * s } else { 0.0 };
         let graph_w = if hud.graph { (hud.samples.len() as f32 * bar_w).max(tw) } else { 0.0 };
         let content_w = tw.max(graph_w);
         let panel_w = content_w + pad * 2.0;
@@ -854,10 +860,10 @@ impl GlBackend {
                 } else {
                     [0.95, 0.40, 0.35, 0.90]
                 };
-                self.fill_rect(bx, gy + (graph_h - bh), bar_w - 0.5, bh, col, sw, sh);
+                self.fill_rect(bx, gy + (graph_h - bh), (bar_w - 0.5 * s).max(1.0), bh, col, sw, sh);
             }
             // Baseline line at the vsync budget (norm 0.5 of a 2×-budget scale).
-            self.fill_rect(gx, gy + graph_h * 0.5, content_w, 1.0, [1.0, 1.0, 1.0, 0.22], sw, sh);
+            self.fill_rect(gx, gy + graph_h * 0.5, content_w, s.max(1.0), [1.0, 1.0, 1.0, 0.22], sw, sh);
         }
         // Numbers on top.
         self.text.draw(&self.gl, sw, sh, px + pad, py + pad, text_px, [0.90, 1.0, 0.95, 1.0], &label);

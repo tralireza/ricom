@@ -53,6 +53,39 @@ fn hud_corner(s: &str) -> HudCorner {
     }
 }
 
+/// Direction for the HUD move hotkeys (a modifier + an arrow key).
+#[derive(Clone, Copy)]
+enum Move {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// Move the HUD `corner` one axis toward `dir`, keeping the other — so e.g. `Left`
+/// from top-right lands on top-left, `Down` on bottom-right.
+fn move_corner(corner: HudCorner, dir: Move) -> HudCorner {
+    use HudCorner::*;
+    let (top, left) = match corner {
+        TopLeft => (true, true),
+        TopRight => (true, false),
+        BottomLeft => (false, true),
+        BottomRight => (false, false),
+    };
+    let (top, left) = match dir {
+        Move::Left => (top, true),
+        Move::Right => (top, false),
+        Move::Up => (true, left),
+        Move::Down => (false, left),
+    };
+    match (top, left) {
+        (true, true) => TopLeft,
+        (true, false) => TopRight,
+        (false, true) => BottomLeft,
+        (false, false) => BottomRight,
+    }
+}
+
 /// Per-window X resources used for compositing.
 #[derive(Default)]
 struct WinGfx {
@@ -143,6 +176,10 @@ pub struct App {
     /// The resolved FPS-toggle hotkey as `(keycode, modifier_mask)`, or `None`
     /// when unbound (no/invalid hotkey, or the key isn't on the keyboard).
     fps_key: Option<(u8, u16)>,
+    /// Runtime HUD corner (starts at `config.fps.corner`, moved by the arrow keys).
+    hud_corner: HudCorner,
+    /// Directional HUD-move hotkeys: `(keycode, modifier_mask, direction)`.
+    move_keys: Vec<(u8, u16, Move)>,
     /// Rolling frame-rate meter, sampled each composite while redirected.
     fps_meter: FpsMeter,
 }
@@ -165,9 +202,11 @@ impl App {
             frame_timer: None,
             last_frame: None,
             show_fps: config.fps.enabled,
+            hud_corner: hud_corner(&config.fps.corner),
             config,
             config_path,
             fps_key: None,
+            move_keys: Vec::new(),
             fps_meter: FpsMeter::new(),
         })
     }
@@ -195,29 +234,47 @@ impl App {
                 let _ = self.x.ungrab_key(kc, m);
             }
         }
-        let spec = self.config.fps.hotkey.clone();
-        let Some((mods, keysym)) = hotkey::parse_hotkey(&spec) else {
-            tracing::warn!(hotkey = %spec, "fps: unparseable hotkey — HUD toggle disabled");
-            return;
-        };
-        let keycode = match self.x.keysym_to_keycode(keysym) {
-            Ok(Some(kc)) => kc,
-            Ok(None) => {
-                tracing::warn!(hotkey = %spec, "fps: key not on the keyboard — HUD toggle disabled");
-                return;
-            }
-            Err(e) => {
-                tracing::warn!(hotkey = %spec, "fps: keymap lookup failed: {e}");
-                return;
-            }
-        };
-        for m in variants(mods) {
-            if let Err(e) = self.x.grab_key(keycode, m) {
-                tracing::warn!(hotkey = %spec, "fps: grab_key failed: {e}");
+        for (kc, mods, _) in std::mem::take(&mut self.move_keys) {
+            for m in variants(mods) {
+                let _ = self.x.ungrab_key(kc, m);
             }
         }
-        self.fps_key = Some((keycode, mods));
-        tracing::info!(hotkey = %spec, keycode, mods, "fps: HUD toggle hotkey bound");
+        let spec = self.config.fps.hotkey.clone();
+        let Some((mods, keysym)) = hotkey::parse_hotkey(&spec) else {
+            tracing::warn!(hotkey = %spec, "fps: unparseable hotkey — HUD keys disabled");
+            return;
+        };
+        // Toggle key.
+        match self.x.keysym_to_keycode(keysym) {
+            Ok(Some(kc)) => {
+                for m in variants(mods) {
+                    if let Err(e) = self.x.grab_key(kc, m) {
+                        tracing::warn!(hotkey = %spec, "fps: grab_key failed: {e}");
+                    }
+                }
+                self.fps_key = Some((kc, mods));
+                tracing::info!(hotkey = %spec, keycode = kc, mods, "fps: HUD toggle hotkey bound");
+            }
+            Ok(None) => tracing::warn!(hotkey = %spec, "fps: key not on the keyboard — HUD toggle disabled"),
+            Err(e) => tracing::warn!(hotkey = %spec, "fps: keymap lookup failed: {e}"),
+        }
+        // Directional move keys: the toggle's modifiers + the arrow keys.
+        for (ks, dir) in [
+            (0xFF51u32, Move::Left),
+            (0xFF53u32, Move::Right),
+            (0xFF52u32, Move::Up),
+            (0xFF54u32, Move::Down),
+        ] {
+            if let Ok(Some(kc)) = self.x.keysym_to_keycode(ks) {
+                for m in variants(mods) {
+                    let _ = self.x.grab_key(kc, m);
+                }
+                self.move_keys.push((kc, mods, dir));
+            }
+        }
+        if !self.move_keys.is_empty() {
+            tracing::info!(mods, count = self.move_keys.len(), "fps: HUD move keys bound (modifier + arrows)");
+        }
     }
 
     /// Re-read the config (from the same source) and apply it live. Called on
@@ -240,13 +297,18 @@ impl App {
                     tracing::info!(%source, changes = %changes.join(", "), "config reloaded");
                 }
                 let hotkey_changed = cfg.fps.hotkey != self.config.fps.hotkey;
+                let corner_changed = cfg.fps.corner != self.config.fps.corner;
                 self.config = cfg;
                 if let Some(b) = self.backend.as_mut() {
                     b.set_render_params(render_params(&self.config));
                 }
-                // A changed FPS hotkey: drop the old grab and bind the new combo.
+                // A changed FPS hotkey: drop the old grabs and bind the new combo.
                 if hotkey_changed {
                     self.grab_fps_hotkey();
+                }
+                // A changed config corner repositions the runtime HUD corner.
+                if corner_changed {
+                    self.hud_corner = hud_corner(&self.config.fps.corner);
                 }
                 // unredir may have toggled; re-evaluate, then repaint.
                 self.update_redirection();
@@ -504,7 +566,8 @@ impl App {
                 ms: self.fps_meter.last_ms(),
                 samples: self.fps_meter.samples(),
                 graph: self.config.fps.graph,
-                corner: hud_corner(&self.config.fps.corner),
+                corner: self.hud_corner,
+                scale: self.config.fps.scale,
             })
         } else {
             None
@@ -783,12 +846,18 @@ impl App {
                 self.dirty = true;
             }
             Event::KeyPress(e) => {
-                // Ignore CapsLock (Lock) / NumLock (Mod2) so the bind matches
-                // regardless of lock state — we grab every lock variant.
+                // Ignore CapsLock (Lock) / NumLock (Mod2) so binds match regardless
+                // of lock state — we grab every lock variant.
                 let state = u16::from(e.state) & !(0x02 | 0x10);
                 if self.fps_key == Some((e.detail, state)) {
                     self.show_fps = !self.show_fps;
                     tracing::info!(show_fps = self.show_fps, "fps: HUD toggled");
+                    self.dirty = true;
+                } else if let Some(&(_, _, dir)) =
+                    self.move_keys.iter().find(|&&(kc, m, _)| kc == e.detail && m == state)
+                {
+                    self.hud_corner = move_corner(self.hud_corner, dir);
+                    tracing::info!(corner = ?self.hud_corner, "fps: HUD moved");
                     self.dirty = true;
                 }
             }
