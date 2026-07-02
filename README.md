@@ -17,6 +17,11 @@ video with a picture-in-picture corner overlay. Composited tear-free.*
 
 *Per-window opacity, fade in/out, and left+bottom drop shadows — composited tear-free.*
 
+![ricom's on-demand FPS HUD over a blur-frosted backdrop](screenshots/ricom-fps.png)
+
+*The on-demand FPS HUD (top-right, toggled with `Super+Shift+F`) — FPS, frame-time, and a rolling
+frame-time graph, drawn by the built-in SDF text engine over a translucent, blur-frosted window.*
+
 ## Status
 
 Working today:
@@ -46,8 +51,8 @@ Working today:
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** window dimming, the `use-damage` partial-repaint optimisation, animations,
-and the xrender/glx backends + D-Bus IPC. See [Roadmap](#roadmap).
+**Not yet implemented:** window dimming, window rules, the `use-damage` partial-repaint optimisation,
+animations, and the xrender/glx backends + D-Bus IPC. See [Roadmap](#roadmap).
 
 ## How it works
 
@@ -122,7 +127,7 @@ ricom             workspace root + binary (event-loop wiring, CLI)
    ├─ region      pure-Rust pixman-style rectangle regions (damage maths)
    ├─ xconn       x11rb wrapper: connection, extensions, atoms, overlay/redirect, pixmap/damage
    ├─ wm          window model + bottom-to-top stacking, updated from X events
-   ├─ backend-gl  EGL context on the overlay, texture-from-pixmap, GLSL blit, present
+   ├─ backend-gl  EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/SDF-text shaders, present
    └─ session     the compositor: owns X + wm + backend, runs the calloop event loop
 ```
 
@@ -144,6 +149,7 @@ Requires a Rust toolchain and a Linux system with X11 + EGL (Mesa).
 ```sh
 cargo build --release
 DISPLAY=:0 ./target/release/ricom            # run as the compositor (Ctrl-C to quit)
+DISPLAY=:0 ./target/release/ricom --fps      # …with the FPS HUD visible (toggle: Super+Shift+F)
 ```
 
 Diagnostics:
@@ -212,3 +218,6 @@ Next:
 ## License
 
 MPL-2.0. `ricom` is a port of picom (MPL-2.0); data structures and GLSL are derived from it.
+
+The bundled SDF glyph atlas (`crates/backend-gl/src/glyphs.bin`) is generated from
+[Liberation Mono](https://github.com/liberationfonts) (SIL Open Font License 1.1) — see [`NOTICE`](NOTICE).
