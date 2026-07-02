@@ -8,6 +8,11 @@ A **minimalistic X11 compositor written in Rust** — a from-scratch reimplement
 
 ## Screenshots
 
+![ricom compositing — dual-Kawase background blur behind a translucent window](screenshots/ricom-blur.png)
+
+*Dual-Kawase background blur — the backdrop behind a translucent terminal is frosted, over fullscreen
+video with a picture-in-picture corner overlay. Composited tear-free.*
+
 ![ricom compositing — per-window opacity, fades, and drop shadows](screenshots/ricom.png)
 
 *Per-window opacity, fade in/out, and left+bottom drop shadows — composited tear-free.*
@@ -32,14 +37,14 @@ Working today:
   stays tear-free.
 - **Effects** — **per-window opacity** (`_NET_WM_WINDOW_OPACITY`), **fades** in on map and out on
   unmap/destroy (200 ms ease-out on a `calloop` frame clock; a closing window's last frame is kept and
-  faded), soft **left+bottom drop shadows**, and **rounded corners** (shadow follows the corner).
+  faded), soft **left+bottom drop shadows**, **rounded corners** (shadow follows the corner), and
+  **background blur** — dual-Kawase frost behind translucent windows.
 
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** blur, rounded corners, window dimming, the `use-damage` partial-repaint
-optimisation, animations, a config file, and the xrender/glx backends + D-Bus IPC. See
-[Roadmap](#roadmap).
+**Not yet implemented:** window dimming, the `use-damage` partial-repaint optimisation, animations,
+and the xrender/glx backends + D-Bus IPC. See [Roadmap](#roadmap).
 
 ## How it works
 
@@ -185,13 +190,13 @@ See [`ricom.toml.example`](ricom.toml.example).
 
 ## Roadmap
 
-Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, and a TOML config file with
-live (SIGHUP) reload.
+Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, background blur
+(dual-Kawase), and a TOML config file with live (SIGHUP) reload.
 
 Next:
 
 1. `use-damage` partial repaint — repaint only damaged regions (biggest win on mostly-static screens).
-2. Blur and window rules.
+2. Window rules (per-window opacity / blur / shadow overrides).
 3. Animations (picom-style transition scripts).
 
 ## License
