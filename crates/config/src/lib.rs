@@ -24,6 +24,7 @@ pub struct Config {
     pub fade: Fade,
     pub shadow: Shadow,
     pub blur: Blur,
+    pub fps: Fps,
 }
 
 /// Background blur behind translucent windows (frosted glass).
@@ -36,6 +37,22 @@ pub struct Blur {
     pub passes: i32,
     /// Sample offset per pass (px); scales the blur reach.
     pub radius: f32,
+}
+
+/// On-demand FPS / frame-time HUD, toggled by a global hotkey. Drawn by the
+/// compositor via the SDF text engine; damage-driven (updates only while the
+/// screen is repainting).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Fps {
+    /// Whether the HUD is visible at startup (the hotkey toggles it live).
+    pub enabled: bool,
+    /// Global shortcut that toggles the HUD, e.g. `"Super+Shift+F"`.
+    pub hotkey: String,
+    /// Screen corner: `"top-left"`, `"top-right"`, `"bottom-left"`, `"bottom-right"`.
+    pub corner: String,
+    /// Draw the rolling frame-time graph beneath the numbers.
+    pub graph: bool,
 }
 
 /// Window fade-in (on map) / fade-out (on unmap/destroy).
@@ -69,6 +86,7 @@ impl Default for Config {
             fade: Fade::default(),
             shadow: Shadow::default(),
             blur: Blur::default(),
+            fps: Fps::default(),
         }
     }
 }
@@ -76,6 +94,17 @@ impl Default for Config {
 impl Default for Blur {
     fn default() -> Self {
         Blur { enabled: false, passes: 3, radius: 4.0 }
+    }
+}
+
+impl Default for Fps {
+    fn default() -> Self {
+        Fps {
+            enabled: false,
+            hotkey: "Super+Shift+F".to_string(),
+            corner: "top-right".to_string(),
+            graph: true,
+        }
     }
 }
 
@@ -140,6 +169,10 @@ impl Config {
         chg!("blur.enabled", prev.blur.enabled, self.blur.enabled);
         chg!("blur.passes", prev.blur.passes, self.blur.passes);
         chg!("blur.radius", prev.blur.radius, self.blur.radius);
+        chg!("fps.enabled", prev.fps.enabled, self.fps.enabled);
+        chg!("fps.hotkey", prev.fps.hotkey, self.fps.hotkey);
+        chg!("fps.corner", prev.fps.corner, self.fps.corner);
+        chg!("fps.graph", prev.fps.graph, self.fps.graph);
         out
     }
 }
@@ -171,6 +204,10 @@ mod tests {
             (true, 12.0, 0.45, 24)
         );
         assert_eq!((c.blur.enabled, c.blur.passes, c.blur.radius), (false, 3, 4.0));
+        assert!(!c.fps.enabled);
+        assert_eq!(c.fps.hotkey, "Super+Shift+F");
+        assert_eq!(c.fps.corner, "top-right");
+        assert!(c.fps.graph);
     }
 
     #[test]
@@ -191,6 +228,11 @@ min_size = 40
 enabled = true
 passes = 5
 radius = 6.0
+[fps]
+enabled = true
+hotkey = "Control+Alt+P"
+corner = "bottom-left"
+graph = false
 "#;
         let c: Config = toml::from_str(t).unwrap();
         assert!(!c.unredir);
@@ -199,6 +241,10 @@ radius = 6.0
         assert_eq!((c.fade.enabled, c.fade.duration), (false, 0.4));
         assert_eq!((c.shadow.radius, c.shadow.min_size), (30.0, 40));
         assert_eq!((c.blur.enabled, c.blur.passes, c.blur.radius), (true, 5, 6.0));
+        assert!(c.fps.enabled);
+        assert_eq!(c.fps.hotkey, "Control+Alt+P");
+        assert_eq!(c.fps.corner, "bottom-left");
+        assert!(!c.fps.graph);
     }
 
     #[test]

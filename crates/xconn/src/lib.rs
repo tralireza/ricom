@@ -8,7 +8,7 @@ use anyhow::{bail, Context, Result};
 use x11rb::connection::{Connection, RequestConnection};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux, EventMask,
-    MapState, Window, WindowClass,
+    GrabMode, MapState, ModMask, Window, WindowClass,
 };
 use x11rb::rust_connection::RustConnection;
 
@@ -209,6 +209,48 @@ impl XConn {
                 &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
             )
             .context("select SubstructureNotify on root")?;
+        Ok(())
+    }
+
+    /// Resolve a keysym to the first keycode that yields it, via the server's
+    /// keyboard mapping. `None` if no key on the keyboard produces that keysym.
+    pub fn keysym_to_keycode(&self, keysym: u32) -> Result<Option<u8>> {
+        let setup = self.conn.setup();
+        let (min, max) = (setup.min_keycode, setup.max_keycode);
+        let reply = self
+            .conn
+            .get_keyboard_mapping(min, max - min + 1)
+            .context("get_keyboard_mapping")?
+            .reply()
+            .context("get_keyboard_mapping reply")?;
+        let per = (reply.keysyms_per_keycode as usize).max(1);
+        for (i, chunk) in reply.keysyms.chunks(per).enumerate() {
+            if chunk.contains(&keysym) {
+                return Ok(Some(min + i as u8));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Passively grab `keycode`+`mods` on the root so the combo reaches us
+    /// regardless of which window has focus (a global hotkey). Async grab modes so
+    /// we never freeze the keyboard/pointer.
+    pub fn grab_key(&self, keycode: u8, mods: u16) -> Result<()> {
+        // `.check()` forces a round-trip so a BadAccess (combo already held by
+        // another client) surfaces here instead of as a stray async X error.
+        self.conn
+            .grab_key(false, self.root, ModMask::from(mods), keycode, GrabMode::ASYNC, GrabMode::ASYNC)
+            .context("grab_key")?
+            .check()
+            .context("grab_key rejected (combo may be held by another client)")?;
+        Ok(())
+    }
+
+    /// Release a passive key grab previously set with [`grab_key`](Self::grab_key).
+    pub fn ungrab_key(&self, keycode: u8, mods: u16) -> Result<()> {
+        self.conn
+            .ungrab_key(keycode, self.root, ModMask::from(mods))
+            .context("ungrab_key")?;
         Ok(())
     }
 

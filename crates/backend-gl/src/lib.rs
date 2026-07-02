@@ -13,6 +13,10 @@ use anyhow::{anyhow, bail, Result};
 use glow::HasContext as _;
 use khronos_egl as egl;
 
+#[allow(dead_code)] // a few generated consts (e.g. ROWS) are informational
+mod glyphs;
+mod text;
+
 /// `glEGLImageTargetTexture2DOES(target, image)` — loaded via eglGetProcAddress.
 type ImageTargetTexture2DOes = unsafe extern "system" fn(target: u32, image: *const c_void);
 
@@ -247,6 +251,37 @@ pub struct GlInfo {
     pub version: String,
 }
 
+/// Which screen corner the FPS HUD anchors to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HudCorner {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+}
+
+/// One frame's HUD data, drawn by [`GlBackend::present_windows`] when `Some`.
+pub struct Hud<'a> {
+    /// Frames composited in the last second.
+    pub fps: u32,
+    /// Most recent frame time (ms).
+    pub ms: f32,
+    /// Recent frame times (ms) for the graph, oldest first.
+    pub samples: &'a [f32],
+    /// Draw the frame-time graph beneath the numbers.
+    pub graph: bool,
+    /// Which screen corner to anchor to.
+    pub corner: HudCorner,
+}
+
+/// Solid-colour fill (HUD panel + graph bars). Reuses `BLIT_VS` (position via
+/// `u_rect`/`u_screen`); premultiplied output to match the compositor's blend.
+const SOLID_FS: &str = r#"#version 330 core
+uniform vec4 u_color; // straight RGBA
+out vec4 frag;
+void main() { frag = vec4(u_color.rgb * u_color.a, u_color.a); }
+"#;
+
 fn load_glow(egl: &egl::DynamicInstance<egl::EGL1_5>) -> glow::Context {
     unsafe {
         glow::Context::from_loader_function(|name| match egl.get_proc_address(name) {
@@ -407,6 +442,13 @@ pub struct GlBackend {
     blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
+    /// General SDF text renderer (FPS HUD and any future on-screen text).
+    text: text::TextRenderer,
+    /// Solid-fill program (HUD panel + graph bars), shares `BLIT_VS`.
+    solid_program: glow::NativeProgram,
+    sol_rect: Option<glow::NativeUniformLocation>,
+    sol_screen: Option<glow::NativeUniformLocation>,
+    sol_color: Option<glow::NativeUniformLocation>,
 }
 
 impl GlBackend {
@@ -537,7 +579,17 @@ impl GlBackend {
                 gl.get_uniform_location(p, "u_corner"),
             )
         };
-        tracing::info!(%renderer, window, "GL window backend ready (blit + shadow + blur programs loaded)");
+        let text = text::TextRenderer::new(&gl)?;
+        let (solid_program, sol_rect, sol_screen, sol_color) = unsafe {
+            let p = make_program(&gl, BLIT_VS, SOLID_FS)?;
+            (
+                p,
+                gl.get_uniform_location(p, "u_rect"),
+                gl.get_uniform_location(p, "u_screen"),
+                gl.get_uniform_location(p, "u_color"),
+            )
+        };
+        tracing::info!(%renderer, window, "GL window backend ready (blit + shadow + blur + text + solid programs loaded)");
 
         Ok(GlBackend {
             xlib, xdisplay, egl, display, surface, context, gl,
@@ -547,7 +599,8 @@ impl GlBackend {
             up_program, up_src, up_halfpixel, up_offset,
             frost_program, f_tex, f_screen, f_rect, f_corner,
             blur: RefCell::new(None),
-            image_target, render,
+            image_target, render, text,
+            solid_program, sol_rect, sol_screen, sol_color,
         })
     }
 
@@ -747,9 +800,79 @@ impl GlBackend {
         Some(chain.levels[0].tex)
     }
 
+    /// Fill a screen-space rect with a solid (premultiplied) colour. Assumes the
+    /// unit-quad VAO is bound and blending is enabled (as in `present_windows`).
+    fn fill_rect(&self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4], sw: i32, sh: i32) {
+        unsafe {
+            self.gl.use_program(Some(self.solid_program));
+            self.gl.uniform_2_f32(self.sol_screen.as_ref(), sw as f32, sh as f32);
+            self.gl.uniform_4_f32(self.sol_rect.as_ref(), x, y, w, h);
+            self.gl.uniform_4_f32(self.sol_color.as_ref(), color[0], color[1], color[2], color[3]);
+            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+        }
+    }
+
+    /// Draw the FPS HUD — a translucent panel, an optional frame-time graph, and
+    /// the numbers — anchored to `hud.corner`.
+    fn draw_hud(&self, hud: &Hud, sw: i32, sh: i32) {
+        let pad = 8.0f32;
+        let margin = 16.0f32;
+        let text_px = 20.0f32;
+        let target = 1000.0 / 60.0; // vsync budget (ms): graph baseline + colour thresholds
+        let label = format!("{} fps   {:.1} ms", hud.fps, hud.ms);
+        let (tw, th) = self.text.measure(text_px, &label);
+        let bar_w = 2.0f32;
+        let graph_h = if hud.graph { 34.0 } else { 0.0 };
+        let graph_gap = if hud.graph { 6.0 } else { 0.0 };
+        let graph_w = if hud.graph { (hud.samples.len() as f32 * bar_w).max(tw) } else { 0.0 };
+        let content_w = tw.max(graph_w);
+        let panel_w = content_w + pad * 2.0;
+        let panel_h = th + graph_gap + graph_h + pad * 2.0;
+        let (px, py) = match hud.corner {
+            HudCorner::TopLeft => (margin, margin),
+            HudCorner::TopRight => (sw as f32 - margin - panel_w, margin),
+            HudCorner::BottomLeft => (margin, sh as f32 - margin - panel_h),
+            HudCorner::BottomRight => (sw as f32 - margin - panel_w, sh as f32 - margin - panel_h),
+        };
+        // Panel background.
+        self.fill_rect(px, py, panel_w, panel_h, [0.05, 0.05, 0.07, 0.72], sw, sh);
+        // Frame-time graph: one bar per sample, full height at 2× the vsync budget.
+        if hud.graph && !hud.samples.is_empty() {
+            let gx = px + pad;
+            let gy = py + pad + th + graph_gap;
+            for (i, &ms) in hud.samples.iter().enumerate() {
+                let bx = gx + i as f32 * bar_w;
+                if bx + bar_w > gx + content_w {
+                    break;
+                }
+                let norm = (ms / (target * 2.0)).clamp(0.0, 1.0);
+                let bh = (norm * graph_h).max(1.0);
+                let col = if ms <= target * 1.1 {
+                    [0.40, 0.90, 0.50, 0.90]
+                } else if ms <= target * 1.8 {
+                    [0.95, 0.80, 0.30, 0.90]
+                } else {
+                    [0.95, 0.40, 0.35, 0.90]
+                };
+                self.fill_rect(bx, gy + (graph_h - bh), bar_w - 0.5, bh, col, sw, sh);
+            }
+            // Baseline line at the vsync budget (norm 0.5 of a 2×-budget scale).
+            self.fill_rect(gx, gy + graph_h * 0.5, content_w, 1.0, [1.0, 1.0, 1.0, 0.22], sw, sh);
+        }
+        // Numbers on top.
+        self.text.draw(&self.gl, sw, sh, px + pad, py + pad, text_px, [0.90, 1.0, 0.95, 1.0], &label);
+    }
+
     /// Composite a stack of [`Quad`]s: clear once, blit each bottom-to-top with
-    /// its opacity, present once. Items that fail to bind are skipped.
-    pub fn present_windows(&self, items: &[Quad], screen_w: i32, screen_h: i32) -> Result<()> {
+    /// its opacity, then draw the optional `hud`, present once. Items that fail to
+    /// bind are skipped.
+    pub fn present_windows(
+        &self,
+        items: &[Quad],
+        screen_w: i32,
+        screen_h: i32,
+        hud: Option<&Hud>,
+    ) -> Result<()> {
         tracing::trace!(items = items.len(), screen_w, screen_h, "present");
         let RenderParams {
             shadow_radius, shadow_strength, background, corner_radius, blur_passes, blur_radius, ..
@@ -848,6 +971,9 @@ impl GlBackend {
                 self.gl.delete_texture(tex);
             }
             let _ = self.egl.destroy_image(self.display, image);
+        }
+        if let Some(hud) = hud {
+            self.draw_hud(hud, screen_w, screen_h);
         }
         unsafe {
             self.gl.bind_vertex_array(None);

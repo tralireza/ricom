@@ -27,3 +27,9 @@ min_size = 24       # skip shadows for windows smaller than this (px)
 enabled = false     # frost the backdrop behind translucent windows (extra GPU cost)
 passes = 3          # dual-Kawase iterations (more = wider/softer)
 radius = 4.0        # sample offset per pass (px)
+
+[fps]
+enabled = false          # start with the on-demand FPS HUD visible (also toggles live via the hotkey)
+hotkey = "Super+Shift+F" # global shortcut to toggle the HUD (grabbed with XGrabKey)
+corner = "top-right"     # top-left | top-right | bottom-left | bottom-right
+graph = true             # draw the rolling frame-time graph under the numbers

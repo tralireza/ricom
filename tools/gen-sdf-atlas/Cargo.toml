@@ -1,0 +1,14 @@
+# Dev-only tool: bakes the SDF glyph atlas for backend-gl's text engine.
+# EXCLUDED from the ricom workspace (see root Cargo.toml `exclude`) so it never
+# enters the runtime build graph. Run manually to regenerate the atlas:
+#   cargo run --release --manifest-path tools/gen-sdf-atlas/Cargo.toml -- \
+#       /usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf \
+#       crates/backend-gl/src/glyphs
+[package]
+name = "gen-sdf-atlas"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+fontdue = "0.9"

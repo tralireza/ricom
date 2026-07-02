@@ -7,7 +7,7 @@
 //! (or a structural change) arrives. On exit the X server auto-releases our
 //! resources (redirect, overlay, pixmaps, damage), restoring normal drawing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -22,10 +22,12 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{Place, Window};
 
-use backend_gl::{GlBackend, Quad, RenderParams};
+use backend_gl::{GlBackend, Hud, HudCorner, Quad, RenderParams};
 use config::Config;
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
+
+mod hotkey;
 
 /// Build the GL backend's render parameters from the config.
 fn render_params(cfg: &Config) -> RenderParams {
@@ -40,6 +42,17 @@ fn render_params(cfg: &Config) -> RenderParams {
     }
 }
 
+/// Map the config's corner string to the backend's [`HudCorner`] (defaults to
+/// top-right for anything unrecognised).
+fn hud_corner(s: &str) -> HudCorner {
+    match s {
+        "top-left" => HudCorner::TopLeft,
+        "bottom-left" => HudCorner::BottomLeft,
+        "bottom-right" => HudCorner::BottomRight,
+        _ => HudCorner::TopRight,
+    }
+}
+
 /// Per-window X resources used for compositing.
 #[derive(Default)]
 struct WinGfx {
@@ -47,6 +60,57 @@ struct WinGfx {
     pixmap: Option<u32>,
     /// Damage object signalling when the window needs recompositing.
     damage: Option<u32>,
+}
+
+/// Rolling frame-rate meter, fed one sample per composited frame (post-present).
+/// FPS is frames in the last second, so on a damage-driven idle screen it decays
+/// to zero (there simply are no frames); `samples` holds recent frame-times (ms)
+/// for the HUD graph.
+struct FpsMeter {
+    frames: VecDeque<Instant>,
+    samples: Vec<f32>,
+    last_ms: f32,
+}
+
+impl FpsMeter {
+    const WINDOW: Duration = Duration::from_secs(1);
+    const GRAPH: usize = 120;
+
+    fn new() -> Self {
+        FpsMeter { frames: VecDeque::new(), samples: Vec::new(), last_ms: 0.0 }
+    }
+
+    /// Record a present at `now`: update the last frame-time, push a graph sample
+    /// (capped to `GRAPH`, oldest dropped), and drop frames older than one second.
+    fn tick(&mut self, now: Instant) {
+        if let Some(&prev) = self.frames.back() {
+            let ms = now.duration_since(prev).as_secs_f32() * 1000.0;
+            self.last_ms = ms;
+            self.samples.push(ms);
+            if self.samples.len() > Self::GRAPH {
+                self.samples.remove(0);
+            }
+        }
+        self.frames.push_back(now);
+        while self.frames.front().is_some_and(|&t| now.duration_since(t) > Self::WINDOW) {
+            self.frames.pop_front();
+        }
+    }
+
+    /// Frames composited in the last second.
+    fn fps(&self) -> u32 {
+        self.frames.len() as u32
+    }
+
+    /// Most recent frame-to-frame time in milliseconds.
+    fn last_ms(&self) -> f32 {
+        self.last_ms
+    }
+
+    /// Recent frame times (ms), oldest first — for the HUD graph.
+    fn samples(&self) -> &[f32] {
+        &self.samples
+    }
 }
 
 /// Top-level compositor state.
@@ -74,6 +138,13 @@ pub struct App {
     /// Only consulted by the Linux-only reload path.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     config_path: Option<PathBuf>,
+    /// Whether the on-demand FPS HUD is currently visible (toggled by the hotkey).
+    show_fps: bool,
+    /// The resolved FPS-toggle hotkey as `(keycode, modifier_mask)`, or `None`
+    /// when unbound (no/invalid hotkey, or the key isn't on the keyboard).
+    fps_key: Option<(u8, u16)>,
+    /// Rolling frame-rate meter, sampled each composite while redirected.
+    fps_meter: FpsMeter,
 }
 
 impl App {
@@ -93,8 +164,11 @@ impl App {
             loop_handle: None,
             frame_timer: None,
             last_frame: None,
+            show_fps: config.fps.enabled,
             config,
             config_path,
+            fps_key: None,
+            fps_meter: FpsMeter::new(),
         })
     }
 
@@ -106,6 +180,44 @@ impl App {
         } else {
             0.0
         }
+    }
+
+    /// (Re)bind the FPS-HUD toggle hotkey: drop any previous grab, parse the
+    /// configured spec, resolve it to a keycode, and passively grab it on the root
+    /// (including the CapsLock/NumLock lock variants). Logged, never fatal.
+    fn grab_fps_hotkey(&mut self) {
+        const LOCK: u16 = 0x02; // CapsLock
+        const MOD2: u16 = 0x10; // NumLock
+        let variants = |mods: u16| [mods, mods | LOCK, mods | MOD2, mods | LOCK | MOD2];
+        // Drop the previous grab first (a reload may change the combo).
+        if let Some((kc, mods)) = self.fps_key.take() {
+            for m in variants(mods) {
+                let _ = self.x.ungrab_key(kc, m);
+            }
+        }
+        let spec = self.config.fps.hotkey.clone();
+        let Some((mods, keysym)) = hotkey::parse_hotkey(&spec) else {
+            tracing::warn!(hotkey = %spec, "fps: unparseable hotkey — HUD toggle disabled");
+            return;
+        };
+        let keycode = match self.x.keysym_to_keycode(keysym) {
+            Ok(Some(kc)) => kc,
+            Ok(None) => {
+                tracing::warn!(hotkey = %spec, "fps: key not on the keyboard — HUD toggle disabled");
+                return;
+            }
+            Err(e) => {
+                tracing::warn!(hotkey = %spec, "fps: keymap lookup failed: {e}");
+                return;
+            }
+        };
+        for m in variants(mods) {
+            if let Err(e) = self.x.grab_key(keycode, m) {
+                tracing::warn!(hotkey = %spec, "fps: grab_key failed: {e}");
+            }
+        }
+        self.fps_key = Some((keycode, mods));
+        tracing::info!(hotkey = %spec, keycode, mods, "fps: HUD toggle hotkey bound");
     }
 
     /// Re-read the config (from the same source) and apply it live. Called on
@@ -127,9 +239,14 @@ impl App {
                 } else {
                     tracing::info!(%source, changes = %changes.join(", "), "config reloaded");
                 }
+                let hotkey_changed = cfg.fps.hotkey != self.config.fps.hotkey;
                 self.config = cfg;
                 if let Some(b) = self.backend.as_mut() {
                     b.set_render_params(render_params(&self.config));
+                }
+                // A changed FPS hotkey: drop the old grab and bind the new combo.
+                if hotkey_changed {
+                    self.grab_fps_hotkey();
                 }
                 // unredir may have toggled; re-evaluate, then repaint.
                 self.update_redirection();
@@ -145,6 +262,7 @@ impl App {
         self.x.become_cm()?;
         self.x.select_root_substructure()?;
         self.x.select_screen_change()?;
+        self.grab_fps_hotkey();
 
         self.overlay = self.x.get_overlay()?;
         self.x.overlay_input_passthrough(self.overlay)?;
@@ -342,7 +460,7 @@ impl App {
 
     /// Composite the visible window stack (bottom-to-top) onto the overlay —
     /// mapped windows plus any fading out.
-    fn composite(&self) {
+    fn composite(&mut self) {
         // Nothing to paint while unredirected: the overlay is unmapped and the
         // fullscreen window draws straight to the screen.
         if !self.redirected {
@@ -380,9 +498,34 @@ impl App {
             }
         }
         tracing::trace!(items = items.len(), "composite");
-        if let Err(e) = backend.present_windows(&items, self.x.root_width as i32, self.x.root_height as i32) {
+        let hud = if self.show_fps {
+            Some(Hud {
+                fps: self.fps_meter.fps(),
+                ms: self.fps_meter.last_ms(),
+                samples: self.fps_meter.samples(),
+                graph: self.config.fps.graph,
+                corner: hud_corner(&self.config.fps.corner),
+            })
+        } else {
+            None
+        };
+        if let Err(e) = backend.present_windows(
+            &items,
+            self.x.root_width as i32,
+            self.x.root_height as i32,
+            hud.as_ref(),
+        ) {
             tracing::error!("composite failed: {e}");
         }
+        // Sample the present cadence (post-swap = vsync-paced). Damage-driven, so
+        // this only advances while the screen is actually repainting.
+        self.fps_meter.tick(Instant::now());
+        tracing::debug!(
+            fps = self.fps_meter.fps(),
+            ms = self.fps_meter.last_ms(),
+            samples = self.fps_meter.samples().len(),
+            "fps: frame"
+        );
     }
 
     /// unredir-if-possible: should the screen be unredirected? True when the
@@ -638,6 +781,16 @@ impl App {
                 // A new resolution changes the fullscreen threshold — re-decide.
                 self.update_redirection();
                 self.dirty = true;
+            }
+            Event::KeyPress(e) => {
+                // Ignore CapsLock (Lock) / NumLock (Mod2) so the bind matches
+                // regardless of lock state — we grab every lock variant.
+                let state = u16::from(e.state) & !(0x02 | 0x10);
+                if self.fps_key == Some((e.detail, state)) {
+                    self.show_fps = !self.show_fps;
+                    tracing::info!(show_fps = self.show_fps, "fps: HUD toggled");
+                    self.dirty = true;
+                }
             }
             _ => {}
         }

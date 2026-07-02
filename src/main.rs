@@ -22,6 +22,7 @@ OPTIONS:
                     (0.0..1.0, default 0.5) — exercises the alpha-blend path.
     --config <PATH> Use this config file instead of the default location.
     --print-config  Print the effective config as TOML and exit (no X needed).
+    --fps           Start with the FPS HUD visible (toggle live with its hotkey).
     -h, --help      Print this help and exit.
     -V, --version   Print version and exit.
 
@@ -58,8 +59,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
     // Reject unknown flags so a typo doesn't silently launch the compositor.
-    const FLAGS: &[&str] =
-        &["--gl-check", "--paint-test", "--blit-test", "--opacity-test", "--config", "--print-config"];
+    const FLAGS: &[&str] = &[
+        "--gl-check", "--paint-test", "--blit-test", "--opacity-test", "--config", "--print-config",
+        "--fps",
+    ];
     if let Some(bad) = args[1..]
         .iter()
         .find(|a| a.starts_with('-') && !FLAGS.contains(&a.as_str()))
@@ -108,13 +111,17 @@ fn main() -> Result<()> {
         .position(|a| a == "--config")
         .and_then(|i| args.get(i + 1))
         .map(std::path::PathBuf::from);
-    let cfg = match config::Config::load(config_path.as_deref()) {
+    let mut cfg = match config::Config::load(config_path.as_deref()) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("ricom: {e:#}");
             std::process::exit(2);
         }
     };
+    // `--fps` starts with the HUD visible (still toggleable via its hotkey).
+    if args.iter().any(|a| a == "--fps") {
+        cfg.fps.enabled = true;
+    }
 
     // `ricom --print-config` dumps the effective settings as TOML and exits.
     if args.iter().any(|a| a == "--print-config") {
@@ -202,7 +209,7 @@ fn composite_windows_test(opacity: f32) -> Result<()> {
         let backend = backend_gl::GlBackend::new(overlay, visual, backend_gl::RenderParams::default())?;
         let start = std::time::Instant::now();
         while start.elapsed().as_secs() < 5 {
-            backend.present_windows(&items, x.root_width as i32, x.root_height as i32)?;
+            backend.present_windows(&items, x.root_width as i32, x.root_height as i32, None)?;
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         tracing::info!("composited {} windows for 5s", items.len());

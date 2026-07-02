@@ -39,6 +39,9 @@ Working today:
   unmap/destroy (200 ms ease-out on a `calloop` frame clock; a closing window's last frame is kept and
   faded), soft **left+bottom drop shadows**, **rounded corners** (shadow follows the corner), and
   **background blur** — dual-Kawase frost behind translucent windows.
+- **On-demand FPS HUD** — a global hotkey (`Super+Shift+F` by default) toggles an overlay showing
+  FPS, frame-time, and a rolling frame-time graph, drawn with a general **SDF text engine**
+  (arbitrary strings, crisp at any size, no runtime font dependency) — ricom's first on-screen text.
 
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
@@ -184,6 +187,12 @@ min_size = 24                   # skip shadows for windows smaller than this (px
 enabled = false                 # frost the backdrop behind translucent windows
 passes = 3                      # dual-Kawase iterations (wider/softer)
 radius = 4.0                    # sample offset per pass (px)
+
+[fps]
+enabled = false                 # start with the FPS HUD visible (also toggled by the hotkey)
+hotkey = "Super+Shift+F"        # global toggle shortcut (grabbed via XGrabKey)
+corner = "top-right"            # top-left | top-right | bottom-left | bottom-right
+graph = true                    # rolling frame-time graph under the numbers
 ```
 
 See [`ricom.toml.example`](ricom.toml.example).
@@ -191,7 +200,8 @@ See [`ricom.toml.example`](ricom.toml.example).
 ## Roadmap
 
 Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, background blur
-(dual-Kawase), and a TOML config file with live (SIGHUP) reload.
+(dual-Kawase), a TOML config file with live (SIGHUP) reload, and an on-demand FPS HUD (global hotkey)
+built on a general SDF text engine.
 
 Next:
 
