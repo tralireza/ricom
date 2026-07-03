@@ -46,6 +46,21 @@ Stop any other compositor first (e.g. `pkill -x picom`), since ricom must own
 _NET_WM_CM_S0.
 ";
 
+/// Version line for `--version` and the startup log, e.g.
+/// `ricom 0.1.0 (39d0212 260703)` — short git hash + commit date (YYMMDD),
+/// baked at build time by `build.rs`. Degrades to `ricom 0.1.0 (39d0212)` with
+/// no date, or a bare `ricom 0.1.0` when no git info is available.
+fn version_string() -> String {
+    let base = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
+    let hash = option_env!("RICOM_GIT_HASH").unwrap_or("unknown");
+    let date = option_env!("RICOM_GIT_DATE").unwrap_or("");
+    match (hash, date) {
+        ("unknown", _) => base.to_string(),
+        (hash, "") => format!("{base} ({hash})"),
+        (hash, date) => format!("{base} ({hash} {date})"),
+    }
+}
+
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
 
@@ -55,7 +70,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if args.iter().any(|a| a == "-V" || a == "--version") {
-        println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+        println!("{}", version_string());
         return Ok(());
     }
     // Reject unknown flags so a typo doesn't silently launch the compositor.
@@ -129,7 +144,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    tracing::info!("ricom starting");
+    tracing::info!("{} starting", version_string());
     let mut app = session::App::new(cfg, config_path)?;
     app.run()?;
     Ok(())
