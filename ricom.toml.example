@@ -39,6 +39,8 @@ hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + a
 corner = "top-right"     # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true             # draw the rolling frame-time graph under the numbers
 scale = 1.0              # size multiplier on top of automatic screen-height scaling (4K = 2x)
+# The HUD also shows a 1m/5m/15m load block (fps + GPU render ms); the same
+# figures are logged on demand via  kill -USR1 $(pidof ricom)
 
 # Per-window rules. Each [[rule]] has a `match` (all listed conditions must hold —
 # class/instance/window_type match exactly, title matches as a substring,

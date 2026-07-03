@@ -266,6 +266,14 @@ pub enum HudCorner {
     BottomRight,
 }
 
+/// 1m/5m/15m compositor load averages for the HUD's load block: present rate
+/// (fps) and mean GPU render time (ms; `None` for a window that had no frames —
+/// idle or bypassed). Toggled independently of the numbers/graph.
+pub struct HudLoad {
+    pub fps: [f32; 3],
+    pub render_ms: [Option<f32>; 3],
+}
+
 /// One frame's HUD data, drawn by [`GlBackend::present_windows`] when `Some`. The
 /// graph itself is fed by the backend's own GPU render-time samples.
 pub struct Hud {
@@ -279,6 +287,8 @@ pub struct Hud {
     pub scale: f32,
     /// Current display refresh rate (Hz) — one refresh interval is the render budget.
     pub refresh_hz: f32,
+    /// Optional 1m/5m/15m load block, shown under the graph (`Super+Shift+L`).
+    pub load: Option<HudLoad>,
 }
 
 /// Solid-colour fill (HUD panel + graph bars). Reuses `BLIT_VS` (position via
@@ -863,9 +873,39 @@ impl GlBackend {
         let graph_h = if hud.graph { 34.0 * s } else { 0.0 };
         let graph_gap = if hud.graph { 6.0 * s } else { 0.0 };
         let graph_w = if hud.graph { (samples.len() as f32 * bar_w).max(tw) } else { 0.0 };
-        let content_w = tw.max(graph_w);
+        // Optional 1m/5m/15m load block (Super+Shift+L): monospace-aligned rows
+        // under the graph. Liberation Mono lets simple column padding align.
+        let load_px = 15.0 * s;
+        let load_lines: Vec<String> = match &hud.load {
+            Some(l) => {
+                let c = |v: f32| format!("{v:>6.1}");
+                let co = |o: Option<f32>| o.map_or_else(|| format!("{:>6}", "--"), |v| format!("{v:>6.1}"));
+                vec![
+                    format!("{:<4}{}{}{}", "fps", c(l.fps[0]), c(l.fps[1]), c(l.fps[2])),
+                    format!("{:<4}{}{}{}", "ms", co(l.render_ms[0]), co(l.render_ms[1]), co(l.render_ms[2])),
+                ]
+            }
+            None => Vec::new(),
+        };
+        // Tight line spacing: the atlas cell height (measure().1) pads each glyph
+        // for the SDF spread, so stacking rows by it leaves too much air. Advance
+        // by a small multiple of the glyph size instead, and size the panel to match.
+        let load_pitch = load_px * 1.2;
+        let (load_w, load_cell) = if load_lines.is_empty() {
+            (0.0, 0.0)
+        } else {
+            let w = load_lines.iter().map(|l| self.text.measure(load_px, l).0).fold(0.0_f32, f32::max);
+            (w, self.text.measure(load_px, "M").1)
+        };
+        let load_gap = if load_lines.is_empty() { 0.0 } else { 8.0 * s };
+        let load_block_h = if load_lines.is_empty() {
+            0.0
+        } else {
+            load_gap + (load_lines.len() as f32 - 1.0) * load_pitch + load_cell
+        };
+        let content_w = tw.max(graph_w).max(load_w);
         let panel_w = content_w + pad * 2.0;
-        let panel_h = th + graph_gap + graph_h + pad * 2.0;
+        let panel_h = th + graph_gap + graph_h + load_block_h + pad * 2.0;
         let (px, py) = match hud.corner {
             HudCorner::TopLeft => (margin, margin),
             HudCorner::TopRight => (sw as f32 - margin - panel_w, margin),
@@ -901,6 +941,21 @@ impl GlBackend {
         drop(samples);
         // Numbers on top.
         self.text.draw(&self.gl, sw, sh, px + pad, py + pad, text_px, [0.90, 1.0, 0.95, 1.0], &label);
+        // Load block under the graph.
+        if !load_lines.is_empty() {
+            let mut ly = py + pad + th + graph_gap + graph_h + load_gap;
+            for line in &load_lines {
+                self.text.draw(&self.gl, sw, sh, px + pad, ly, load_px, [0.80, 0.88, 1.0, 1.0], line);
+                ly += load_pitch;
+            }
+        }
+    }
+
+    /// The most recent GPU render time (ms) — the value the HUD shows, measured
+    /// ~2 composites ago. `0.0` before the first measurement (or if the GPU timer
+    /// is unavailable).
+    pub fn render_ms(&self) -> f32 {
+        self.render_ms.get()
     }
 
     /// Read the render-time query that finished ~2 frames ago (so the read never

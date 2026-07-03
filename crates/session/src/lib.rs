@@ -22,7 +22,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{Place, Window};
 
-use backend_gl::{GlBackend, Hud, HudCorner, Quad, RenderParams};
+use backend_gl::{GlBackend, Hud, HudCorner, HudLoad, Quad, RenderParams};
 use config::{Config, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
@@ -152,6 +152,92 @@ impl FpsMeter {
     }
 }
 
+/// One window's load figure: present rate (fps) and mean GPU render time (ms;
+/// `None` when the window had no composited frames — idle or bypassed).
+struct LoadAvg {
+    fps: f32,
+    render_ms: Option<f32>,
+}
+
+/// Per-second ring for the 1m/5m/15m compositor load averages. Advanced lazily
+/// (on each present and each query), so an idle screen costs nothing — no
+/// periodic timer. Each bucket holds the frames composited that second and their
+/// summed GPU render time; over a window, fps = Σframes ÷ seconds and render =
+/// Σrender_ms ÷ Σframes (frame-weighted).
+struct LoadTracker {
+    start: Instant,
+    frames: [u32; Self::WINDOW],
+    render_sum: [f32; Self::WINDOW],
+    /// Absolute second index (since `start`) of the newest bucket, at `head`.
+    cur_sec: u64,
+    head: usize,
+}
+
+impl LoadTracker {
+    const WINDOW: usize = 900; // 15 minutes of one-second buckets
+    const SPANS: [usize; 3] = [60, 300, 900]; // 1m / 5m / 15m
+
+    fn new(now: Instant) -> Self {
+        LoadTracker {
+            start: now,
+            frames: [0; Self::WINDOW],
+            render_sum: [0.0; Self::WINDOW],
+            cur_sec: 0,
+            head: 0,
+        }
+    }
+
+    /// Roll the ring forward to `now`, zeroing buckets for any elapsed seconds so
+    /// idle time correctly dilutes the averages.
+    fn advance_to(&mut self, now: Instant) {
+        let target = now.duration_since(self.start).as_secs();
+        let gap = target.saturating_sub(self.cur_sec);
+        if gap == 0 {
+            return;
+        }
+        if gap as usize >= Self::WINDOW {
+            self.frames = [0; Self::WINDOW];
+            self.render_sum = [0.0; Self::WINDOW];
+            self.head = 0;
+        } else {
+            for _ in 0..gap {
+                self.head = (self.head + 1) % Self::WINDOW;
+                self.frames[self.head] = 0;
+                self.render_sum[self.head] = 0.0;
+            }
+        }
+        self.cur_sec = target;
+    }
+
+    /// Record one composited frame (GPU `render_ms`) at `now`.
+    fn record(&mut self, now: Instant, render_ms: f32) {
+        self.advance_to(now);
+        self.frames[self.head] += 1;
+        self.render_sum[self.head] += render_ms.max(0.0);
+    }
+
+    /// The 1m/5m/15m averages as of `now`. Each divides by the seconds actually
+    /// available, so early readings aren't diluted by the not-yet-elapsed window.
+    fn averages(&mut self, now: Instant) -> [LoadAvg; 3] {
+        self.advance_to(now);
+        let avail = (self.cur_sec as usize + 1).min(Self::WINDOW);
+        Self::SPANS.map(|span| {
+            let n = span.min(avail);
+            let mut frames = 0u64;
+            let mut render = 0.0f32;
+            for i in 0..n {
+                let idx = (self.head + Self::WINDOW - i) % Self::WINDOW;
+                frames += self.frames[idx] as u64;
+                render += self.render_sum[idx];
+            }
+            LoadAvg {
+                fps: frames as f32 / n as f32,
+                render_ms: (frames > 0).then(|| render / frames as f32),
+            }
+        })
+    }
+}
+
 /// Top-level compositor state.
 /// Cached window identity (WM_CLASS / type / title) for rule matching — read on
 /// map and refreshed on the relevant `PropertyNotify`. Kept alongside `gfx` so
@@ -203,6 +289,9 @@ pub struct App {
     refresh_hz: f64,
     /// Rolling frame-rate meter, sampled each composite while redirected.
     fps_meter: FpsMeter,
+    /// 1m/5m/15m compositor-load ring, fed one sample per composited frame; shown
+    /// in the HUD and logged on `SIGUSR1`.
+    load: LoadTracker,
 }
 
 impl App {
@@ -232,6 +321,7 @@ impl App {
             move_keys: Vec::new(),
             refresh_hz,
             fps_meter: FpsMeter::new(),
+            load: LoadTracker::new(Instant::now()),
         })
     }
 
@@ -362,6 +452,24 @@ impl App {
         }
     }
 
+    /// Log the current 1m/5m/15m compositor load — present rate and mean GPU
+    /// render time (+ % of the refresh budget). Called on `SIGUSR1` (Linux only).
+    #[cfg(target_os = "linux")]
+    fn log_load(&mut self) {
+        let a = self.load.averages(Instant::now());
+        let budget = 1000.0 / self.refresh_hz.max(1.0);
+        let fmt = |la: &LoadAvg| match la.render_ms {
+            Some(ms) => format!("{:.1}ms {:.0}%", ms, ms as f64 / budget * 100.0),
+            None => "idle".to_string(),
+        };
+        tracing::info!(
+            "load (1m/5m/15m):  fps {:.1} / {:.1} / {:.1}   render {} / {} / {}   (@{:.0}Hz, budget {:.1}ms)",
+            a[0].fps, a[1].fps, a[2].fps,
+            fmt(&a[0]), fmt(&a[1]), fmt(&a[2]),
+            self.refresh_hz, budget
+        );
+    }
+
     /// Become the CM, redirect + acquire the overlay, build the GL backend, then
     /// run the compositing event loop until the process is killed.
     pub fn run(&mut self) -> Result<()> {
@@ -424,13 +532,18 @@ impl App {
             })
             .map_err(|e| anyhow::anyhow!("insert X source: {e}"))?;
 
-        // SIGHUP -> reload the config file live (fade/shadow/unredir/background).
+        // SIGHUP -> reload the config file live; SIGUSR1 -> log the 1m/5m/15m load.
         // Linux-only: calloop's signal source is built on signalfd.
         #[cfg(target_os = "linux")]
         {
-            let signals = Signals::new(&[Signal::SIGHUP]).context("create SIGHUP source")?;
+            let signals =
+                Signals::new(&[Signal::SIGHUP, Signal::SIGUSR1]).context("create signal source")?;
             handle
-                .insert_source(signals, |_event, _meta, app: &mut App| app.reload_config())
+                .insert_source(signals, |event, _meta, app: &mut App| match event.signal() {
+                    Signal::SIGHUP => app.reload_config(),
+                    Signal::SIGUSR1 => app.log_load(),
+                    _ => {}
+                })
                 .map_err(|e| anyhow::anyhow!("insert signal source: {e}"))?;
         }
 
@@ -612,6 +725,17 @@ impl App {
         if !self.redirected {
             return;
         }
+        // Compute the HUD load block up front (it mutates the load ring) so it
+        // doesn't clash with the backend borrow below.
+        let hud_load = if self.show_fps {
+            let a = self.load.averages(Instant::now());
+            Some(HudLoad {
+                fps: [a[0].fps, a[1].fps, a[2].fps],
+                render_ms: [a[0].render_ms, a[1].render_ms, a[2].render_ms],
+            })
+        } else {
+            None
+        };
         let Some(backend) = self.backend.as_ref() else {
             return;
         };
@@ -655,6 +779,7 @@ impl App {
                 corner: self.hud_corner,
                 scale: self.config.fps.scale,
                 refresh_hz: self.refresh_hz as f32,
+                load: hud_load,
             })
         } else {
             None
@@ -669,7 +794,10 @@ impl App {
         }
         // Sample the present cadence (post-swap = vsync-paced). Damage-driven, so
         // this only advances while the screen is actually repainting.
-        self.fps_meter.tick(Instant::now());
+        let now = Instant::now();
+        let render_ms = self.backend.as_ref().map_or(0.0, |b| b.render_ms());
+        self.fps_meter.tick(now);
+        self.load.record(now, render_ms);
         tracing::debug!(
             fps = self.fps_meter.fps(),
             ms = self.fps_meter.last_ms(),

@@ -49,6 +49,10 @@ Working today:
   (arbitrary strings, crisp at any size, no runtime font dependency) — ricom's first on-screen text.
   The hotkey's modifiers + arrow keys move it between corners live, and it auto-scales with resolution
   (2× at 4K).
+- **Load average** — a `loadavg`-style 1m/5m/15m rolling average of compositor FPS and GPU
+  render time (from a per-second ring), shown as a block in the FPS HUD and logged on demand
+  with `kill -USR1 $(pidof ricom)`. Damage-driven, so it reads ~idle during fullscreen bypass
+  (ricom stepped aside) rather than showing false load.
 - **Window rules** — per-window overrides matched on `WM_CLASS` (class/instance),
   `_NET_WM_WINDOW_TYPE`, title (substring), and fullscreen state, each setting `opacity` /
   `blur` / `shadow` / `corner_radius` / `unredir`. Precedence: an explicit `_NET_WM_WINDOW_OPACITY`
@@ -234,7 +238,8 @@ See [`ricom.toml.example`](ricom.toml.example).
 
 Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, background blur
 (dual-Kawase), a TOML config file with live (SIGHUP) reload, an on-demand FPS HUD (global hotkey)
-built on a general SDF text engine, and per-window rules (match on class/type/title/fullscreen).
+built on a general SDF text engine, per-window rules (match on class/type/title/fullscreen), and a
+loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block).
 
 Next:
 
