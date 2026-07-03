@@ -8,8 +8,30 @@
 //! [`Region::area`] is exact (no double counting) and membership is unambiguous.
 //! Rectangles are not band-merged yet, so a region may use more rectangles than
 //! the minimal pixman form — correctness first; minimisation can come later.
+//!
+//! ```
+//! use region::{Rect, Region};
+//!
+//! // A frame's damage: mark everything dirty, then subtract an opaque window.
+//! let mut damage = Region::from_xywh(0, 0, 100, 100);
+//! damage.subtract_rect(&Rect::from_xywh(20, 20, 40, 40));
+//!
+//! assert_eq!(damage.area(), 100 * 100 - 40 * 40); // 8_400 px still need repaint
+//! assert!(!damage.contains_point(30, 30));         // inside the window: clean
+//! assert!(damage.contains_point(0, 0));            // outside it: still damaged
+//! ```
 
 /// A half-open rectangle: covers `x1 <= x < x2`, `y1 <= y < y2`.
+///
+/// ```
+/// use region::Rect;
+///
+/// let r = Rect::from_xywh(0, 0, 4, 4);   // origin (0, 0), size 4x4
+/// assert_eq!(r, Rect::new(0, 0, 4, 4));  // new() takes x1, y1, x2, y2
+/// assert_eq!(r.area(), 16);
+/// assert!(r.contains_point(3, 3));
+/// assert!(!r.contains_point(4, 4));      // half-open: x2 / y2 are exclusive
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub struct Rect {
     pub x1: i32,
@@ -19,11 +41,14 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Raw edges — **not** normalized: a reversed or degenerate rectangle
+    /// (`x2 <= x1` or `y2 <= y1`) is empty and contributes no pixels.
     pub const fn new(x1: i32, y1: i32, x2: i32, y2: i32) -> Self {
         Rect { x1, y1, x2, y2 }
     }
 
-    /// Construct from origin + size.
+    /// Construct from origin + size: covers `x..x+w`, `y..y+h`. A non-positive
+    /// `w` or `h` yields an empty rectangle (no normalization).
     pub const fn from_xywh(x: i32, y: i32, w: i32, h: i32) -> Self {
         Rect { x1: x, y1: y, x2: x + w, y2: y + h }
     }
@@ -41,6 +66,8 @@ impl Rect {
         self.x1 >= self.x2 || self.y1 >= self.y2
     }
 
+    /// Pixel count, or `0` when empty. Returns `i64` so a full `i32`-sized
+    /// rectangle cannot overflow.
     pub const fn area(&self) -> i64 {
         if self.is_empty() {
             0
@@ -49,11 +76,22 @@ impl Rect {
         }
     }
 
+    /// Half-open membership: the `x2` / `y2` edges are **excluded**.
     pub const fn contains_point(&self, x: i32, y: i32) -> bool {
         x >= self.x1 && x < self.x2 && y >= self.y1 && y < self.y2
     }
 
     /// Geometric intersection, or `None` if the rectangles don't overlap.
+    /// Rectangles that merely share an edge do **not** overlap; a `Some` result
+    /// is always non-empty.
+    ///
+    /// ```
+    /// use region::Rect;
+    ///
+    /// let a = Rect::new(0, 0, 4, 4);
+    /// assert_eq!(a.intersect(&Rect::new(2, 2, 6, 6)), Some(Rect::new(2, 2, 4, 4)));
+    /// assert_eq!(a.intersect(&Rect::new(4, 4, 8, 8)), None); // edge-touch is not overlap
+    /// ```
     pub fn intersect(&self, o: &Rect) -> Option<Rect> {
         let r = Rect {
             x1: self.x1.max(o.x1),
@@ -102,6 +140,21 @@ fn rect_subtract(a: &Rect, b: &Rect, out: &mut Vec<Rect>) {
 }
 
 /// A set of pixels as pairwise-disjoint, non-empty rectangles.
+///
+/// **Invariant:** the stored rectangles are pairwise-disjoint and non-empty, and
+/// their union is exactly the region. Every method preserves this, so
+/// [`Region::area`] never double-counts. Iteration order is unspecified and the
+/// rectangles are not band-merged — the count may exceed the minimal pixman form.
+///
+/// ```
+/// use region::{Rect, Region};
+///
+/// // Overlapping rectangles union into a disjoint set — the 2x2 overlap
+/// // is counted exactly once, so the area is exact.
+/// let mut g = Region::from_rect(Rect::new(0, 0, 4, 4));
+/// g.union(&Region::from_rect(Rect::new(2, 2, 6, 6)));
+/// assert_eq!(g.area(), 16 + 16 - 4);
+/// ```
 #[derive(Clone, Default, Debug)]
 pub struct Region {
     rects: Vec<Rect>,
@@ -112,6 +165,8 @@ impl Region {
         Region { rects: Vec::new() }
     }
 
+    /// A region covering exactly `r`. An empty `r` yields an empty region —
+    /// empties are never stored, which upholds the non-empty invariant.
     pub fn from_rect(r: Rect) -> Self {
         let mut g = Region::new();
         if !r.is_empty() {
@@ -124,7 +179,9 @@ impl Region {
         Region::from_rect(Rect::from_xywh(x, y, w, h))
     }
 
-    /// The disjoint rectangles making up this region.
+    /// The rectangles making up this region: pairwise-disjoint, all non-empty,
+    /// union == the region. Order and count are unspecified (not band-merged) —
+    /// rely only on the covered pixel set, not on the arrangement.
     pub fn rects(&self) -> &[Rect] {
         &self.rects
     }
@@ -141,12 +198,23 @@ impl Region {
         self.rects.clear();
     }
 
-    /// Exact total area (rectangles are disjoint).
+    /// Exact total pixel count — the sum of the rectangles' areas, exact
+    /// precisely because they are disjoint (nothing is double-counted).
     pub fn area(&self) -> i64 {
         self.rects.iter().map(|r| r.area()).sum()
     }
 
     /// Smallest rectangle containing the whole region, or `None` if empty.
+    ///
+    /// ```
+    /// use region::{Rect, Region};
+    ///
+    /// let mut g = Region::new();
+    /// g.add_rect(Rect::new(0, 0, 2, 2));
+    /// g.add_rect(Rect::new(5, 5, 7, 8));
+    /// assert_eq!(g.extents(), Some(Rect::new(0, 0, 7, 8))); // bounding box
+    /// assert!(Region::new().extents().is_none());           // none when empty
+    /// ```
     pub fn extents(&self) -> Option<Rect> {
         let mut it = self.rects.iter();
         let mut e = *it.next()?;
@@ -159,6 +227,8 @@ impl Region {
         Some(e)
     }
 
+    /// True iff some rectangle contains the point (half-open, so the `x2` / `y2`
+    /// edges are excluded).
     pub fn contains_point(&self, x: i32, y: i32) -> bool {
         self.rects.iter().any(|r| r.contains_point(x, y))
     }
@@ -169,7 +239,17 @@ impl Region {
         }
     }
 
-    /// `self := self \ rect`
+    /// Removes `rect` (`self := self \ rect`), preserving the disjoint invariant.
+    /// No-op if `rect` is empty or the region is already empty.
+    ///
+    /// ```
+    /// use region::{Rect, Region};
+    ///
+    /// let mut g = Region::from_xywh(0, 0, 10, 10);
+    /// g.subtract_rect(&Rect::from_xywh(3, 3, 4, 4)); // punch a hole in the middle
+    /// assert_eq!(g.area(), 100 - 16);
+    /// assert_eq!(g.rects().len(), 4);                // 4 disjoint strips remain
+    /// ```
     pub fn subtract_rect(&mut self, b: &Rect) {
         if b.is_empty() || self.rects.is_empty() {
             return;
@@ -181,7 +261,8 @@ impl Region {
         self.rects = out;
     }
 
-    /// `self := self \ other`
+    /// Removes all of `other` (`self := self \ other`), preserving the disjoint
+    /// invariant.
     pub fn subtract(&mut self, other: &Region) {
         for b in &other.rects {
             if self.rects.is_empty() {
@@ -191,7 +272,7 @@ impl Region {
         }
     }
 
-    /// `self := self ∩ rect`
+    /// Clips to `rect` (`self := self ∩ rect`). An empty `rect` clears the region.
     pub fn intersect_rect(&mut self, b: &Rect) {
         if b.is_empty() {
             self.rects.clear();
@@ -219,13 +300,14 @@ impl Region {
         Region { rects: out }
     }
 
-    /// `self := self ∩ other`
+    /// In-place intersection (`self := self ∩ other`); see [`Region::intersection`].
     pub fn intersect(&mut self, other: &Region) {
         *self = self.intersection(other);
     }
 
-    /// `self := self ∪ rect`. Only the parts of `rect` not already covered are
-    /// added, preserving disjointness.
+    /// Adds `rect` (`self := self ∪ rect`). Only the parts not already covered
+    /// are stored, so overlaps are counted once and the disjoint invariant holds;
+    /// an empty or fully-covered `rect` is a no-op.
     pub fn add_rect(&mut self, r: Rect) {
         if r.is_empty() {
             return;
@@ -244,7 +326,8 @@ impl Region {
         self.rects.extend(parts);
     }
 
-    /// `self := self ∪ other`
+    /// Adds all of `other` (`self := self ∪ other`), preserving the disjoint
+    /// invariant.
     pub fn union(&mut self, other: &Region) {
         for r in &other.rects {
             self.add_rect(*r);
