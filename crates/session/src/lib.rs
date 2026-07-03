@@ -22,7 +22,8 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{Place, Window};
 
-use backend_gl::{GlBackend, Hud, HudCorner, HudLoad, Quad, RenderParams};
+use backend_gl::{GlBackend, Hud, HudCorner, HudLoad, Quad, RenderParams, WindowDraw};
+use region::{Rect, Region};
 use config::{Config, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
@@ -771,7 +772,49 @@ impl App {
                 });
             }
         }
-        tracing::trace!(items = items.len(), "composite");
+        // Region-level occlusion: walk top-to-bottom, accumulating the region
+        // covered by opaque windows above. Each window is drawn only in its
+        // visible part (footprint ∩ screen − covered); an empty visible region
+        // means fully occluded, so it's dropped from the draw list entirely.
+        let (sw, sh) = (self.x.root_width as i32, self.x.root_height as i32);
+        let screen = Rect::from_xywh(0, 0, sw, sh);
+        let sr = self.config.shadow.radius as i32;
+        let mut covered = Region::new();
+        let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
+        for q in items.iter().rev() {
+            let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
+            // Conservative footprint: add the shadow reach so a window whose shadow
+            // still peeks out isn't culled. Off-screen area never shows, so clamp.
+            let footprint = if q.shadow {
+                Rect::new(q.x - sr, q.y - sr, q.x + q.w + sr, q.y + q.h + sr)
+            } else {
+                rect
+            };
+            let mut visible = Region::from_rect(footprint);
+            visible.intersect_rect(&screen);
+            visible.subtract(&covered);
+            if !visible.is_empty() {
+                draws.push(WindowDraw { quad: *q, clip: visible.rects().to_vec() });
+            }
+            // Opaque windows occlude what's below: a square one covers its whole
+            // rect; a rounded one covers all but its (transparent) corner squares.
+            if q.opacity >= 1.0 {
+                let cr = q.corner_radius as i32;
+                if cr <= 0 {
+                    covered.add_rect(rect);
+                } else {
+                    let (x0, y0, x1, y1) = (q.x, q.y, q.x + q.w, q.y + q.h);
+                    let mut occ = Region::from_rect(rect);
+                    occ.subtract_rect(&Rect::new(x0, y0, x0 + cr, y0 + cr));
+                    occ.subtract_rect(&Rect::new(x1 - cr, y0, x1, y0 + cr));
+                    occ.subtract_rect(&Rect::new(x0, y1 - cr, x0 + cr, y1));
+                    occ.subtract_rect(&Rect::new(x1 - cr, y1 - cr, x1, y1));
+                    covered.union(&occ);
+                }
+            }
+        }
+        draws.reverse(); // restore bottom-to-top for correct layering
+        tracing::trace!(windows = items.len(), drawn = draws.len(), "composite");
         let hud = if self.show_fps {
             Some(Hud {
                 fps: self.fps_meter.fps(),
@@ -785,9 +828,9 @@ impl App {
             None
         };
         if let Err(e) = backend.present_windows(
-            &items,
-            self.x.root_width as i32,
-            self.x.root_height as i32,
+            &draws,
+            sw,
+            sh,
             hud.as_ref(),
         ) {
             tracing::error!("composite failed: {e}");

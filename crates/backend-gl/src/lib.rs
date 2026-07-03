@@ -250,6 +250,23 @@ pub struct Quad {
     pub corner_radius: f32,
 }
 
+/// A window to composite plus the screen-space rectangles it's actually visible
+/// in (region-level occlusion): [`GlBackend::present_windows`] scissors each of
+/// the quad's draws to `clip`, so pixels covered by an opaque window on top are
+/// never shaded. An empty `clip` is a fully-occluded window (callers omit those).
+pub struct WindowDraw {
+    pub quad: Quad,
+    pub clip: Vec<region::Rect>,
+}
+
+impl WindowDraw {
+    /// Draw `quad` in full — a single clip rect equal to its own bounds (no
+    /// occlusion). Used by the diagnostic `--blit-test` / `--opacity-test` paths.
+    pub fn whole(quad: Quad) -> Self {
+        WindowDraw { quad, clip: vec![region::Rect::from_xywh(quad.x, quad.y, quad.w, quad.h)] }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct GlInfo {
     pub vendor: String,
@@ -1005,12 +1022,13 @@ impl GlBackend {
         }
     }
 
-    /// Composite a stack of [`Quad`]s: clear once, blit each bottom-to-top with
-    /// its opacity, then draw the optional `hud`, present once. Items that fail to
-    /// bind are skipped.
+    /// Composite a stack of windows: clear once, then draw each bottom-to-top —
+    /// but only inside its `clip` rectangles (region-level occlusion), so pixels
+    /// hidden behind an opaque window on top are never shaded. Draws the optional
+    /// `hud` on top, presents once. Items that fail to bind are skipped.
     pub fn present_windows(
         &self,
-        items: &[Quad],
+        items: &[WindowDraw],
         screen_w: i32,
         screen_h: i32,
         hud: Option<&Hud>,
@@ -1044,45 +1062,21 @@ impl GlBackend {
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
         }
-        for &Quad { pixmap, x, y, w, h, opacity, shadow, blur, corner_radius } in items {
-            // Drop shadow first, so the window is drawn on top of its own shadow
-            // and each window's shadow is cast over whatever is already beneath it.
-            if shadow {
-                let (fx, fy, fw, fh) = (x as f32, y as f32, w as f32, h as f32);
-                unsafe {
-                    self.gl.use_program(Some(self.shadow_program));
-                    self.gl.uniform_1_f32(self.s_corner.as_ref(), corner_radius);
-                    // Quad = bounding box of the left+bottom L: extend left and down by the radius.
-                    self.gl.uniform_4_f32(
-                        self.s_rect.as_ref(),
-                        fx - shadow_radius,
-                        fy,
-                        fw + shadow_radius,
-                        fh + shadow_radius,
-                    );
-                    self.gl.uniform_4_f32(self.s_inner.as_ref(), fx, fy, fw, fh);
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                }
+        for WindowDraw { quad, clip } in items {
+            if clip.is_empty() {
+                continue; // fully occluded — nothing visible to draw
             }
-            // Blur next: frost the backdrop beneath this (translucent) window, then
-            // the window blends on top and its transparency reveals the frost.
+            let &Quad { pixmap, x, y, w, h, opacity, shadow, blur, corner_radius } = quad;
+            let (fx, fy, fw, fh) = (x as f32, y as f32, w as f32, h as f32);
+            let win_rect = region::Rect::from_xywh(x, y, w, h);
+            // Frost the backdrop first (renders the offscreen blur pyramid — must
+            // run BEFORE the scissor test is enabled, or those passes get clipped).
             let frost = if blur {
                 self.blur_backdrop(screen_w, screen_h, blur_passes, blur_radius)
             } else {
                 None
             };
-            if let Some(btex) = frost {
-                unsafe {
-                    self.gl.use_program(Some(self.frost_program));
-                    self.gl.uniform_2_f32(self.f_screen.as_ref(), screen_w as f32, screen_h as f32);
-                    self.gl.uniform_1_f32(self.f_corner.as_ref(), corner_radius);
-                    self.gl.uniform_1_i32(self.f_tex.as_ref(), 0);
-                    self.gl.active_texture(glow::TEXTURE0);
-                    self.gl.bind_texture(glow::TEXTURE_2D, Some(btex));
-                    self.gl.uniform_4_f32(self.f_rect.as_ref(), x as f32, y as f32, w as f32, h as f32);
-                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-                }
-            }
+            // Bind this window's pixmap as a texture once, reused across clip rects.
             let buffer =
                 unsafe { egl::ClientBuffer::from_ptr((pixmap as usize) as egl::EGLClientBuffer) };
             let no_ctx = unsafe { egl::Context::from_ptr(egl::NO_CONTEXT) };
@@ -1097,25 +1091,58 @@ impl GlBackend {
                     continue;
                 }
             };
+            let tex = match unsafe { self.gl.create_texture() } {
+                Ok(t) => t,
+                Err(_) => {
+                    let _ = self.egl.destroy_image(self.display, image);
+                    continue;
+                }
+            };
             unsafe {
-                let tex = match self.gl.create_texture() {
-                    Ok(t) => t,
-                    Err(_) => {
-                        let _ = self.egl.destroy_image(self.display, image);
-                        continue;
-                    }
-                };
-                self.gl.use_program(Some(self.program)); // back to blit (shadow may have switched it)
                 self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
                 (self.image_target)(glow::TEXTURE_2D, image.as_ptr() as *const c_void);
-                self.gl.uniform_4_f32(self.u_rect.as_ref(), x as f32, y as f32, w as f32, h as f32);
-                self.gl.uniform_1_f32(self.u_opacity.as_ref(), opacity);
-                self.gl.uniform_1_f32(self.u_corner.as_ref(), corner_radius);
-                self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                // Draw only where this window is visible: scissor to each clip rect.
+                // GL's scissor origin is bottom-left, so flip Y from our top-left rects.
+                self.gl.enable(glow::SCISSOR_TEST);
+                for r in clip {
+                    // Shadow spans the whole clip rect (its L reaches into the fringe).
+                    if shadow {
+                        self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
+                        self.gl.use_program(Some(self.shadow_program));
+                        self.gl.uniform_1_f32(self.s_corner.as_ref(), corner_radius);
+                        // Quad = bounding box of the left+bottom L: extend left and down by the radius.
+                        self.gl.uniform_4_f32(
+                            self.s_rect.as_ref(),
+                            fx - shadow_radius, fy, fw + shadow_radius, fh + shadow_radius,
+                        );
+                        self.gl.uniform_4_f32(self.s_inner.as_ref(), fx, fy, fw, fh);
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+                    // Frost + blit only cover the window body: clip to rect ∩ window
+                    // (a pure shadow-fringe rect has no body — skip it).
+                    let Some(br) = r.intersect(&win_rect) else { continue };
+                    self.gl.scissor(br.x1, screen_h - br.y2, br.width(), br.height());
+                    if let Some(btex) = frost {
+                        self.gl.use_program(Some(self.frost_program));
+                        self.gl.uniform_2_f32(self.f_screen.as_ref(), screen_w as f32, screen_h as f32);
+                        self.gl.uniform_1_f32(self.f_corner.as_ref(), corner_radius);
+                        self.gl.uniform_1_i32(self.f_tex.as_ref(), 0);
+                        self.gl.bind_texture(glow::TEXTURE_2D, Some(btex));
+                        self.gl.uniform_4_f32(self.f_rect.as_ref(), fx, fy, fw, fh);
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+                    self.gl.use_program(Some(self.program)); // back to blit
+                    self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
+                    self.gl.uniform_4_f32(self.u_rect.as_ref(), fx, fy, fw, fh);
+                    self.gl.uniform_1_f32(self.u_opacity.as_ref(), opacity);
+                    self.gl.uniform_1_f32(self.u_corner.as_ref(), corner_radius);
+                    self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                }
+                self.gl.disable(glow::SCISSOR_TEST);
                 self.gl.delete_texture(tex);
             }
             let _ = self.egl.destroy_image(self.display, image);

@@ -36,6 +36,8 @@ Working today:
   `swap_interval(1)` for vsync.
 - **Renderer** — composite the visible window stack (mapped + fading-out) back-to-front with
   per-window opacity and drop shadows; **damage-driven**, plus a frame clock while anything animates.
+  **Region-level occlusion culling** paints each window only where it isn't hidden behind an opaque
+  one, so stacked fullscreen windows don't pay for the covered layers.
 - **Resolution changes** — follows RandR screen-size changes (`xrandr`) and re-composites at the new size.
 - **unredir-if-possible** — when one window covers the whole screen (e.g. fullscreen video), ricom
   unredirects and steps aside so it page-flips straight to the display (compositor cost → ~0); it drops
@@ -119,8 +121,9 @@ The stages map onto the crates: **xconn** speaks the X protocol (extension setup
 overlay + redirect, `NameWindowPixmap`, damage); **wm** keeps the bottom-to-top window stack
 in sync with structure events; **backend-gl** owns the EGL context and does texture-from-pixmap,
 the blit, and the vsync present; **region** is the pixman-style damage maths; and **session**
-ties them together in the event loop. (Today every frame is a full-screen repaint — `region`
-is there for the `use-damage` partial-repaint optimisation on the roadmap.)
+ties them together in the event loop. (`region` drives occlusion culling — each window is painted
+only where it isn't covered by an opaque window above; the `use-damage` partial-repaint
+optimisation on the roadmap builds on the same region maths.)
 
 When one window covers the whole screen with nothing on top (e.g. fullscreen video), ricom
 **unredirects** — it unmaps the overlay and steps out of the way so that window page-flips directly to
@@ -239,8 +242,9 @@ See [`ricom.toml.example`](ricom.toml.example).
 
 Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, background blur
 (dual-Kawase), a TOML config file with live (SIGHUP) reload, an on-demand FPS HUD (global hotkey)
-built on a general SDF text engine, per-window rules (match on class/type/title/fullscreen), and a
-loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block).
+built on a general SDF text engine, per-window rules (match on class/type/title/fullscreen), a
+loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), and region-level occlusion
+culling (skip windows/pixels hidden behind an opaque one).
 
 Next:
 
