@@ -291,12 +291,28 @@ pub struct Hud {
     pub load: Option<HudLoad>,
 }
 
-/// Solid-colour fill (HUD panel + graph bars). Reuses `BLIT_VS` (position via
-/// `u_rect`/`u_screen`); premultiplied output to match the compositor's blend.
+/// Solid-colour fill with optional rounded corners (HUD panel; graph bars/budget
+/// line pass radius 0). Reuses `BLIT_VS` (position via `u_rect`/`u_screen`, and its
+/// `v_tex` for the corner mask); premultiplied output to match the compositor's blend.
 const SOLID_FS: &str = r#"#version 330 core
-uniform vec4 u_color; // straight RGBA
+in vec2 v_tex;
+uniform vec4 u_color;   // straight RGBA
+uniform vec4 u_rect;    // x, y, w, h (px) — shared with BLIT_VS
+uniform float u_radius; // corner radius (px); 0 = square
 out vec4 frag;
-void main() { frag = vec4(u_color.rgb * u_color.a, u_color.a); }
+void main() {
+    float a = u_color.a;
+    if (u_radius > 0.0) {
+        // Same rounded-box SDF as the window blit: fade alpha to 0 outside the
+        // rounded rect so the panel corners round off. `d` = distance outside it.
+        vec2 hs = u_rect.zw * 0.5;
+        float r = min(u_radius, min(hs.x, hs.y));
+        vec2 p = abs(v_tex * u_rect.zw - hs);
+        float d = length(max(p - (hs - r), vec2(0.0))) - r;
+        a *= 1.0 - smoothstep(-0.5, 0.5, d);   // ~1px antialiased edge
+    }
+    frag = vec4(u_color.rgb * a, a);
+}
 "#;
 
 fn load_glow(egl: &egl::DynamicInstance<egl::EGL1_5>) -> glow::Context {
@@ -466,6 +482,7 @@ pub struct GlBackend {
     sol_rect: Option<glow::NativeUniformLocation>,
     sol_screen: Option<glow::NativeUniformLocation>,
     sol_color: Option<glow::NativeUniformLocation>,
+    sol_radius: Option<glow::NativeUniformLocation>,
     /// Double-buffered `GL_TIME_ELAPSED` queries for per-composite GPU render time
     /// (`None` if unsupported). Read two frames later, so reading never stalls.
     gpu_timers: [Option<glow::NativeQuery>; 2],
@@ -605,13 +622,14 @@ impl GlBackend {
             )
         };
         let text = text::TextRenderer::new(&gl)?;
-        let (solid_program, sol_rect, sol_screen, sol_color) = unsafe {
+        let (solid_program, sol_rect, sol_screen, sol_color, sol_radius) = unsafe {
             let p = make_program(&gl, BLIT_VS, SOLID_FS)?;
             (
                 p,
                 gl.get_uniform_location(p, "u_rect"),
                 gl.get_uniform_location(p, "u_screen"),
                 gl.get_uniform_location(p, "u_color"),
+                gl.get_uniform_location(p, "u_radius"),
             )
         };
         // Double-buffered GPU timer queries for HUD render time (all-or-nothing).
@@ -635,7 +653,7 @@ impl GlBackend {
             frost_program, f_tex, f_screen, f_rect, f_corner,
             blur: RefCell::new(None),
             image_target, render, text,
-            solid_program, sol_rect, sol_screen, sol_color,
+            solid_program, sol_rect, sol_screen, sol_color, sol_radius,
             gpu_timers,
             timer_slot: Cell::new(0),
             timer_count: Cell::new(0),
@@ -840,13 +858,15 @@ impl GlBackend {
         Some(chain.levels[0].tex)
     }
 
-    /// Fill a screen-space rect with a solid (premultiplied) colour. Assumes the
-    /// unit-quad VAO is bound and blending is enabled (as in `present_windows`).
-    fn fill_rect(&self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4], sw: i32, sh: i32) {
+    /// Fill a screen-space rect (optionally rounded — `radius` px, 0 = square) with
+    /// a solid (premultiplied) colour. Assumes the unit-quad VAO is bound and
+    /// blending is enabled (as in `present_windows`).
+    fn fill_rect(&self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: [f32; 4], sw: i32, sh: i32) {
         unsafe {
             self.gl.use_program(Some(self.solid_program));
             self.gl.uniform_2_f32(self.sol_screen.as_ref(), sw as f32, sh as f32);
             self.gl.uniform_4_f32(self.sol_rect.as_ref(), x, y, w, h);
+            self.gl.uniform_1_f32(self.sol_radius.as_ref(), radius);
             self.gl.uniform_4_f32(self.sol_color.as_ref(), color[0], color[1], color[2], color[3]);
             self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
         }
@@ -860,13 +880,16 @@ impl GlBackend {
         // SDF text scales cleanly.
         let s = (sh as f32 / 1080.0).max(0.5) * hud.scale;
         let pad = 8.0 * s;
-        let margin = 16.0 * s;
+        let margin = 28.0 * s; // inset from the screen edge (the HUD floats in a bit)
+        let radius = 10.0 * s; // HUD panel corner radius (special-cased, not the window setting)
         let text_px = 20.0 * s;
         // One refresh interval is the render budget: a composite must finish within
         // it to hit vsync. Colour by headroom, not by the (content-driven) frame rate.
         let budget = 1000.0 / hud.refresh_hz.max(1.0);
         let render_ms = self.render_ms.get();
-        let label = format!("{} fps   {:.1} ms", hud.fps, render_ms);
+        // Width-padded fields so a one-frame spike (fps or render_ms briefly hitting
+        // 3 digits) can't reflow the labels — no "flick". Monospace + fixed field.
+        let label = format!("{:>3} fps   {:>5.1} ms", hud.fps, render_ms);
         let (tw, th) = self.text.measure(text_px, &label);
         let samples = self.render_samples.borrow();
         let bar_w = 2.0 * s;
@@ -913,7 +936,7 @@ impl GlBackend {
             HudCorner::BottomRight => (sw as f32 - margin - panel_w, sh as f32 - margin - panel_h),
         };
         // Panel background.
-        self.fill_rect(px, py, panel_w, panel_h, [0.05, 0.05, 0.07, 0.72], sw, sh);
+        self.fill_rect(px, py, panel_w, panel_h, radius, [0.05, 0.05, 0.07, 0.72], sw, sh);
         // Render-time graph: one bar per composite, full height = one refresh budget.
         // Green = plenty of headroom, amber = tight, red = at/over budget (missed vsync).
         if hud.graph && !samples.is_empty() {
@@ -933,10 +956,10 @@ impl GlBackend {
                 } else {
                     [0.95, 0.40, 0.35, 0.90]
                 };
-                self.fill_rect(bx, gy + (graph_h - bh), (bar_w - 0.5 * s).max(1.0), bh, col, sw, sh);
+                self.fill_rect(bx, gy + (graph_h - bh), (bar_w - 0.5 * s).max(1.0), bh, 0.0, col, sw, sh);
             }
             // Budget ceiling line at the top of the graph (= one refresh interval).
-            self.fill_rect(gx, gy, content_w, s.max(1.0), [1.0, 1.0, 1.0, 0.22], sw, sh);
+            self.fill_rect(gx, gy, content_w, s.max(1.0), 0.0, [1.0, 1.0, 1.0, 0.22], sw, sh);
         }
         drop(samples);
         // Numbers on top.

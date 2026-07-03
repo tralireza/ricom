@@ -17,10 +17,11 @@ video with a picture-in-picture corner overlay. Composited tear-free.*
 
 *Per-window opacity, fade in/out, and left+bottom drop shadows — composited tear-free.*
 
-![ricom's on-demand FPS HUD over a blur-frosted backdrop](screenshots/ricom-fps.png)
+![ricom's on-demand FPS HUD with the 1m/5m/15m load block, over running video](screenshots/ricom-fps.png)
 
-*The on-demand FPS HUD (top-right, toggled with `Super+Shift+F`) — FPS, frame-time, and a rolling
-frame-time graph, drawn by the built-in SDF text engine over a translucent, blur-frosted window.*
+*The on-demand FPS HUD (toggled with `Super+Shift+F`) — FPS, frame-time, a rolling frame-time
+graph, and a `loadavg`-style 1m/5m/15m block (fps + GPU render time), drawn by the built-in SDF
+text engine over running video. The same figures are logged on `SIGUSR1`.*
 
 ## Status
 
