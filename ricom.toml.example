@@ -13,6 +13,10 @@ background = [0.05, 0.05, 0.07]
 # Window corner radius in px (0 = square corners).
 corner_radius = 0.0
 
+# Default opacity for windows that set no _NET_WM_WINDOW_OPACITY and match no rule
+# (0.0-1.0; 1.0 = opaque). The bottom layer of the opacity stack (see [[rule]]).
+default_opacity = 1.0
+
 [fade]
 enabled = true
 duration = 0.2      # seconds (fade in on map, out on unmap/destroy)
@@ -35,3 +39,28 @@ hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + a
 corner = "top-right"     # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true             # draw the rolling frame-time graph under the numbers
 scale = 1.0              # size multiplier on top of automatic screen-height scaling (4K = 2x)
+
+# Per-window rules. Each [[rule]] has a `match` (all listed conditions must hold —
+# class/instance/window_type match exactly, title matches as a substring,
+# fullscreen matches state) plus the settings it overrides. Rules apply in order,
+# last match wins per field. A built-in rule already keeps fullscreen windows
+# opaque + unblurred; add your own to override. Examples (uncomment to use):
+
+# [[rule]]
+# match = { class = "mpv" }         # video: never dim or blur, keep it crisp
+# opacity = 1.0
+# blur = false
+# shadow = false
+
+# [[rule]]
+# match = { class = "Alacritty" }   # frosted terminals
+# opacity = 0.85
+# blur = true
+
+# [[rule]]
+# match = { window_type = "dock" }  # no shadow on panels/bars
+# shadow = false
+
+# [[rule]]
+# match = { title = "Picture-in-Picture" }
+# corner_radius = 12.0

@@ -246,6 +246,8 @@ pub struct Quad {
     /// Frost the backdrop under this window (set for translucent windows when
     /// blur is enabled; ignored for opaque windows whose backdrop is hidden).
     pub blur: bool,
+    /// Corner radius (px) for this window; `0.0` = square.
+    pub corner_radius: f32,
 }
 
 #[derive(Debug, Clone)]
@@ -940,7 +942,7 @@ impl GlBackend {
         self.collect_render_time();
         let timer = self.gpu_timers[self.timer_slot.get()];
         let RenderParams {
-            shadow_radius, shadow_strength, background, corner_radius, blur_passes, blur_radius, ..
+            shadow_radius, shadow_strength, background, blur_passes, blur_radius, ..
         } = self.render;
         unsafe {
             if let Some(q) = timer {
@@ -959,20 +961,19 @@ impl GlBackend {
             self.gl.use_program(Some(self.shadow_program));
             self.gl.uniform_2_f32(self.s_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_2_f32(self.s_shadow.as_ref(), shadow_radius, shadow_strength);
-            self.gl.uniform_1_f32(self.s_corner.as_ref(), corner_radius);
-            // Blit program's per-frame constants.
+            // Blit program's per-frame constants (corner radius is per-window, set in the loop).
             self.gl.use_program(Some(self.program));
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
-            self.gl.uniform_1_f32(self.u_corner.as_ref(), corner_radius);
         }
-        for &Quad { pixmap, x, y, w, h, opacity, shadow, blur } in items {
+        for &Quad { pixmap, x, y, w, h, opacity, shadow, blur, corner_radius } in items {
             // Drop shadow first, so the window is drawn on top of its own shadow
             // and each window's shadow is cast over whatever is already beneath it.
             if shadow {
                 let (fx, fy, fw, fh) = (x as f32, y as f32, w as f32, h as f32);
                 unsafe {
                     self.gl.use_program(Some(self.shadow_program));
+                    self.gl.uniform_1_f32(self.s_corner.as_ref(), corner_radius);
                     // Quad = bounding box of the left+bottom L: extend left and down by the radius.
                     self.gl.uniform_4_f32(
                         self.s_rect.as_ref(),
@@ -1035,6 +1036,7 @@ impl GlBackend {
                 (self.image_target)(glow::TEXTURE_2D, image.as_ptr() as *const c_void);
                 self.gl.uniform_4_f32(self.u_rect.as_ref(), x as f32, y as f32, w as f32, h as f32);
                 self.gl.uniform_1_f32(self.u_opacity.as_ref(), opacity);
+                self.gl.uniform_1_f32(self.u_corner.as_ref(), corner_radius);
                 self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                 self.gl.delete_texture(tex);
             }

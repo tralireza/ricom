@@ -416,6 +416,81 @@ impl XConn {
             .map(|v| v as f64 / u32::MAX as f64))
     }
 
+    /// The name of an interned atom (reverse of [`atom`](Self::atom)).
+    pub fn atom_name(&self, atom: Atom) -> Result<String> {
+        let reply = self
+            .conn
+            .get_atom_name(atom)
+            .context("get_atom_name")?
+            .reply()
+            .context("get_atom_name reply")?;
+        Ok(String::from_utf8_lossy(&reply.name).into_owned())
+    }
+
+    /// Read `WM_CLASS` as `(instance, class)` — the two `\0`-separated strings.
+    /// `None` when the property is absent.
+    pub fn get_wm_class(&self, win: Window) -> Result<Option<(String, String)>> {
+        let reply = self
+            .conn
+            .get_property(false, win, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 1024)
+            .context("get_property(WM_CLASS)")?
+            .reply()
+            .context("get_property(WM_CLASS) reply")?;
+        if reply.value.is_empty() {
+            return Ok(None);
+        }
+        let mut parts = reply.value.split(|&b| b == 0);
+        let instance = parts.next().map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
+        let class = parts.next().map(|s| String::from_utf8_lossy(s).into_owned()).unwrap_or_default();
+        Ok(Some((instance, class)))
+    }
+
+    /// Read `_NET_WM_WINDOW_TYPE` as a short lowercase name from the first atom in
+    /// the list (e.g. `"dialog"`, `"dock"`, `"normal"`). `None` when absent.
+    pub fn get_window_type(&self, win: Window) -> Result<Option<String>> {
+        let prop = self.atom("_NET_WM_WINDOW_TYPE")?;
+        let reply = self
+            .conn
+            .get_property(false, win, prop, AtomEnum::ATOM, 0, 8)
+            .context("get_property(_NET_WM_WINDOW_TYPE)")?
+            .reply()
+            .context("get_property(_NET_WM_WINDOW_TYPE) reply")?;
+        let Some(atom) = reply.value32().and_then(|mut it| it.next()) else {
+            return Ok(None);
+        };
+        let name = self.atom_name(atom)?;
+        // "_NET_WM_WINDOW_TYPE_DIALOG" -> "dialog"
+        let short = name.strip_prefix("_NET_WM_WINDOW_TYPE_").unwrap_or(&name).to_ascii_lowercase();
+        Ok(Some(short))
+    }
+
+    /// Read the window title — `_NET_WM_NAME` (UTF-8) if set, else legacy `WM_NAME`.
+    /// `None` when neither is set.
+    pub fn get_window_title(&self, win: Window) -> Result<Option<String>> {
+        let net_name = self.atom("_NET_WM_NAME")?;
+        let utf8 = self.atom("UTF8_STRING")?;
+        let reply = self
+            .conn
+            .get_property(false, win, net_name, utf8, 0, 1024)
+            .context("get_property(_NET_WM_NAME)")?
+            .reply()
+            .context("get_property(_NET_WM_NAME) reply")?;
+        if !reply.value.is_empty() {
+            return Ok(Some(String::from_utf8_lossy(&reply.value).into_owned()));
+        }
+        let reply = self
+            .conn
+            .get_property(false, win, AtomEnum::WM_NAME, AtomEnum::STRING, 0, 1024)
+            .context("get_property(WM_NAME)")?
+            .reply()
+            .context("get_property(WM_NAME) reply")?;
+        if reply.value.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(String::from_utf8_lossy(&reply.value).into_owned()))
+        }
+    }
+
     /// Ask the server to deliver `PropertyNotify` for this window, so we learn
     /// when e.g. `_NET_WM_WINDOW_OPACITY` changes at runtime. Event masks are
     /// per-client, so this does not disturb the owning client's own selection.

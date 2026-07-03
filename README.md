@@ -49,11 +49,16 @@ Working today:
   (arbitrary strings, crisp at any size, no runtime font dependency) — ricom's first on-screen text.
   The hotkey's modifiers + arrow keys move it between corners live, and it auto-scales with resolution
   (2× at 4K).
+- **Window rules** — per-window overrides matched on `WM_CLASS` (class/instance),
+  `_NET_WM_WINDOW_TYPE`, title (substring), and fullscreen state, each setting `opacity` /
+  `blur` / `shadow` / `corner_radius` / `unredir`. Precedence: an explicit `_NET_WM_WINDOW_OPACITY`
+  beats a rule, which beats a built-in "fullscreen → opaque + unblurred" rule, which beats the
+  global `default_opacity`. Live-reloads with the rest of the config.
 
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** window dimming, window rules, the `use-damage` partial-repaint optimisation,
+**Not yet implemented:** window dimming, the `use-damage` partial-repaint optimisation,
 animations, and the xrender/glx backends + D-Bus IPC. See [Roadmap](#roadmap).
 
 ## How it works
@@ -180,6 +185,7 @@ ricom)`** to reload live — no restart. Every key is optional and falls back to
 unredir = true                  # false = always composite, even a lone fullscreen window
 background = [0.05, 0.05, 0.07]  # composite background colour (RGB, seen where no window covers)
 corner_radius = 0.0             # window corner radius in px (0 = square)
+default_opacity = 1.0           # opacity for windows with no _NET_WM_WINDOW_OPACITY and no rule
 
 [fade]
 enabled = true
@@ -202,6 +208,24 @@ hotkey = "Super+Shift+F"        # toggle shortcut (XGrabKey); its modifiers + ar
 corner = "top-right"            # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true                    # rolling frame-time graph under the numbers
 scale = 1.0                     # size multiplier on top of auto screen-height scaling (4K = 2×)
+
+# Per-window rules (none by default). Each [[rule]] has a `match` (all conditions must hold —
+# class/instance/window_type exact, title substring, fullscreen state) plus the fields it
+# overrides; applied in order, last match wins. A built-in rule keeps fullscreen windows opaque.
+[[rule]]
+match = { class = "mpv" }       # video: never dim or blur
+opacity = 1.0
+blur = false
+shadow = false
+
+[[rule]]
+match = { class = "Alacritty" } # frosted terminals
+opacity = 0.85
+blur = true
+
+[[rule]]
+match = { window_type = "dock" }  # no shadow on panels/bars
+shadow = false
 ```
 
 See [`ricom.toml.example`](ricom.toml.example).
@@ -209,14 +233,13 @@ See [`ricom.toml.example`](ricom.toml.example).
 ## Roadmap
 
 Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, background blur
-(dual-Kawase), a TOML config file with live (SIGHUP) reload, and an on-demand FPS HUD (global hotkey)
-built on a general SDF text engine.
+(dual-Kawase), a TOML config file with live (SIGHUP) reload, an on-demand FPS HUD (global hotkey)
+built on a general SDF text engine, and per-window rules (match on class/type/title/fullscreen).
 
 Next:
 
 1. `use-damage` partial repaint — repaint only damaged regions (biggest win on mostly-static screens).
-2. Window rules (per-window opacity / blur / shadow overrides).
-3. Animations (picom-style transition scripts).
+2. Animations (picom-style transition scripts).
 
 ## License
 

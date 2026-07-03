@@ -23,7 +23,7 @@ use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{Place, Window};
 
 use backend_gl::{GlBackend, Hud, HudCorner, Quad, RenderParams};
-use config::Config;
+use config::{Config, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
 
@@ -51,6 +51,12 @@ fn hud_corner(s: &str) -> HudCorner {
         "bottom-right" => HudCorner::BottomRight,
         _ => HudCorner::TopRight,
     }
+}
+
+/// Does an outer rectangle (position, size, uniform border) cover the whole root?
+/// ricom's "fullscreen" test, shared by unredir-if-possible and rule matching.
+fn covers_root(x: i32, y: i32, w: i32, h: i32, bw: i32, rw: i32, rh: i32) -> bool {
+    x <= 0 && y <= 0 && x + w + 2 * bw >= rw && y + h + 2 * bw >= rh
 }
 
 /// Direction for the HUD move hotkeys (a modifier + an arrow key).
@@ -147,12 +153,25 @@ impl FpsMeter {
 }
 
 /// Top-level compositor state.
+/// Cached window identity (WM_CLASS / type / title) for rule matching — read on
+/// map and refreshed on the relevant `PropertyNotify`. Kept alongside `gfx` so
+/// the `wm` crate stays X-agnostic.
+#[derive(Default, Clone)]
+struct WinIdentity {
+    instance: String,
+    class: String,
+    window_type: String,
+    title: String,
+}
+
 pub struct App {
     pub x: XConn,
     windows: WindowStack,
     overlay: Window,
     backend: Option<GlBackend>,
     gfx: HashMap<WindowId, WinGfx>,
+    /// Cached per-window identity (WM_CLASS / type / title) for rule matching.
+    identities: HashMap<WindowId, WinIdentity>,
     dirty: bool,
     /// Whether the screen is redirected (i.e. we are compositing). When false we
     /// have unredirected + unmapped the overlay so a fullscreen window bypasses
@@ -199,6 +218,7 @@ impl App {
             overlay: 0,
             backend: None,
             gfx: HashMap::new(),
+            identities: HashMap::new(),
             dirty: true,
             redirected: false,
             loop_handle: None,
@@ -302,6 +322,8 @@ impl App {
                 }
                 let hotkey_changed = cfg.fps.hotkey != self.config.fps.hotkey;
                 let corner_changed = cfg.fps.corner != self.config.fps.corner;
+                let opacity_changed =
+                    cfg.default_opacity != self.config.default_opacity || cfg.rules != self.config.rules;
                 self.config = cfg;
                 if let Some(b) = self.backend.as_mut() {
                     b.set_render_params(render_params(&self.config));
@@ -313,6 +335,24 @@ impl App {
                 // A changed config corner repositions the runtime HUD corner.
                 if corner_changed {
                     self.hud_corner = hud_corner(&self.config.fps.corner);
+                }
+                // Changed default_opacity/rules: re-target every window's opacity
+                // (blur/shadow/corner re-resolve on the repaint below).
+                if opacity_changed {
+                    let ids: Vec<WindowId> = self
+                        .windows
+                        .iter_bottom_to_top()
+                        .filter(|w| w.is_mapped() && !w.closing)
+                        .map(|w| w.id)
+                        .collect();
+                    let d = self.fade_duration();
+                    for id in &ids {
+                        let o = self.read_opacity(*id);
+                        self.windows.retarget_opacity(*id, o, d);
+                    }
+                    if !ids.is_empty() {
+                        self.ensure_frame_timer();
+                    }
                 }
                 // unredir may have toggled; re-evaluate, then repaint.
                 self.update_redirection();
@@ -346,6 +386,7 @@ impl App {
                 w.window, w.x, w.y, w.width, w.height, w.border_width, false, w.mapped,
             ));
             let _ = self.x.select_property_changes(w.window);
+            self.refresh_identity(w.window);
             // Already on screen at startup — show at its opacity with no fade-in.
             let o = self.read_opacity(w.window);
             self.windows.set_opacity_settled(w.window, o);
@@ -415,16 +456,54 @@ impl App {
         Ok(())
     }
 
-    /// Read a window's `_NET_WM_WINDOW_OPACITY` as a `0.0..=1.0` fraction,
-    /// defaulting to fully opaque when the property is absent or unreadable.
+    /// Effective opacity target for a window: an explicit `_NET_WM_WINDOW_OPACITY`
+    /// wins; else a matching rule's `opacity`; else `config.default_opacity`.
     fn read_opacity(&self, win: WindowId) -> f64 {
         match self.x.get_window_opacity(win) {
-            Ok(o) => o.unwrap_or(1.0),
+            Ok(Some(o)) => o, // explicit client opacity wins
+            Ok(None) => self.resolve_rules(win).opacity.unwrap_or(self.config.default_opacity),
             Err(e) => {
                 tracing::debug!(window = win, "opacity read failed: {e}");
-                1.0
+                self.config.default_opacity
             }
         }
+    }
+
+    /// Read + cache a window's identity (WM_CLASS / type / title) for rule matching.
+    fn refresh_identity(&mut self, win: WindowId) {
+        let (instance, class) = self.x.get_wm_class(win).ok().flatten().unwrap_or_default();
+        let window_type = self.x.get_window_type(win).ok().flatten().unwrap_or_default();
+        let title = self.x.get_window_title(win).ok().flatten().unwrap_or_default();
+        self.identities.insert(win, WinIdentity { instance, class, window_type, title });
+    }
+
+    /// Fold the config rules for a window (its cached identity + fullscreen state)
+    /// into the net per-window overrides.
+    fn resolve_rules(&self, win: WindowId) -> RuleResult {
+        let id = self.identities.get(&win);
+        let wm = WindowMatch {
+            class: id.map(|i| i.class.clone()).unwrap_or_default(),
+            instance: id.map(|i| i.instance.clone()).unwrap_or_default(),
+            window_type: id.map(|i| i.window_type.clone()).unwrap_or_default(),
+            title: id.map(|i| i.title.clone()).unwrap_or_default(),
+            fullscreen: self.windows.get(win).is_some_and(|w| self.covers_screen(w)),
+        };
+        self.config.resolve(&wm)
+    }
+
+    /// Whether `w`'s outer rectangle (border included) covers the whole root.
+    fn covers_screen(&self, w: &Win) -> bool {
+        covers_root(
+            w.x as i32, w.y as i32, w.width as i32, w.height as i32,
+            w.border_width as i32, self.x.root_width as i32, self.x.root_height as i32,
+        )
+    }
+
+    /// Whether `atom` is one of the window-identity properties we cache.
+    fn is_identity_atom(&self, atom: u32) -> bool {
+        ["WM_CLASS", "WM_NAME", "_NET_WM_WINDOW_TYPE", "_NET_WM_NAME"]
+            .iter()
+            .any(|n| self.x.atom(n).is_ok_and(|a| a == atom))
     }
 
     /// Arm the fade frame clock if it isn't already running: a `calloop` timer
@@ -476,6 +555,7 @@ impl App {
     }
 
     fn release_gfx(&mut self, win: WindowId) {
+        self.identities.remove(&win);
         if let Some(g) = self.gfx.remove(&win) {
             tracing::debug!(window = win, "release gfx");
             self.free_gfx(g);
@@ -543,23 +623,27 @@ impl App {
             if let Some(pm) = self.gfx.get(&w.id).and_then(|g| g.pixmap) {
                 let bw = w.border_width as i32;
                 let (qw, qh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
+                // Per-window rule overrides, falling back to the global config.
+                let rr = self.resolve_rules(w.id);
                 items.push(Quad {
                     pixmap: pm,
                     x: w.x as i32,
                     y: w.y as i32,
                     w: qw,
                     h: qh,
+                    // Opacity animates via the fade, whose target already folds
+                    // explicit / rule / default opacity (see read_opacity).
                     opacity: w.fade.current() as f32,
                     // Drop the shadow the instant a window starts closing, so it
                     // disappears on close/hide rather than lingering through the fade-out.
-                    shadow: self.config.shadow.enabled
+                    shadow: rr.shadow.unwrap_or(self.config.shadow.enabled)
                         && qw >= self.config.shadow.min_size
                         && qh >= self.config.shadow.min_size
                         && !w.closing,
                     // Frost the backdrop only for translucent windows (opaque ones
-                    // hide their backdrop). Uses the animated opacity, so a window
-                    // fading toward opaque stops blurring as it solidifies.
-                    blur: self.config.blur.enabled && w.fade.current() < 1.0,
+                    // hide their backdrop).
+                    blur: rr.blur.unwrap_or(self.config.blur.enabled) && w.fade.current() < 1.0,
+                    corner_radius: rr.corner_radius.unwrap_or(self.config.corner_radius),
                 });
             }
         }
@@ -605,7 +689,6 @@ impl App {
         if !self.config.unredir {
             return false;
         }
-        let (rw, rh) = (self.x.root_width as i32, self.x.root_height as i32);
         let Some(top) = self
             .windows
             .mapped_bottom_to_top()
@@ -614,12 +697,11 @@ impl App {
         else {
             return false;
         };
-        let bw = top.border_width as i32;
-        let (x, y) = (top.x as i32, top.y as i32);
-        x <= 0
-            && y <= 0
-            && x + top.width as i32 + 2 * bw >= rw
-            && y + top.height as i32 + 2 * bw >= rh
+        // A per-window rule can force this window to stay composited (no bypass).
+        if self.resolve_rules(top.id).unredir == Some(false) {
+            return false;
+        }
+        self.covers_screen(top)
     }
 
     /// Re-evaluate the redirect decision and transition if it changed.
@@ -747,6 +829,7 @@ impl App {
             Event::MapNotify(e) if e.window != self.overlay => {
                 tracing::debug!(window = e.window, "map");
                 self.windows.set_mapped(e.window, true);
+                self.refresh_identity(e.window);
                 // Start the fade-in *before* (re)painting, so if this map triggers
                 // an unredir->redirect transition (redir_start paints immediately),
                 // that first frame already shows the window at 0 — no full-opacity flash.
@@ -787,6 +870,23 @@ impl App {
                 );
                 self.windows
                     .configure(e.window, e.x, e.y, e.width, e.height, e.border_width, above);
+                // A resize can cross the fullscreen threshold (or a size-sensitive
+                // match), changing the effective opacity — re-target if it moved.
+                if resized {
+                    let cur = self
+                        .windows
+                        .get(e.window)
+                        .filter(|w| w.is_mapped() && !w.closing)
+                        .map(|w| w.fade.target());
+                    if let Some(cur_t) = cur {
+                        let o = self.read_opacity(e.window);
+                        if (o - cur_t).abs() > f64::EPSILON {
+                            let d = self.fade_duration();
+                            self.windows.retarget_opacity(e.window, o, d);
+                            self.ensure_frame_timer();
+                        }
+                    }
+                }
                 // Restack or resize can change which window is topmost/fullscreen.
                 self.update_redirection();
                 if self.redirected && resized && self.gfx.contains_key(&e.window) {
@@ -815,12 +915,17 @@ impl App {
                 self.dirty = true;
             }
             Event::PropertyNotify(e) => {
-                // Only _NET_WM_WINDOW_OPACITY concerns us; a Delete (property
-                // removed) reads back as absent → refresh restores full opacity.
-                if self.x.atom("_NET_WM_WINDOW_OPACITY").is_ok_and(|a| a == e.atom) {
+                // Opacity, or an identity property (WM_CLASS/type/title) whose change
+                // could alter which rules match — re-read identity, re-target opacity,
+                // and repaint (blur/shadow/corner re-resolve on the next composite).
+                let opacity_atom = self.x.atom("_NET_WM_WINDOW_OPACITY").is_ok_and(|a| a == e.atom);
+                let identity_atom = self.is_identity_atom(e.atom);
+                if identity_atom {
+                    self.refresh_identity(e.window);
+                }
+                if opacity_atom || identity_atom {
                     let o = self.read_opacity(e.window);
                     let d = self.fade_duration();
-                    tracing::debug!(window = e.window, opacity = o, "opacity property changed");
                     self.windows.retarget_opacity(e.window, o, d);
                     self.ensure_frame_timer();
                     self.dirty = true;

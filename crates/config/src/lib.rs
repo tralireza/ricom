@@ -21,10 +21,76 @@ pub struct Config {
     pub background: [f32; 3],
     /// Window corner radius in px. `0.0` (default) = square corners.
     pub corner_radius: f32,
+    /// Opacity for windows that set no `_NET_WM_WINDOW_OPACITY` and match no rule
+    /// (`0.0..=1.0`; `1.0` = opaque). The bottom layer of the opacity stack.
+    pub default_opacity: f64,
     pub fade: Fade,
     pub shadow: Shadow,
     pub blur: Blur,
     pub fps: Fps,
+    /// Per-window override rules, applied in order (last match wins per field).
+    /// Written as `[[rule]]` tables in TOML.
+    #[serde(rename = "rule")]
+    pub rules: Vec<Rule>,
+}
+
+/// Conditions for a [`Rule`]. Every specified (`Some`) field must match (AND);
+/// `class`/`instance`/`window_type` match exactly, `title` matches as a substring.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Match {
+    pub class: Option<String>,
+    pub instance: Option<String>,
+    pub window_type: Option<String>,
+    pub title: Option<String>,
+    pub fullscreen: Option<bool>,
+}
+
+/// A per-window rule: a [`Match`] plus the settings it overrides. Omitted
+/// (`None`) overrides leave the global/config value in place.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Rule {
+    #[serde(rename = "match")]
+    pub matcher: Match,
+    pub opacity: Option<f64>,
+    pub blur: Option<bool>,
+    pub shadow: Option<bool>,
+    pub corner_radius: Option<f32>,
+    pub unredir: Option<bool>,
+}
+
+/// A window's identity + state, matched against [`Rule`]s. Built by `session`
+/// (empty strings where a property is absent). Not serialised — a matcher input.
+#[derive(Debug, Clone, Default)]
+pub struct WindowMatch {
+    pub class: String,
+    pub instance: String,
+    pub window_type: String,
+    pub title: String,
+    pub fullscreen: bool,
+}
+
+/// Net per-window overrides after folding all matching rules. `None` = untouched
+/// (the caller uses the global/config default).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuleResult {
+    pub opacity: Option<f64>,
+    pub blur: Option<bool>,
+    pub shadow: Option<bool>,
+    pub corner_radius: Option<f32>,
+    pub unredir: Option<bool>,
+}
+
+impl Match {
+    /// True if every specified condition holds for `w`.
+    fn matches(&self, w: &WindowMatch) -> bool {
+        self.class.as_ref().map_or(true, |c| *c == w.class)
+            && self.instance.as_ref().map_or(true, |i| *i == w.instance)
+            && self.window_type.as_ref().map_or(true, |t| *t == w.window_type)
+            && self.title.as_ref().map_or(true, |t| w.title.contains(t.as_str()))
+            && self.fullscreen.map_or(true, |fs| fs == w.fullscreen)
+    }
 }
 
 /// Background blur behind translucent windows (frosted glass).
@@ -86,10 +152,12 @@ impl Default for Config {
             unredir: true,
             background: [0.05, 0.05, 0.07],
             corner_radius: 0.0,
+            default_opacity: 1.0,
             fade: Fade::default(),
             shadow: Shadow::default(),
             blur: Blur::default(),
             fps: Fps::default(),
+            rules: Vec::new(),
         }
     }
 }
@@ -164,6 +232,7 @@ impl Config {
         chg!("unredir", prev.unredir, self.unredir);
         chg!("background", prev.background, self.background);
         chg!("corner_radius", prev.corner_radius, self.corner_radius);
+        chg!("default_opacity", prev.default_opacity, self.default_opacity);
         chg!("fade.enabled", prev.fade.enabled, self.fade.enabled);
         chg!("fade.duration", prev.fade.duration, self.fade.duration);
         chg!("shadow.enabled", prev.shadow.enabled, self.shadow.enabled);
@@ -178,7 +247,32 @@ impl Config {
         chg!("fps.corner", prev.fps.corner, self.fps.corner);
         chg!("fps.graph", prev.fps.graph, self.fps.graph);
         chg!("fps.scale", prev.fps.scale, self.fps.scale);
+        if prev.rules != self.rules {
+            out.push(format!("rules {}→{}", prev.rules.len(), self.rules.len()));
+        }
         out
+    }
+
+    /// Fold the built-in fullscreen default rule and the user [`rules`](Config::rules)
+    /// (in order, last match wins per field) into the net overrides for a window.
+    pub fn resolve(&self, w: &WindowMatch) -> RuleResult {
+        let mut r = RuleResult::default();
+        // Built-in default: a fullscreen window stays opaque and unblurred so
+        // video/games aren't dimmed. User rules below may override it.
+        if w.fullscreen {
+            r.opacity = Some(1.0);
+            r.blur = Some(false);
+        }
+        for rule in &self.rules {
+            if rule.matcher.matches(w) {
+                r.opacity = rule.opacity.or(r.opacity);
+                r.blur = rule.blur.or(r.blur);
+                r.shadow = rule.shadow.or(r.shadow);
+                r.corner_radius = rule.corner_radius.or(r.corner_radius);
+                r.unredir = rule.unredir.or(r.unredir);
+            }
+        }
+        r
     }
 }
 
@@ -214,6 +308,8 @@ mod tests {
         assert_eq!(c.fps.corner, "top-right");
         assert!(c.fps.graph);
         assert_eq!(c.fps.scale, 1.0);
+        assert_eq!(c.default_opacity, 1.0);
+        assert!(c.rules.is_empty());
     }
 
     #[test]
@@ -294,5 +390,66 @@ scale = 2.0
         let c = Config::default();
         let back: Config = toml::from_str(&c.to_toml()).unwrap();
         assert_eq!(c, back);
+    }
+
+    #[test]
+    fn builtin_fullscreen_rule_keeps_opaque_unblurred() {
+        let c = Config::default();
+        let r = c.resolve(&WindowMatch { fullscreen: true, ..Default::default() });
+        assert_eq!(r.opacity, Some(1.0));
+        assert_eq!(r.blur, Some(false));
+        // non-fullscreen, no user rules -> nothing overridden
+        assert_eq!(c.resolve(&WindowMatch::default()), RuleResult::default());
+    }
+
+    #[test]
+    fn rules_match_and_override() {
+        let t = r#"
+[[rule]]
+match = { class = "mpv" }
+opacity = 1.0
+blur = false
+shadow = false
+
+[[rule]]
+match = { title = "Picture-in-Picture" }
+corner_radius = 12.0
+"#;
+        let c: Config = toml::from_str(t).unwrap();
+        assert_eq!(c.rules.len(), 2);
+        let r = c.resolve(&WindowMatch { class: "mpv".into(), ..Default::default() });
+        assert_eq!((r.opacity, r.blur, r.shadow), (Some(1.0), Some(false), Some(false)));
+        // substring title match
+        let pip = WindowMatch { title: "YouTube - Picture-in-Picture".into(), ..Default::default() };
+        assert_eq!(c.resolve(&pip).corner_radius, Some(12.0));
+        // no match -> empty
+        assert_eq!(
+            c.resolve(&WindowMatch { class: "firefox".into(), ..Default::default() }),
+            RuleResult::default()
+        );
+    }
+
+    #[test]
+    fn user_rule_overrides_builtin_and_last_wins() {
+        let t = r#"
+[[rule]]
+match = { fullscreen = true }
+opacity = 0.5
+
+[[rule]]
+match = { class = "mpv" }
+opacity = 0.9
+"#;
+        let c: Config = toml::from_str(t).unwrap();
+        // fullscreen non-mpv: the user fullscreen rule overrides the built-in 1.0
+        assert_eq!(c.resolve(&WindowMatch { fullscreen: true, ..Default::default() }).opacity, Some(0.5));
+        // fullscreen mpv: the later mpv rule wins
+        let fs_mpv = WindowMatch { class: "mpv".into(), fullscreen: true, ..Default::default() };
+        assert_eq!(c.resolve(&fs_mpv).opacity, Some(0.9));
+    }
+
+    #[test]
+    fn rule_unknown_field_errors() {
+        assert!(toml::from_str::<Config>("[[rule]]\nwobble = true\n").is_err());
     }
 }
