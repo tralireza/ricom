@@ -3,6 +3,16 @@
 //! like `region`/`wm`. Loaded once at startup and re-read on `SIGHUP` (see the
 //! `session` crate). Every field defaults, so a partial — or absent — file still
 //! yields a complete [`Config`].
+//!
+//! ```
+//! use config::Config;
+//!
+//! // A partial file overrides one shadow field; every other field defaults.
+//! let cfg: Config = toml::from_str("[shadow]\nradius = 20.0\n").unwrap();
+//! assert_eq!(cfg.shadow.radius, 20.0);   // from the file
+//! assert_eq!(cfg.shadow.strength, 0.45); // default fills in
+//! assert!(cfg.unredir);                  // default
+//! ```
 
 use std::path::{Path, PathBuf};
 
@@ -10,6 +20,10 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 /// Top-level configuration.
+///
+/// Every field defaults (a partial or absent file still yields a complete
+/// `Config`), and parsing is strict: an unknown key or a wrong-typed value is an
+/// error, so typos surface loudly rather than being silently ignored.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -213,13 +227,35 @@ impl Config {
         toml::from_str(&text).with_context(|| format!("parsing config {}", path.display()))
     }
 
-    /// Serialise to TOML (for `--print-config`).
+    /// Serialise to TOML (for `--print-config`). Round-trips: parsing the output
+    /// back yields an equal [`Config`].
+    ///
+    /// ```
+    /// use config::Config;
+    ///
+    /// let cfg = Config::default();
+    /// let back: Config = toml::from_str(&cfg.to_toml()).unwrap();
+    /// assert_eq!(cfg, back);
+    /// ```
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).unwrap_or_else(|e| format!("# serialise error: {e}\n"))
     }
 
     /// Field-by-field changes from `prev` to `self`, as `"field old→new"` strings
     /// (empty if identical). Used to report what a reload actually changed.
+    ///
+    /// ```
+    /// use config::Config;
+    ///
+    /// let old = Config::default();
+    /// let mut new = old.clone();
+    /// assert!(new.diff(&old).is_empty()); // identical → nothing changed
+    ///
+    /// new.corner_radius = 8.0;
+    /// let changes = new.diff(&old);
+    /// assert_eq!(changes.len(), 1);
+    /// assert!(changes[0].contains("corner_radius"));
+    /// ```
     pub fn diff(&self, prev: &Config) -> Vec<String> {
         let mut out = Vec::new();
         macro_rules! chg {
@@ -255,6 +291,24 @@ impl Config {
 
     /// Fold the built-in fullscreen default rule and the user [`rules`](Config::rules)
     /// (in order, last match wins per field) into the net overrides for a window.
+    ///
+    /// ```
+    /// use config::{Config, WindowMatch};
+    ///
+    /// let cfg: Config = toml::from_str(r#"
+    /// [[rule]]
+    /// match = { class = "mpv" }
+    /// opacity = 0.9
+    /// "#).unwrap();
+    ///
+    /// // The mpv rule applies → opacity overridden.
+    /// let mpv = WindowMatch { class: "mpv".into(), ..Default::default() };
+    /// assert_eq!(cfg.resolve(&mpv).opacity, Some(0.9));
+    ///
+    /// // A fullscreen window matching no user rule keeps the built-in opaque default.
+    /// let fs = WindowMatch { fullscreen: true, ..Default::default() };
+    /// assert_eq!(cfg.resolve(&fs).opacity, Some(1.0));
+    /// ```
     pub fn resolve(&self, w: &WindowMatch) -> RuleResult {
         let mut r = RuleResult::default();
         // Built-in default: a fullscreen window stays opaque and unblurred so
