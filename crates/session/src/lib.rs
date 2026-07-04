@@ -1229,7 +1229,11 @@ impl App {
                     self.windows.scale_in(e.window, self.config.animation.open_scale, self.scale_duration());
                 }
                 self.update_redirection();
-                if self.redirected && !self.gfx.contains_key(&e.window) {
+                // Always re-acquire on (re)map: a window that unmapped/closed kept its
+                // old named pixmap for the fade/burn, but that pixmap is now stale — a
+                // remap (or an X id reused before the closing window is reaped) must get
+                // a fresh one, else create_image fails every frame and it never draws.
+                if self.redirected {
                     self.acquire_gfx(e.window);
                 }
                 self.ensure_frame_timer();

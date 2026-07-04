@@ -651,6 +651,10 @@ pub struct GlBackend {
     gpu_timers: [Option<glow::NativeQuery>; 2],
     timer_slot: Cell<usize>,
     timer_count: Cell<u8>,
+    /// Last pixmap id whose `create_image` failed, so the per-frame warning is
+    /// logged once per distinct failing pixmap instead of every repaint (a stale
+    /// pixmap would otherwise flood the log). `0` = none.
+    warned_pixmap: Cell<u32>,
     /// Last measured composite render time (ms) + a ring of recent values (graph).
     render_ms: Cell<f32>,
     render_samples: RefCell<VecDeque<f32>>,
@@ -890,6 +894,7 @@ impl GlBackend {
             gpu_timers,
             timer_slot: Cell::new(0),
             timer_count: Cell::new(0),
+            warned_pixmap: Cell::new(0),
             render_ms: Cell::new(0.0),
             render_samples: RefCell::new(VecDeque::new()),
         })
@@ -1324,7 +1329,12 @@ impl GlBackend {
             {
                 Ok(i) => i,
                 Err(e) => {
-                    tracing::warn!("create_image(pixmap 0x{pixmap:x}) failed: {e:?}");
+                    // Throttle: a stale pixmap fails every repaint, so log only when
+                    // the failing pixmap changes (once per distinct pixmap) — not each frame.
+                    if self.warned_pixmap.get() != pixmap {
+                        tracing::warn!("create_image(pixmap 0x{pixmap:x}) failed: {e:?}");
+                        self.warned_pixmap.set(pixmap);
+                    }
                     continue;
                 }
             };
