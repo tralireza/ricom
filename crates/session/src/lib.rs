@@ -30,11 +30,7 @@ const MAX_BUFFER_AGE: usize = 4;
 /// Extra px around a wobble's mesh bbox when damaging/clipping it — headroom for
 /// spring overshoot and the AA fringe, so no jiggling pixel is ever left stale.
 const WOBBLE_PAD: f32 = 8.0;
-/// P2 (temporary — until the `[burn]` config block lands in P3): burn every window
-/// on close, ~0.5 s. Phase 3 replaces these with config + per-window-rule gating.
-const BURN_ON_CLOSE: bool = true;
-const BURN_DURATION: f64 = 0.5;
-use config::{Config, RuleResult, WindowMatch};
+use config::{Category, Config, Edge, Primitive, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
 
@@ -54,6 +50,15 @@ fn render_params(cfg: &Config) -> RenderParams {
         burn_ember: cfg.burn.ember_width,
         burn_ember_cool: cfg.burn.ember_cool,
         burn_ember_hot: cfg.burn.ember_hot,
+    }
+}
+
+/// Log any non-fatal config problems (unknown animation presets, blocks used in a
+/// category they don't fit). Parsing already rejects typos/unknown keys; these are
+/// softer, user-education warnings surfaced at load and reload.
+fn log_config_warnings(cfg: &Config) {
+    for w in cfg.validate() {
+        tracing::warn!("config: {w}");
     }
 }
 
@@ -77,6 +82,42 @@ fn covers_root(x: i32, y: i32, w: i32, h: i32, bw: i32, rw: i32, rh: i32) -> boo
 /// A stable-but-varied burn seed per window id, so each window's dissolve differs.
 fn burn_seed(id: WindowId) -> f32 {
     (id.wrapping_mul(2_654_435_761) % 100_000) as f32 / 100_000.0
+}
+
+/// Map a config easing curve to the `wm` animation easing (keeps `wm` config-free).
+fn map_easing(e: config::Easing) -> wm::anim::Easing {
+    match e {
+        config::Easing::EaseOut => wm::anim::Easing::EaseOut,
+        config::Easing::EaseIn => wm::anim::Easing::EaseIn,
+        config::Easing::Linear => wm::anim::Easing::Linear,
+    }
+}
+
+/// The pixel offset for a `translate` block: explicit `dx`/`dy`, or — if an
+/// `edge` is given — the offset that moves the window's outer `rect`
+/// (`[x, y, w, h]`) fully off that screen edge (`screen` = root w×h). This is the
+/// away-from-rest offset: the window slides *in from* it on open, *out to* it on close.
+fn resolve_offset(dx: f32, dy: f32, edge: Option<Edge>, rect: [f32; 4], screen: (i32, i32)) -> [f32; 2] {
+    let Some(edge) = edge else {
+        return [dx, dy];
+    };
+    let [x, y, w, h] = rect;
+    let (sw, sh) = (screen.0 as f32, screen.1 as f32);
+    match edge {
+        Edge::Left => [-(x + w), 0.0],
+        Edge::Right => [sw - x, 0.0],
+        Edge::Top => [0.0, -(y + h)],
+        Edge::Bottom => [0.0, sh - y],
+    }
+}
+
+/// Shrink an outer rect `[x, y, w, h]` about its centre by `factor` — the
+/// compressed start rect for a spawn "boing" wobble on open.
+fn squash_rect(rect: [f32; 4], factor: f32) -> [f32; 4] {
+    let [x, y, w, h] = rect;
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let (nw, nh) = (w * factor, h * factor);
+    [cx - nw / 2.0, cy - nh / 2.0, nw, nh]
 }
 
 /// One compositable window for [`App::composite`]: quad + optional wobble mesh +
@@ -388,21 +429,11 @@ impl App {
         })
     }
 
-    /// Fade duration in seconds, or `0.0` when fading is disabled (a zero-duration
-    /// `Fade` settles instantly, so callers need no separate on/off branch).
-    fn fade_duration(&self) -> f64 {
-        if self.config.fade.enabled {
-            self.config.fade.duration
-        } else {
-            0.0
-        }
-    }
-
-    /// Duration for the open scale "pop", in seconds. Shares the fade's configured
-    /// duration so the pop and any opacity fade settle together — but independent
-    /// of `[fade] enabled`, so the pop still runs with opacity fades switched off.
-    fn scale_duration(&self) -> f64 {
-        self.config.fade.duration
+    /// Default animation duration (seconds) for live opacity re-targets not tied
+    /// to an open/close/move spec — a config reload, or a resize that changes the
+    /// effective opacity. Per-transition durations come from the resolved spec.
+    fn anim_duration(&self) -> f64 {
+        self.config.anim.duration
     }
 
     /// (Re)bind the FPS-HUD toggle hotkey: drop any previous grab, parse the
@@ -485,6 +516,7 @@ impl App {
                 let opacity_changed =
                     cfg.default_opacity != self.config.default_opacity || cfg.rules != self.config.rules;
                 self.config = cfg;
+                log_config_warnings(&self.config);
                 if let Some(b) = self.backend.as_mut() {
                     b.set_render_params(render_params(&self.config));
                 }
@@ -505,7 +537,7 @@ impl App {
                         .filter(|w| w.is_mapped() && !w.closing)
                         .map(|w| w.id)
                         .collect();
-                    let d = self.fade_duration();
+                    let d = self.anim_duration();
                     for id in &ids {
                         let o = self.read_opacity(*id);
                         self.windows.retarget_opacity(*id, o, d);
@@ -543,6 +575,7 @@ impl App {
     /// Become the CM, redirect + acquire the overlay, build the GL backend, then
     /// run the compositing event loop until the process is killed.
     pub fn run(&mut self) -> Result<()> {
+        log_config_warnings(&self.config);
         self.x.become_cm()?;
         self.x.select_root_substructure()?;
         self.x.select_screen_change()?;
@@ -660,18 +693,113 @@ impl App {
         self.identities.insert(win, WinIdentity { instance, class, window_type, title });
     }
 
-    /// Fold the config rules for a window (its cached identity + fullscreen state)
-    /// into the net per-window overrides.
-    fn resolve_rules(&self, win: WindowId) -> RuleResult {
+    /// Build a window's [`WindowMatch`] (cached identity + live fullscreen state)
+    /// for rule matching / animation resolution.
+    fn window_match(&self, win: WindowId) -> WindowMatch {
         let id = self.identities.get(&win);
-        let wm = WindowMatch {
+        WindowMatch {
             class: id.map(|i| i.class.clone()).unwrap_or_default(),
             instance: id.map(|i| i.instance.clone()).unwrap_or_default(),
             window_type: id.map(|i| i.window_type.clone()).unwrap_or_default(),
             title: id.map(|i| i.title.clone()).unwrap_or_default(),
             fullscreen: self.windows.get(win).is_some_and(|w| self.covers_screen(w)),
-        };
-        self.config.resolve(&wm)
+        }
+    }
+
+    /// Fold the config rules for a window into the net per-window overrides.
+    fn resolve_rules(&self, win: WindowId) -> RuleResult {
+        self.config.resolve(&self.window_match(win))
+    }
+
+    /// Root screen size in px.
+    fn screen(&self) -> (i32, i32) {
+        (self.x.root_width as i32, self.x.root_height as i32)
+    }
+
+    /// A window's outer rect `[x, y, w, h]` by id (border included), or zeros if
+    /// untracked.
+    fn outer_rect_of(&self, id: WindowId) -> [f32; 4] {
+        self.windows.get(id).map(|w| self.outer_rect(w)).unwrap_or([0.0; 4])
+    }
+
+    /// Resolve the animation spec for `id`'s `cat` and start each primitive block
+    /// (opacity / scale / translate / wobble / burn). `destroyed` marks a close
+    /// for removal (vs merely unmapped) on completion. Returns whether something
+    /// visible was started — close sites use it to keep the "animate vs drop now"
+    /// gate. Move is driven separately by `ConfigureNotify` (it needs old+new
+    /// rects), so this handles `Open`/`Close`.
+    fn start_anim(&mut self, id: WindowId, cat: Category, destroyed: bool) -> bool {
+        let spec = self.config.spec_for(&self.window_match(id), cat);
+        let dur = spec.duration.unwrap_or(self.config.anim.duration);
+        match cat {
+            Category::Open => {
+                // Clean slate so blocks absent from the spec leave their property
+                // at rest (a window re-mapped after fading/sliding out).
+                self.windows.reset_transforms(id);
+                let o = self.read_opacity(id);
+                if spec.blocks.iter().any(|b| matches!(b, Primitive::Opacity { .. })) {
+                    self.windows.fade_in(id, o, dur); // 0 -> target; clears closing
+                } else {
+                    // No fade block -> appear at full opacity, not mid-close.
+                    self.windows.set_opacity_settled(id, o);
+                    self.windows.clear_closing(id);
+                }
+                for block in &spec.blocks {
+                    match block {
+                        Primitive::Scale { from, .. } => {
+                            self.windows.scale_in(id, from.unwrap_or(self.config.anim.scale_from), dur);
+                        }
+                        Primitive::Translate { dx, dy, edge, easing } => {
+                            let off = resolve_offset(*dx, *dy, *edge, self.outer_rect_of(id), self.screen());
+                            self.windows.translate_in(id, off, dur, map_easing(*easing));
+                        }
+                        Primitive::Wobble { spring, friction } => {
+                            // "boing": spawn compressed, spring out to the full rect.
+                            let rect = self.outer_rect_of(id);
+                            self.windows.wobble_to(
+                                id,
+                                squash_rect(rect, 0.6),
+                                rect,
+                                spring.unwrap_or(self.config.anim.wobble_spring),
+                                friction.unwrap_or(self.config.anim.wobble_friction),
+                            );
+                        }
+                        Primitive::Opacity { .. } | Primitive::Burn => {}
+                    }
+                }
+                true
+            }
+            Category::Close => {
+                if spec.blocks.is_empty() {
+                    return false; // "none" -> instant close, nothing to animate
+                }
+                let has_burn = spec.blocks.iter().any(|b| matches!(b, Primitive::Burn));
+                let mut started = false;
+                for block in &spec.blocks {
+                    match block {
+                        Primitive::Scale { from, .. } => {
+                            self.windows.retarget_scale(id, from.unwrap_or(self.config.anim.scale_from), dur);
+                        }
+                        Primitive::Translate { dx, dy, edge, easing } => {
+                            let off = resolve_offset(*dx, *dy, *edge, self.outer_rect_of(id), self.screen());
+                            self.windows.translate_out(id, off, dur, map_easing(*easing));
+                        }
+                        Primitive::Burn => {
+                            started |= self.windows.begin_burn(id, dur, burn_seed(id), destroyed);
+                        }
+                        Primitive::Opacity { .. } | Primitive::Wobble { .. } => {}
+                    }
+                }
+                // A non-burn close always fades to transparent — that's what drives
+                // completion + reaping (see `finished_fadeouts`), so scale/translate
+                // ride along with it. Burn owns alpha, so it fades nothing.
+                if !has_burn {
+                    started |= self.windows.begin_fade_out(id, dur, destroyed);
+                }
+                started
+            }
+            Category::Move => false,
+        }
     }
 
     /// A window's outer rect `[x, y, w, h]` (border included) as floats — the
@@ -727,6 +855,7 @@ impl App {
                 .filter(|w| {
                     w.fade.is_animating()
                         || w.scale.is_animating()
+                        || w.translate.is_animating()
                         || w.wobble.is_some()
                         || w.burn.as_ref().is_some_and(|b| b.progress.is_animating())
                 })
@@ -736,8 +865,20 @@ impl App {
                     let (ow, oh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
                     // Un-scaled outer rect grown by the shadow reach — the scale pop
                     // only shrinks inward, so this always covers it — then unioned
-                    // with the padded wobble bbox.
+                    // with the translate offset and the padded wobble bbox.
                     let mut r = Rect::new(x - sr, y - sr, x + ow + sr, y + oh + sr);
+                    // Slide/drop: union the rest rect with the shifted rect so the
+                    // vacated strip repaints (with prev∪curr this covers the trail).
+                    let [tx, ty] = w.translate.current();
+                    if tx != 0.0 || ty != 0.0 {
+                        let (tx, ty) = (tx.round() as i32, ty.round() as i32);
+                        r = Rect::new(
+                            r.x1.min(r.x1 + tx),
+                            r.y1.min(r.y1 + ty),
+                            r.x2.max(r.x2 + tx),
+                            r.y2.max(r.y2 + ty),
+                        );
+                    }
                     if let Some(wob) = &w.wobble {
                         let b = wob.bounds(WOBBLE_PAD);
                         let wr = Rect::new(
@@ -902,16 +1043,35 @@ impl App {
                 // Scale-about-centre for the open/close pop. Skipped while wobbling —
                 // the mesh path positions the window from the spring sim instead.
                 let s = w.scale.current();
+                // Animated translate (slide/drop) offset, added to the on-screen
+                // position — CPU-side, so the blit needs no shader change.
+                let off = w.translate.current();
+                let (tx, ty) = (off[0].round() as i32, off[1].round() as i32);
                 let (qx, qy, qw, qh) = if !wobbling && !burning && (s - 1.0).abs() > f64::EPSILON {
                     let (cx, cy) = (w.x as f64 + ow as f64 / 2.0, w.y as f64 + oh as f64 / 2.0);
                     let (sw, sh) = (ow as f64 * s, oh as f64 * s);
-                    ((cx - sw / 2.0).round() as i32, (cy - sh / 2.0).round() as i32, sw.round() as i32, sh.round() as i32)
+                    (
+                        (cx - sw / 2.0).round() as i32 + tx,
+                        (cy - sh / 2.0).round() as i32 + ty,
+                        sw.round() as i32,
+                        sh.round() as i32,
+                    )
                 } else {
-                    (w.x as i32, w.y as i32, ow, oh)
+                    (w.x as i32 + tx, w.y as i32 + ty, ow, oh)
                 };
                 // A wobbling window draws as a bare textured mesh: no shadow, frost,
                 // or corner rounding (square while it jiggles; they return on settle).
-                let mesh = w.wobble.as_ref().map(|wob| wob.vertices());
+                // A translate offset shifts the mesh vertices too (both are screen px).
+                let mesh = w.wobble.as_ref().map(|wob| {
+                    let mut v = wob.vertices();
+                    if off != [0.0, 0.0] {
+                        for p in &mut v {
+                            p[0] += off[0];
+                            p[1] += off[1];
+                        }
+                    }
+                    v
+                });
                 items.push((
                     Quad {
                         pixmap: pm,
@@ -1196,20 +1356,11 @@ impl App {
                 tracing::debug!(window = e.window, "destroy");
                 self.windows.set_mapped(e.window, false);
                 // A CompositeNameWindowPixmap pixmap outlives the window, so we can
-                // keep compositing the last frame and fade it out; the window is
-                // reaped from the stack once transparent. Nothing visible -> drop now.
-                let d = self.fade_duration();
+                // keep compositing the last frame and animate it out; the window is
+                // reaped from the stack once the close completes. Nothing to animate
+                // (no gfx, already invisible, or close="none") -> drop now.
                 let has_gfx = self.gfx.contains_key(&e.window);
-                if BURN_ON_CLOSE
-                    && has_gfx
-                    && self.windows.begin_burn(e.window, BURN_DURATION, burn_seed(e.window), true)
-                {
-                    self.ensure_frame_timer();
-                } else if has_gfx && self.windows.begin_fade_out(e.window, d, true) {
-                    // Close "pop": shrink back to `open_scale` as it fades out.
-                    if self.config.animation.enabled {
-                        self.windows.retarget_scale(e.window, self.config.animation.open_scale, d);
-                    }
+                if has_gfx && self.start_anim(e.window, Category::Close, true) {
                     self.ensure_frame_timer();
                 } else {
                     self.windows.remove(e.window);
@@ -1221,17 +1372,12 @@ impl App {
             Event::MapNotify(e) if e.window != self.overlay => {
                 tracing::debug!(window = e.window, "map");
                 self.windows.set_mapped(e.window, true);
-                self.refresh_identity(e.window);
-                // Start the fade-in *before* (re)painting, so if this map triggers
-                // an unredir->redirect transition (redir_start paints immediately),
-                // that first frame already shows the window at 0 — no full-opacity flash.
-                let o = self.read_opacity(e.window);
-                let d = self.fade_duration();
-                self.windows.fade_in(e.window, o, d);
-                // Open "pop": scale-about-centre from `open_scale` up to full size.
-                if self.config.animation.enabled {
-                    self.windows.scale_in(e.window, self.config.animation.open_scale, self.scale_duration());
-                }
+                self.refresh_identity(e.window); // identity first — the open spec may be rule-gated
+                // Start the open animation *before* (re)painting, so if this map
+                // triggers an unredir->redirect transition (redir_start paints
+                // immediately), that first frame already shows the resolved start
+                // state (e.g. opacity 0 / scaled-down) — no full-size/opacity flash.
+                self.start_anim(e.window, Category::Open, false);
                 self.update_redirection();
                 // Always re-acquire on (re)map: a window that unmapped/closed kept its
                 // old named pixmap for the fade/burn, but that pixmap is now stale — a
@@ -1246,19 +1392,10 @@ impl App {
             Event::UnmapNotify(e) => {
                 tracing::debug!(window = e.window, "unmap");
                 self.windows.set_mapped(e.window, false);
-                // Fade the last frame out if we have it (keep the pixmap); else drop now.
-                let d = self.fade_duration();
+                // Animate the last frame out if we have it (keep the pixmap); else
+                // drop now. Unmapped (not destroyed): keep the window in the stack.
                 let has_gfx = self.gfx.contains_key(&e.window);
-                if BURN_ON_CLOSE
-                    && has_gfx
-                    && self.windows.begin_burn(e.window, BURN_DURATION, burn_seed(e.window), false)
-                {
-                    self.ensure_frame_timer();
-                } else if has_gfx && self.windows.begin_fade_out(e.window, d, false) {
-                    // Close "pop": shrink back to `open_scale` as it fades out.
-                    if self.config.animation.enabled {
-                        self.windows.retarget_scale(e.window, self.config.animation.open_scale, d);
-                    }
+                if has_gfx && self.start_anim(e.window, Category::Close, false) {
                     self.ensure_frame_timer();
                 } else {
                     self.release_gfx(e.window);
@@ -1282,24 +1419,31 @@ impl App {
                 let old_wobble = self.windows.get(e.window).map(|w| (self.outer_rect(w), w.is_mapped() && !w.closing));
                 self.windows
                     .configure(e.window, e.x, e.y, e.width, e.height, e.border_width, above);
-                // Move/resize wobble: aim the spring mesh at the new outer rect.
-                // `mv` is Some only for a mapped, non-closing window that actually
-                // moved; then gated on the compositing + config switches. (Flattened
-                // into one `if let` — the deploy target's rustc predates let-chains.)
-                let wobble_on =
-                    self.redirected && self.config.animation.enabled && self.config.animation.wobble;
+                // Move/resize wobble: if the resolved `move` spec has a wobble block,
+                // aim the spring mesh at the new outer rect. `mv` is Some only for a
+                // mapped, non-closing window that actually moved; the whole thing is
+                // gated on compositing being on.
+                let wobble = self
+                    .config
+                    .spec_for(&self.window_match(e.window), Category::Move)
+                    .blocks
+                    .iter()
+                    .find_map(|b| match b {
+                        Primitive::Wobble { spring, friction } => Some((
+                            spring.unwrap_or(self.config.anim.wobble_spring),
+                            friction.unwrap_or(self.config.anim.wobble_friction),
+                        )),
+                        _ => None,
+                    });
                 let mv = old_wobble.filter(|&(_, animatable)| animatable).and_then(|(old_rect, _)| {
                     let new_rect = self.windows.get(e.window).map(|w| self.outer_rect(w))?;
                     (new_rect != old_rect).then_some((old_rect, new_rect))
                 });
-                if let Some((old_rect, new_rect)) = mv.filter(|_| wobble_on) {
-                    self.windows.wobble_to(
-                        e.window,
-                        old_rect,
-                        new_rect,
-                        self.config.animation.wobble_spring,
-                        self.config.animation.wobble_friction,
-                    );
+                if self.redirected
+                    && let Some((spring, friction)) = wobble
+                    && let Some((old_rect, new_rect)) = mv
+                {
+                    self.windows.wobble_to(e.window, old_rect, new_rect, spring, friction);
                     self.ensure_frame_timer();
                 }
                 // A resize can cross the fullscreen threshold (or a size-sensitive
@@ -1313,7 +1457,7 @@ impl App {
                     if let Some(cur_t) = cur {
                         let o = self.read_opacity(e.window);
                         if (o - cur_t).abs() > f64::EPSILON {
-                            let d = self.fade_duration();
+                            let d = self.anim_duration();
                             self.windows.retarget_opacity(e.window, o, d);
                             self.ensure_frame_timer();
                         }
@@ -1357,7 +1501,7 @@ impl App {
                 }
                 if opacity_atom || identity_atom {
                     let o = self.read_opacity(e.window);
-                    let d = self.fade_duration();
+                    let d = self.anim_duration();
                     self.windows.retarget_opacity(e.window, o, d);
                     self.ensure_frame_timer();
                     self.damage_full();

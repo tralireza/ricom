@@ -3,10 +3,28 @@
 //! — so it unit-tests without a compositor or a wall clock, like `region` and
 //! the window model. `session` owns the clock (a `calloop` timer) and feeds `dt`.
 
-/// Quadratic ease-out: fast start, gentle finish. `t` is clamped to `0..=1`.
-fn ease_out(t: f64) -> f64 {
+/// Easing curve for an eased scalar. `EaseOut` is the historical default (fast
+/// start, gentle finish); the others exist for newer primitives (e.g. `EaseIn`
+/// for a "drop" close that accelerates as it falls).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Easing {
+    /// Quadratic ease-out: fast start, gentle finish.
+    #[default]
+    EaseOut,
+    /// Quadratic ease-in: gentle start, fast finish.
+    EaseIn,
+    /// No easing — constant rate.
+    Linear,
+}
+
+/// Sample easing `kind` at `t`, clamped to `0..=1`.
+fn ease(kind: Easing, t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
-    1.0 - (1.0 - t) * (1.0 - t)
+    match kind {
+        Easing::EaseOut => 1.0 - (1.0 - t) * (1.0 - t),
+        Easing::EaseIn => t * t,
+        Easing::Linear => t,
+    }
 }
 
 /// An opacity value easing from `start` toward `target` over `duration` seconds,
@@ -18,22 +36,29 @@ pub struct Fade {
     current: f64,
     elapsed: f64,
     duration: f64,
+    easing: Easing,
 }
 
 impl Fade {
     /// A fade already resting at `value` (no animation) — for windows that are
     /// already on screen (e.g. present at compositor startup).
     pub fn settled(value: f64) -> Self {
-        Fade { start: value, target: value, current: value, elapsed: 0.0, duration: 0.0 }
+        Fade { start: value, target: value, current: value, elapsed: 0.0, duration: 0.0, easing: Easing::EaseOut }
     }
 
-    /// A fade animating from `from` to `to` over `duration` seconds. A
-    /// non-positive duration collapses to a settled fade at `to`.
+    /// A fade animating from `from` to `to` over `duration` seconds, using the
+    /// default [`Easing::EaseOut`]. A non-positive duration collapses to a
+    /// settled fade at `to`.
     pub fn animating(from: f64, to: f64, duration: f64) -> Self {
+        Fade::animating_eased(from, to, duration, Easing::EaseOut)
+    }
+
+    /// Like [`animating`](Self::animating) but with an explicit easing curve.
+    pub fn animating_eased(from: f64, to: f64, duration: f64, easing: Easing) -> Self {
         if duration <= 0.0 {
             return Fade::settled(to);
         }
-        Fade { start: from, target: to, current: from, elapsed: 0.0, duration }
+        Fade { start: from, target: to, current: from, elapsed: 0.0, duration, easing }
     }
 
     pub fn current(&self) -> f64 {
@@ -56,7 +81,12 @@ impl Fade {
             return;
         }
         if duration <= 0.0 {
-            *self = Fade::settled(to);
+            // Snap, preserving the easing curve (settled() would reset it).
+            self.start = to;
+            self.current = to;
+            self.target = to;
+            self.elapsed = 0.0;
+            self.duration = 0.0;
             return;
         }
         self.start = self.current;
@@ -77,8 +107,52 @@ impl Fade {
             self.current = self.target;
             return false;
         }
-        self.current = self.start + (self.target - self.start) * ease_out(self.elapsed / self.duration);
+        self.current = self.start + (self.target - self.start) * ease(self.easing, self.elapsed / self.duration);
         true
+    }
+}
+
+/// An eased 2-vector pixel offset — the `translate` animation primitive (slide,
+/// drop). Two independent [`Fade`]s (one per axis) reusing the same curve
+/// machinery, so it inherits retarget/settle/advance for free and lets the axes
+/// differ (e.g. a pure-vertical "drop"). `current()` is the offset to add to a
+/// window's on-screen position now; `[0, 0]` when at rest.
+#[derive(Debug, Clone, Copy)]
+pub struct Offset {
+    x: Fade,
+    y: Fade,
+}
+
+impl Offset {
+    /// An offset resting at `[0, 0]` — no motion (a window at its normal spot).
+    pub fn settled() -> Self {
+        Offset { x: Fade::settled(0.0), y: Fade::settled(0.0) }
+    }
+
+    /// An offset easing from `from` to `to` (px) over `duration` seconds.
+    pub fn animating(from: [f32; 2], to: [f32; 2], duration: f64, easing: Easing) -> Self {
+        Offset {
+            x: Fade::animating_eased(from[0] as f64, to[0] as f64, duration, easing),
+            y: Fade::animating_eased(from[1] as f64, to[1] as f64, duration, easing),
+        }
+    }
+
+    /// The offset to apply right now, in px.
+    pub fn current(&self) -> [f32; 2] {
+        [self.x.current() as f32, self.y.current() as f32]
+    }
+
+    /// Whether either axis is still moving.
+    pub fn is_animating(&self) -> bool {
+        self.x.is_animating() || self.y.is_animating()
+    }
+
+    /// Advance both axes by `dt` (both always step — no short-circuit). Returns
+    /// whether the offset is still moving after the step.
+    pub fn advance(&mut self, dt: f64) -> bool {
+        let x = self.x.advance(dt);
+        let y = self.y.advance(dt);
+        x || y
     }
 }
 
@@ -367,6 +441,53 @@ mod tests {
         let before = f.current();
         f.retarget(1.0, 0.2); // same target -> don't restart the curve
         assert_eq!(f.current(), before);
+    }
+
+    // --- Offset (translate primitive) ----------------------------------------
+
+    #[test]
+    fn offset_settled_never_animates() {
+        let mut o = Offset::settled();
+        assert!(!o.is_animating());
+        assert_eq!(o.current(), [0.0, 0.0]);
+        assert!(!o.advance(1.0));
+        assert_eq!(o.current(), [0.0, 0.0]);
+    }
+
+    #[test]
+    fn offset_eases_both_axes_to_rest() {
+        // "translate_in" shape: slide from [40, -60] to [0, 0].
+        let mut o = Offset::animating([40.0, -60.0], [0.0, 0.0], 0.2, Easing::EaseOut);
+        assert!(o.is_animating());
+        assert_eq!(o.current(), [40.0, -60.0]);
+        assert!(o.advance(0.1)); // halfway in time
+        // ease-out at t=0.5 = 0.75 of the way there.
+        let [x, y] = o.current();
+        assert!((x - 10.0).abs() < 1e-3, "x={x}"); // 40 -> 40*(1-0.75)=10
+        assert!((y + 15.0).abs() < 1e-3, "y={y}"); // -60 -> -60*0.25=-15
+        assert!(!o.advance(0.2)); // overshoot end -> settled at rest
+        assert_eq!(o.current(), [0.0, 0.0]);
+        assert!(!o.is_animating());
+    }
+
+    #[test]
+    fn offset_reaches_target_on_close() {
+        // "translate_out" shape: slide from rest out to [200, 0].
+        let mut o = Offset::animating([0.0, 0.0], [200.0, 0.0], 0.2, Easing::Linear);
+        o.advance(0.1); // linear, halfway
+        let [x, _] = o.current();
+        assert!((x - 100.0).abs() < 1e-3, "x={x}");
+        o.advance(0.2);
+        assert_eq!(o.current(), [200.0, 0.0]);
+    }
+
+    #[test]
+    fn offset_ease_in_lags_the_linear_midpoint() {
+        // ease-in at t=0.5 = 0.25, i.e. behind a linear 0.5.
+        let mut o = Offset::animating([0.0, 0.0], [100.0, 0.0], 0.2, Easing::EaseIn);
+        o.advance(0.1);
+        let [x, _] = o.current();
+        assert!((x - 25.0).abs() < 1e-3, "x={x}");
     }
 
     // --- Wobble spring sim ---------------------------------------------------

@@ -41,11 +41,10 @@ pub struct Config {
     /// Opacity for windows that set no `_NET_WM_WINDOW_OPACITY` and match no rule
     /// (`0.0..=1.0`; `1.0` = opaque). The bottom layer of the opacity stack.
     pub default_opacity: f64,
-    pub fade: Fade,
+    pub anim: Anim,
     pub shadow: Shadow,
     pub blur: Blur,
     pub fps: Fps,
-    pub animation: Animation,
     pub burn: Burn,
     /// Per-window override rules, applied in order (last match wins per field).
     /// Written as `[[rule]]` tables in TOML.
@@ -80,6 +79,14 @@ pub struct Rule {
     /// Keep matching windows composited on top of all others (always-on-top),
     /// regardless of the X stacking order. `None`/`false` = normal stacking.
     pub above: Option<bool>,
+    /// Override the open animation for matching windows (preset name or an
+    /// explicit block spec). `None` = use the global `[anim] open`.
+    pub open: Option<AnimSel>,
+    /// Override the close animation. `None` = use the global `[anim] close`.
+    pub close: Option<AnimSel>,
+    /// Override the move/resize animation. `None` = use the global `[anim] move`.
+    #[serde(rename = "move")]
+    pub r#move: Option<AnimSel>,
 }
 
 /// A window's identity + state, matched against [`Rule`]s. Built by `session`
@@ -103,6 +110,10 @@ pub struct RuleResult {
     pub corner_radius: Option<f32>,
     pub unredir: Option<bool>,
     pub above: Option<bool>,
+    /// Per-window animation overrides, already expanded from preset/spec.
+    pub open: Option<AnimSpec>,
+    pub close: Option<AnimSpec>,
+    pub r#move: Option<AnimSpec>,
 }
 
 impl Match {
@@ -168,13 +179,197 @@ pub struct Burn {
     pub ember_hot: [f32; 3],
 }
 
-/// Window fade-in (on map) / fade-out (on unmap/destroy).
+/// Which window-lifecycle transition an [`AnimSpec`] applies to. Runtime-only
+/// (not serialised); `session` asks for a spec per category.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Category {
+    Open,
+    Close,
+    Move,
+}
+
+/// Easing curve for eased primitives (opacity/scale/translate). Mirrors
+/// `wm::anim::Easing`; `session` maps between them (this crate stays `wm`-free).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Easing {
+    #[default]
+    EaseOut,
+    EaseIn,
+    Linear,
+}
+
+/// Screen edge a `translate` starts from (open) / slides toward (close), when
+/// `edge` is given instead of explicit `dx`/`dy`. The offset is sized at runtime
+/// to move the window fully off that edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Edge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+/// One animation primitive (building block) with its params. Blocks layer in
+/// order; `burn` owns alpha and suppresses a co-listed `opacity`. Serialised as a
+/// TOML table tagged by `block`, e.g.
+/// `{ block = "translate", dy = -60.0, easing = "ease-in" }`.
+///
+/// This is the single type a new primitive is added to (plus its running twin in
+/// `wm` and, if GPU-visible, `backend-gl` wiring).
+//
+// NB: `deny_unknown_fields` is intentionally absent — serde does not support it
+// alongside an internal `tag`. Unknown per-block keys are ignored (the top-level
+// `deny_unknown_fields` still catches most typos).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "block", rename_all = "kebab-case")]
+pub enum Primitive {
+    /// Opacity fade. `from` overrides the start alpha (else 0 on open / current
+    /// on close).
+    Opacity {
+        #[serde(default)]
+        from: Option<f64>,
+        #[serde(default)]
+        easing: Easing,
+    },
+    /// Uniform scale-about-centre. `from` is the start factor on open / end on
+    /// close (default: `[anim] scale_from`).
+    Scale {
+        #[serde(default)]
+        from: Option<f64>,
+        #[serde(default)]
+        easing: Easing,
+    },
+    /// Pixel translate: either explicit `dx`/`dy` (offset away from rest), or an
+    /// `edge` the window slides from (open) / to (close).
+    Translate {
+        #[serde(default)]
+        dx: f32,
+        #[serde(default)]
+        dy: f32,
+        #[serde(default)]
+        edge: Option<Edge>,
+        #[serde(default)]
+        easing: Easing,
+    },
+    /// Spring-mesh wobble (move category). Falls back to `[anim]` spring/friction.
+    Wobble {
+        #[serde(default)]
+        spring: Option<f32>,
+        #[serde(default)]
+        friction: Option<f32>,
+    },
+    /// Noise dissolve with ember front (close). Shader params from `[burn]`.
+    Burn,
+}
+
+impl Primitive {
+    /// Short name for diagnostics.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Primitive::Opacity { .. } => "opacity",
+            Primitive::Scale { .. } => "scale",
+            Primitive::Translate { .. } => "translate",
+            Primitive::Wobble { .. } => "wobble",
+            Primitive::Burn => "burn",
+        }
+    }
+
+    /// Whether this block is meaningful for `cat` (used by [`Config::validate`]).
+    /// open/close accept any transform; move only geometry blocks.
+    fn valid_for(&self, cat: Category) -> bool {
+        match cat {
+            Category::Open | Category::Close => true,
+            Category::Move => matches!(self, Primitive::Wobble { .. } | Primitive::Translate { .. }),
+        }
+    }
+}
+
+/// An ordered set of primitive blocks for one category. `duration` (seconds)
+/// applies to the eased blocks; `None` falls back to `[anim] duration`.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnimSpec {
+    pub duration: Option<f64>,
+    pub blocks: Vec<Primitive>,
+}
+
+/// Per-category selection: either a preset name (`open = "pop"`) or an explicit
+/// [`AnimSpec`] table. Normalised to an `AnimSpec` at resolve time via
+/// [`expand_sel`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum AnimSel {
+    Preset(String),
+    Spec(AnimSpec),
+}
+
+/// Known preset names, for diagnostics + docs.
+pub const PRESETS: &[&str] = &["none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble"];
+
+/// Expand a preset name into its block list. `None` if the name is unknown.
+fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
+    use Primitive::*;
+    let opacity = Opacity { from: None, easing: Easing::EaseOut };
+    Some(match name {
+        "none" => vec![],
+        "fade" => vec![opacity],
+        "pop" => vec![opacity, Scale { from: None, easing: Easing::EaseOut }],
+        "slide" => {
+            vec![opacity, Translate { dx: 0.0, dy: 0.0, edge: Some(Edge::Left), easing: Easing::EaseOut }]
+        }
+        "drop" => {
+            // Fall downward (+y) with an accelerating ease-in as it fades.
+            vec![opacity, Translate { dx: 0.0, dy: 120.0, edge: None, easing: Easing::EaseIn }]
+        }
+        "boing" => vec![Wobble { spring: None, friction: None }],
+        "burn" => vec![Burn],
+        "wobble" => vec![Wobble { spring: None, friction: None }],
+        _ => return None,
+    })
+}
+
+/// Normalise a selection to a concrete [`AnimSpec`]. An unknown preset yields an
+/// empty spec (no animation); [`Config::validate`] surfaces the warning.
+pub fn expand_sel(sel: &AnimSel) -> AnimSpec {
+    match sel {
+        AnimSel::Preset(name) => AnimSpec { duration: None, blocks: expand_preset(name).unwrap_or_default() },
+        AnimSel::Spec(spec) => spec.clone(),
+    }
+}
+
+/// Open / close / move animation selection + shared primitive param defaults.
+/// Replaces the old `[fade]` and `[animation]` blocks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub struct Fade {
-    pub enabled: bool,
-    /// Fade duration in seconds.
+pub struct Anim {
+    /// Shared animation duration in seconds (opacity/scale/translate).
     pub duration: f64,
+    /// Default scale factor for the `scale` primitive (open start / close end).
+    pub scale_from: f64,
+    /// Default wobble spring stiffness (pull toward target geometry).
+    pub wobble_spring: f32,
+    /// Default wobble velocity damping.
+    pub wobble_friction: f32,
+    /// Open animation (window mapped). Default preset `"pop"`.
+    pub open: AnimSel,
+    /// Close animation (window unmapped/destroyed). Default preset `"fade"`.
+    pub close: AnimSel,
+    /// Move/resize animation. Default preset `"wobble"`.
+    #[serde(rename = "move")]
+    pub r#move: AnimSel,
+}
+
+impl Anim {
+    /// The selection for a category.
+    fn sel(&self, cat: Category) -> &AnimSel {
+        match cat {
+            Category::Open => &self.open,
+            Category::Close => &self.close,
+            Category::Move => &self.r#move,
+        }
+    }
 }
 
 /// Left+bottom drop shadows.
@@ -190,28 +385,6 @@ pub struct Shadow {
     pub min_size: i32,
 }
 
-/// Transition animations: the open/close scale "pop" and move/resize
-/// wobbly-windows. Opacity fades are configured separately in [`Fade`].
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Animation {
-    /// Master switch for the scale-about-centre open/close pop. `false` = windows
-    /// appear/disappear at full size (the `[fade]` opacity fade still applies).
-    pub enabled: bool,
-    /// Starting scale for the open pop and ending scale on close (`1.0` = none).
-    /// `0.85` (default) = a subtle grow-in / shrink-out. Timing follows
-    /// `[fade] duration`, so the pop and the fade settle together.
-    pub open_scale: f64,
-    /// Move/resize wobbly-windows (spring-mesh jelly). `true` (default).
-    pub wobble: bool,
-    /// Wobble spring stiffness `k` (pull toward the target geometry); higher =
-    /// snappier, faster settle.
-    pub wobble_spring: f32,
-    /// Wobble velocity damping; higher = less jiggle and settles sooner, lower =
-    /// looser/longer wobble.
-    pub wobble_friction: f32,
-}
-
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -220,11 +393,10 @@ impl Default for Config {
             background: [0.05, 0.05, 0.07],
             corner_radius: 0.0,
             default_opacity: 1.0,
-            fade: Fade::default(),
+            anim: Anim::default(),
             shadow: Shadow::default(),
             blur: Blur::default(),
             fps: Fps::default(),
-            animation: Animation::default(),
             burn: Burn::default(),
             rules: Vec::new(),
         }
@@ -244,14 +416,16 @@ impl Default for Burn {
     }
 }
 
-impl Default for Animation {
+impl Default for Anim {
     fn default() -> Self {
-        Animation {
-            enabled: true,
-            open_scale: 0.85,
-            wobble: true,
+        Anim {
+            duration: 0.2,
+            scale_from: 0.85,
             wobble_spring: 350.0,
             wobble_friction: 14.0,
+            open: AnimSel::Preset("pop".into()),
+            close: AnimSel::Preset("fade".into()),
+            r#move: AnimSel::Preset("wobble".into()),
         }
     }
 }
@@ -271,12 +445,6 @@ impl Default for Fps {
             graph: true,
             scale: 1.0,
         }
-    }
-}
-
-impl Default for Fade {
-    fn default() -> Self {
-        Fade { enabled: true, duration: 0.2 }
     }
 }
 
@@ -350,8 +518,13 @@ impl Config {
         chg!("background", prev.background, self.background);
         chg!("corner_radius", prev.corner_radius, self.corner_radius);
         chg!("default_opacity", prev.default_opacity, self.default_opacity);
-        chg!("fade.enabled", prev.fade.enabled, self.fade.enabled);
-        chg!("fade.duration", prev.fade.duration, self.fade.duration);
+        chg!("anim.duration", prev.anim.duration, self.anim.duration);
+        chg!("anim.scale_from", prev.anim.scale_from, self.anim.scale_from);
+        chg!("anim.wobble_spring", prev.anim.wobble_spring, self.anim.wobble_spring);
+        chg!("anim.wobble_friction", prev.anim.wobble_friction, self.anim.wobble_friction);
+        chg!("anim.open", prev.anim.open, self.anim.open);
+        chg!("anim.close", prev.anim.close, self.anim.close);
+        chg!("anim.move", prev.anim.r#move, self.anim.r#move);
         chg!("shadow.enabled", prev.shadow.enabled, self.shadow.enabled);
         chg!("shadow.radius", prev.shadow.radius, self.shadow.radius);
         chg!("shadow.strength", prev.shadow.strength, self.shadow.strength);
@@ -364,15 +537,6 @@ impl Config {
         chg!("fps.corner", prev.fps.corner, self.fps.corner);
         chg!("fps.graph", prev.fps.graph, self.fps.graph);
         chg!("fps.scale", prev.fps.scale, self.fps.scale);
-        chg!("animation.enabled", prev.animation.enabled, self.animation.enabled);
-        chg!("animation.open_scale", prev.animation.open_scale, self.animation.open_scale);
-        chg!("animation.wobble", prev.animation.wobble, self.animation.wobble);
-        chg!("animation.wobble_spring", prev.animation.wobble_spring, self.animation.wobble_spring);
-        chg!(
-            "animation.wobble_friction",
-            prev.animation.wobble_friction,
-            self.animation.wobble_friction
-        );
         chg!("burn.seg_scale", prev.burn.seg_scale, self.burn.seg_scale);
         chg!("burn.ember_width", prev.burn.ember_width, self.burn.ember_width);
         chg!("burn.ember_cool", prev.burn.ember_cool, self.burn.ember_cool);
@@ -419,9 +583,72 @@ impl Config {
                 r.corner_radius = rule.corner_radius.or(r.corner_radius);
                 r.unredir = rule.unredir.or(r.unredir);
                 r.above = rule.above.or(r.above);
+                // Anim overrides: last matching rule that specifies one wins.
+                if let Some(s) = &rule.open {
+                    r.open = Some(expand_sel(s));
+                }
+                if let Some(s) = &rule.close {
+                    r.close = Some(expand_sel(s));
+                }
+                if let Some(s) = &rule.r#move {
+                    r.r#move = Some(expand_sel(s));
+                }
             }
         }
         r
+    }
+
+    /// The effective animation spec for a window in `cat`: a matching rule's
+    /// override, else the global `[anim]` default. Always concrete (preset names
+    /// already expanded), so `session` can drive `wm` directly.
+    pub fn spec_for(&self, w: &WindowMatch, cat: Category) -> AnimSpec {
+        let over = match cat {
+            Category::Open => self.resolve(w).open,
+            Category::Close => self.resolve(w).close,
+            Category::Move => self.resolve(w).r#move,
+        };
+        over.unwrap_or_else(|| expand_sel(self.anim.sel(cat)))
+    }
+
+    /// Non-fatal config problems to log at load (never rejects — parsing already
+    /// rejects typos/unknown keys). Currently: unknown preset names, and blocks
+    /// used in a category they don't fit (e.g. `burn` on `move`).
+    pub fn validate(&self) -> Vec<String> {
+        let mut warns = Vec::new();
+        for (label, sel, cat) in [
+            ("anim.open", &self.anim.open, Category::Open),
+            ("anim.close", &self.anim.close, Category::Close),
+            ("anim.move", &self.anim.r#move, Category::Move),
+        ] {
+            validate_sel(label, sel, cat, &mut warns);
+        }
+        for (i, rule) in self.rules.iter().enumerate() {
+            if let Some(s) = &rule.open {
+                validate_sel(&format!("rule[{i}].open"), s, Category::Open, &mut warns);
+            }
+            if let Some(s) = &rule.close {
+                validate_sel(&format!("rule[{i}].close"), s, Category::Close, &mut warns);
+            }
+            if let Some(s) = &rule.r#move {
+                validate_sel(&format!("rule[{i}].move"), s, Category::Move, &mut warns);
+            }
+        }
+        warns
+    }
+}
+
+/// Warn on an unknown preset name or category-invalid blocks in one selection.
+fn validate_sel(label: &str, sel: &AnimSel, cat: Category, warns: &mut Vec<String>) {
+    if let AnimSel::Preset(name) = sel
+        && expand_preset(name).is_none()
+    {
+        warns.push(format!("{label}: unknown preset {name:?} (no animation)"));
+        return;
+    }
+    for b in expand_sel(sel).blocks {
+        if !b.valid_for(cat) {
+            warns.push(format!("{label}: block \"{}\" is not valid for {cat:?}", b.name()));
+        }
     }
 }
 
@@ -447,7 +674,7 @@ mod tests {
         assert!(c.use_damage);
         assert_eq!(c.background, [0.05, 0.05, 0.07]);
         assert_eq!(c.corner_radius, 0.0);
-        assert_eq!((c.fade.enabled, c.fade.duration), (true, 0.2));
+        assert_eq!(c.anim.duration, 0.2);
         assert_eq!(
             (c.shadow.enabled, c.shadow.radius, c.shadow.strength, c.shadow.min_size),
             (true, 12.0, 0.45, 24)
@@ -459,11 +686,11 @@ mod tests {
         assert!(c.fps.graph);
         assert_eq!(c.fps.scale, 1.0);
         assert_eq!(c.default_opacity, 1.0);
-        assert_eq!(
-            (c.animation.enabled, c.animation.open_scale, c.animation.wobble),
-            (true, 0.85, true)
-        );
-        assert_eq!((c.animation.wobble_spring, c.animation.wobble_friction), (350.0, 14.0));
+        assert_eq!(c.anim.scale_from, 0.85);
+        assert_eq!((c.anim.wobble_spring, c.anim.wobble_friction), (350.0, 14.0));
+        assert_eq!(c.anim.open, AnimSel::Preset("pop".into()));
+        assert_eq!(c.anim.close, AnimSel::Preset("fade".into()));
+        assert_eq!(c.anim.r#move, AnimSel::Preset("wobble".into()));
         assert_eq!((c.burn.seg_scale, c.burn.ember_width), (36.0, 0.07));
         assert_eq!(c.burn.ember_cool, [0.28, 0.02, 0.0]);
         assert_eq!(c.burn.ember_hot, [0.75, 0.22, 0.04]);
@@ -476,9 +703,6 @@ mod tests {
 unredir = false
 background = [0.1, 0.2, 0.3]
 corner_radius = 8.0
-[fade]
-enabled = false
-duration = 0.4
 [shadow]
 enabled = true
 radius = 30.0
@@ -494,12 +718,14 @@ hotkey = "Control+Alt+P"
 corner = "bottom-left"
 graph = false
 scale = 2.0
-[animation]
-enabled = false
-open_scale = 0.7
-wobble = false
+[anim]
+duration = 0.4
+scale_from = 0.7
 wobble_spring = 500.0
 wobble_friction = 20.0
+open = "slide"
+close = "burn"
+move = "none"
 [burn]
 seg_scale = 18.0
 ember_width = 0.08
@@ -510,7 +736,7 @@ ember_hot = [0.75, 0.25, 0.05]
         assert!(!c.unredir);
         assert_eq!(c.background, [0.1, 0.2, 0.3]);
         assert_eq!(c.corner_radius, 8.0);
-        assert_eq!((c.fade.enabled, c.fade.duration), (false, 0.4));
+        assert_eq!(c.anim.duration, 0.4);
         assert_eq!((c.shadow.radius, c.shadow.min_size), (30.0, 40));
         assert_eq!((c.blur.enabled, c.blur.passes, c.blur.radius), (true, 5, 6.0));
         assert!(c.fps.enabled);
@@ -518,9 +744,11 @@ ember_hot = [0.75, 0.25, 0.05]
         assert_eq!(c.fps.corner, "bottom-left");
         assert!(!c.fps.graph);
         assert_eq!(c.fps.scale, 2.0);
-        assert_eq!((c.animation.enabled, c.animation.wobble), (false, false));
-        assert_eq!(c.animation.open_scale, 0.7);
-        assert_eq!((c.animation.wobble_spring, c.animation.wobble_friction), (500.0, 20.0));
+        assert_eq!(c.anim.scale_from, 0.7);
+        assert_eq!((c.anim.wobble_spring, c.anim.wobble_friction), (500.0, 20.0));
+        assert_eq!(c.anim.open, AnimSel::Preset("slide".into()));
+        assert_eq!(c.anim.close, AnimSel::Preset("burn".into()));
+        assert_eq!(c.anim.r#move, AnimSel::Preset("none".into()));
         assert_eq!((c.burn.seg_scale, c.burn.ember_width), (18.0, 0.08));
         assert_eq!(c.burn.ember_cool, [0.3, 0.02, 0.0]);
         assert_eq!(c.burn.ember_hot, [0.75, 0.25, 0.05]);
@@ -534,7 +762,7 @@ ember_hot = [0.75, 0.25, 0.05]
         assert_eq!(c.shadow.strength, 0.45); // default
         assert!(c.shadow.enabled); // default
         assert!(c.unredir); // default
-        assert_eq!(c.fade.duration, 0.2); // default
+        assert_eq!(c.anim.duration, 0.2); // default
     }
 
     #[test]
@@ -639,5 +867,99 @@ opacity = 0.9
         assert_eq!(c.resolve(&w).above, Some(true));
         // A non-matching window is untouched.
         assert_eq!(c.resolve(&WindowMatch { title: "xterm".into(), ..Default::default() }).above, None);
+    }
+
+    // --- Composable animation blocks -----------------------------------------
+
+    const FADE_BLOCKS: [Primitive; 1] = [Primitive::Opacity { from: None, easing: Easing::EaseOut }];
+
+    #[test]
+    fn preset_expands_to_blocks() {
+        assert_eq!(expand_sel(&AnimSel::Preset("fade".into())).blocks, FADE_BLOCKS);
+        let pop = expand_sel(&AnimSel::Preset("pop".into())).blocks;
+        assert_eq!(pop.len(), 2);
+        assert!(matches!(pop[0], Primitive::Opacity { .. }));
+        assert!(matches!(pop[1], Primitive::Scale { .. }));
+        assert_eq!(expand_sel(&AnimSel::Preset("burn".into())).blocks, [Primitive::Burn]);
+        assert!(expand_sel(&AnimSel::Preset("none".into())).blocks.is_empty());
+        // Unknown preset -> empty spec (validate() reports it separately).
+        assert!(expand_sel(&AnimSel::Preset("bogus".into())).blocks.is_empty());
+    }
+
+    #[test]
+    fn explicit_blocks_parse() {
+        let t = r#"
+[anim.open]
+duration = 0.3
+blocks = [
+  { block = "opacity", easing = "ease-out" },
+  { block = "translate", dy = -60.0, easing = "ease-in" },
+]
+"#;
+        let c: Config = toml::from_str(t).unwrap();
+        let AnimSel::Spec(s) = &c.anim.open else { panic!("expected explicit spec") };
+        assert_eq!(s.duration, Some(0.3));
+        assert_eq!(s.blocks.len(), 2);
+        assert!(matches!(s.blocks[0], Primitive::Opacity { easing: Easing::EaseOut, .. }));
+        let Primitive::Translate { dy, easing, .. } = s.blocks[1] else { panic!("expected translate") };
+        assert_eq!(dy, -60.0);
+        assert_eq!(easing, Easing::EaseIn);
+    }
+
+    #[test]
+    fn catchall_rule_sets_close_fade_for_all() {
+        let t = r#"
+[anim]
+close = "burn"
+
+[[rule]]
+match = {}
+close = "fade"
+"#;
+        let c: Config = toml::from_str(t).unwrap();
+        // Global default is burn, but the empty-match rule overrides every window.
+        let any = WindowMatch { class: "anything".into(), ..Default::default() };
+        assert_eq!(c.spec_for(&any, Category::Close).blocks, FADE_BLOCKS);
+    }
+
+    #[test]
+    fn mpv_rule_keeps_burn_while_default_is_fade() {
+        let t = r#"
+[[rule]]
+match = { class = "mpv" }
+close = "burn"
+"#;
+        let c: Config = toml::from_str(t).unwrap();
+        // Default close is fade (opacity only)…
+        let ff = WindowMatch { class: "firefox".into(), ..Default::default() };
+        assert_eq!(c.spec_for(&ff, Category::Close).blocks, FADE_BLOCKS);
+        // …but mpv still burns.
+        let mpv = WindowMatch { class: "mpv".into(), ..Default::default() };
+        assert_eq!(c.spec_for(&mpv, Category::Close).blocks, [Primitive::Burn]);
+    }
+
+    #[test]
+    fn spec_for_falls_back_to_global_default() {
+        let c = Config::default();
+        let w = WindowMatch::default();
+        assert_eq!(c.spec_for(&w, Category::Open).blocks.len(), 2); // pop = opacity + scale
+        assert_eq!(c.spec_for(&w, Category::Close).blocks, FADE_BLOCKS);
+        assert_eq!(
+            c.spec_for(&w, Category::Move).blocks,
+            [Primitive::Wobble { spring: None, friction: None }]
+        );
+    }
+
+    #[test]
+    fn validate_warns_unknown_preset_and_bad_combo() {
+        let c: Config = toml::from_str("[anim]\nopen = \"sparkle\"\n").unwrap();
+        assert!(c.validate().iter().any(|s| s.contains("anim.open") && s.contains("sparkle")));
+
+        // burn is not a valid `move` block.
+        let c: Config = toml::from_str("[anim]\nmove = \"burn\"\n").unwrap();
+        assert!(c.validate().iter().any(|s| s.contains("anim.move") && s.contains("burn")));
+
+        // The default config is clean.
+        assert!(Config::default().validate().is_empty());
     }
 }

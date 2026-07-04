@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 pub mod anim;
-use anim::{Fade, Wobble};
+use anim::{Easing, Fade, Offset, Wobble};
 
 /// An X window id.
 pub type WindowId = u32;
@@ -47,6 +47,10 @@ pub struct Win {
     /// Animated scale-about-centre for the open/close "pop". `scale.current()` is
     /// the factor to render at now (1.0 = full size); settled at 1.0 when idle.
     pub scale: Fade,
+    /// Animated on-screen pixel offset for the `translate` primitive (slide,
+    /// drop). `translate.current()` is added to the window's position when
+    /// compositing; `[0, 0]` when at rest.
+    pub translate: Offset,
     /// Active move/resize wobble (spring-mesh), or `None` when the window is not
     /// wobbling. Dropped by [`WindowStack::advance_anims`] once it settles.
     pub wobble: Option<Wobble>,
@@ -84,6 +88,7 @@ impl Win {
             map_state: if mapped { MapState::Mapped } else { MapState::Unmapped },
             fade: Fade::settled(1.0),
             scale: Fade::settled(1.0),
+            translate: Offset::settled(),
             wobble: None,
             burn: None,
             closing: false,
@@ -265,6 +270,39 @@ impl WindowStack {
         }
     }
 
+    /// Start an open translate: ease the on-screen offset from `from` (px) to its
+    /// resting `[0, 0]` over `duration`. Pairs with [`fade_in`](Self::fade_in)
+    /// for a slide/drop-in. No-op if untracked.
+    pub fn translate_in(&mut self, id: WindowId, from: [f32; 2], duration: f64, easing: Easing) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.translate = Offset::animating(from, [0.0, 0.0], duration, easing);
+        }
+    }
+
+    /// Start a close translate: ease the on-screen offset to `to` (px) from its
+    /// current value over `duration`. Pairs with
+    /// [`begin_fade_out`](Self::begin_fade_out) for a slide/drop-out. No-op if
+    /// untracked.
+    pub fn translate_out(&mut self, id: WindowId, to: [f32; 2], duration: f64, easing: Easing) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            let from = w.translate.current();
+            w.translate = Offset::animating(from, to, duration, easing);
+        }
+    }
+
+    /// Reset a window's transient transforms to their resting state (full scale,
+    /// no translate offset, no burn). Opacity is left to the caller. Called at
+    /// map time before applying an open animation, so blocks *absent* from the
+    /// spec leave their property at rest (e.g. a window re-mapped after fading or
+    /// sliding out doesn't reappear scaled-down or shifted). No-op if untracked.
+    pub fn reset_transforms(&mut self, id: WindowId) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.scale = Fade::settled(1.0);
+            w.translate = Offset::settled();
+            w.burn = None;
+        }
+    }
+
     /// Start (or continue) a move/resize wobble: aim the spring mesh at outer rect
     /// `new`, creating it from `old` first if the window isn't already wobbling.
     /// Rects are `[x, y, w, h]` in screen px. No-op if untracked.
@@ -288,9 +326,9 @@ impl WindowStack {
         }
     }
 
-    /// Advance every window's animations (opacity fade, scale pop, and wobble) by
-    /// `dt` seconds; settled wobbles are dropped. Returns whether any window is
-    /// still animating (i.e. the frame clock should keep running).
+    /// Advance every window's animations (opacity fade, scale pop, translate, and
+    /// wobble) by `dt` seconds; settled wobbles are dropped. Returns whether any
+    /// window is still animating (i.e. the frame clock should keep running).
     pub fn advance_anims(&mut self, dt: f64) -> bool {
         let mut animating = false;
         for w in self.wins.values_mut() {
@@ -298,6 +336,9 @@ impl WindowStack {
                 animating = true;
             }
             if w.scale.advance(dt) {
+                animating = true;
+            }
+            if w.translate.advance(dt) {
                 animating = true;
             }
             if let Some(wob) = &mut w.wobble {
