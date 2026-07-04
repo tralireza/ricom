@@ -48,6 +48,10 @@ Working today:
   unmap/destroy (200 ms ease-out on a `calloop` frame clock; a closing window's last frame is kept and
   faded), soft **left+bottom drop shadows**, **rounded corners** (shadow follows the corner), and
   **background blur** — dual-Kawase frost behind translucent windows.
+- **Transition animations** — a scale-about-centre **open/close "pop"** (alongside the fade), and
+  **wobbly-windows**: a spring-mesh jelly that lags and jiggles as a window settles after a
+  move/resize (an `N×N` grid warped by a CPU spring sim, drawn through a dedicated GL mesh path).
+  Both ride `use-damage`, so an animating window repaints only its moving path, not the whole screen.
 - **On-demand FPS HUD** — a global hotkey (`Super+Shift+F` by default) toggles an overlay showing
   FPS, frame-time, and a rolling frame-time graph, drawn with a general **SDF text engine**
   (arbitrary strings, crisp at any size, no runtime font dependency) — ricom's first on-screen text.
@@ -66,7 +70,7 @@ Working today:
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** window dimming, animations, and the xrender/glx backends + D-Bus IPC.
+**Not yet implemented:** window dimming, and the xrender/glx backends + D-Bus IPC.
 See [Roadmap](#roadmap).
 
 ## How it works
@@ -143,7 +147,7 @@ ricom             workspace root + binary (event-loop wiring, CLI)
    ├─ region      pure-Rust pixman-style rectangle regions (damage maths)
    ├─ xconn       x11rb wrapper: connection, extensions, atoms, overlay/redirect, pixmap/damage
    ├─ wm          window model + bottom-to-top stacking, updated from X events
-   ├─ backend-gl  EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/SDF-text shaders, present
+   ├─ backend-gl  EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/mesh/SDF-text shaders, present
    └─ session     the compositor: owns X + wm + backend, runs the calloop event loop
 ```
 
@@ -211,6 +215,13 @@ enabled = false                 # frost the backdrop behind translucent windows
 passes = 3                      # dual-Kawase iterations (wider/softer)
 radius = 4.0                    # sample offset per pass (px)
 
+[animation]                     # transition animations (pop speed follows [fade] duration)
+enabled = true                  # scale-about-centre "pop" on open/close (fade still applies if off)
+open_scale = 0.85               # start scale on open / end scale on close (1.0 = no pop)
+wobble = true                   # wobbly-windows: spring-mesh jelly on move/resize
+wobble_spring = 350.0           # spring stiffness k (higher = snappier, faster settle)
+wobble_friction = 14.0          # velocity damping (higher = less jiggle, settles sooner)
+
 [fps]
 enabled = false                 # start with the FPS HUD visible (also toggled by the hotkey)
 hotkey = "Super+Shift+F"        # toggle shortcut (XGrabKey); its modifiers + arrows move corners live
@@ -228,8 +239,8 @@ blur = false
 shadow = false
 
 [[rule]]
-match = { class = "Alacritty" } # frosted terminals
-opacity = 0.85
+match = { class = "com.mitchellh.ghostty" }  # frosted terminals (Ghostty's default X11
+opacity = 0.85                               # class; confirm with `xprop WM_CLASS`)
 blur = true
 
 [[rule]]
@@ -245,13 +256,13 @@ Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners
 (dual-Kawase), a TOML config file with live (SIGHUP) reload, an on-demand FPS HUD (global hotkey)
 built on a general SDF text engine, per-window rules (match on class/type/title/fullscreen), a
 loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), region-level occlusion
-culling (skip windows/pixels hidden behind an opaque one), and `use-damage` partial repaint
-(EGL buffer-age; repaint only the changed region).
+culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial repaint
+(EGL buffer-age; repaint only the changed region), and transition animations — an open/close
+scale "pop" plus wobbly-windows (a spring-mesh move/resize jelly on a dedicated GL mesh path).
 
 Next:
 
-1. Animations (picom-style transition scripts).
-2. Window dimming (per-window / rule — slots into the rules engine).
+1. Window dimming (per-window / rule — slots into the rules engine).
 
 ## License
 

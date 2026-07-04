@@ -32,6 +32,14 @@ enabled = false     # frost the backdrop behind translucent windows (extra GPU c
 passes = 3          # dual-Kawase iterations (more = wider/softer)
 radius = 4.0        # sample offset per pass (px)
 
+[animation]
+enabled = true          # scale-about-centre "pop" on open/close (pop speed follows [fade] duration;
+                        # the [fade] opacity fade still applies when this is false)
+open_scale = 0.85       # start scale on open / end scale on close (1.0 = no pop)
+wobble = true           # wobbly-windows: a spring-mesh jelly that lags/jiggles on move/resize
+wobble_spring = 350.0   # spring stiffness k (higher = snappier, faster settle)
+wobble_friction = 14.0  # velocity damping (higher = less jiggle, settles sooner)
+
 [fps]
 enabled = false          # start with the on-demand FPS HUD visible (also toggles live via the hotkey)
 hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + arrow keys move it
@@ -55,9 +63,9 @@ scale = 1.0              # size multiplier on top of automatic screen-height sca
 # shadow = false
 
 # [[rule]]
-# match = { class = "Alacritty" }   # frosted terminals
-# opacity = 0.85
-# blur = true
+# match = { class = "com.mitchellh.ghostty" }  # frosted terminals (Ghostty's default
+# opacity = 0.85                                # X11 class; confirm with `xprop WM_CLASS`,
+# blur = true                                   # or set it via Ghostty's own `class` option)
 
 # [[rule]]
 # match = { window_type = "dock" }  # no shadow on panels/bars

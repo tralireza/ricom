@@ -45,6 +45,7 @@ pub struct Config {
     pub shadow: Shadow,
     pub blur: Blur,
     pub fps: Fps,
+    pub animation: Animation,
     /// Per-window override rules, applied in order (last match wins per field).
     /// Written as `[[rule]]` tables in TOML.
     #[serde(rename = "rule")]
@@ -163,6 +164,28 @@ pub struct Shadow {
     pub min_size: i32,
 }
 
+/// Transition animations: the open/close scale "pop" and move/resize
+/// wobbly-windows. Opacity fades are configured separately in [`Fade`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Animation {
+    /// Master switch for the scale-about-centre open/close pop. `false` = windows
+    /// appear/disappear at full size (the `[fade]` opacity fade still applies).
+    pub enabled: bool,
+    /// Starting scale for the open pop and ending scale on close (`1.0` = none).
+    /// `0.85` (default) = a subtle grow-in / shrink-out. Timing follows
+    /// `[fade] duration`, so the pop and the fade settle together.
+    pub open_scale: f64,
+    /// Move/resize wobbly-windows (spring-mesh jelly). `true` (default).
+    pub wobble: bool,
+    /// Wobble spring stiffness `k` (pull toward the target geometry); higher =
+    /// snappier, faster settle.
+    pub wobble_spring: f32,
+    /// Wobble velocity damping; higher = less jiggle and settles sooner, lower =
+    /// looser/longer wobble.
+    pub wobble_friction: f32,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -175,7 +198,20 @@ impl Default for Config {
             shadow: Shadow::default(),
             blur: Blur::default(),
             fps: Fps::default(),
+            animation: Animation::default(),
             rules: Vec::new(),
+        }
+    }
+}
+
+impl Default for Animation {
+    fn default() -> Self {
+        Animation {
+            enabled: true,
+            open_scale: 0.85,
+            wobble: true,
+            wobble_spring: 350.0,
+            wobble_friction: 14.0,
         }
     }
 }
@@ -288,6 +324,15 @@ impl Config {
         chg!("fps.corner", prev.fps.corner, self.fps.corner);
         chg!("fps.graph", prev.fps.graph, self.fps.graph);
         chg!("fps.scale", prev.fps.scale, self.fps.scale);
+        chg!("animation.enabled", prev.animation.enabled, self.animation.enabled);
+        chg!("animation.open_scale", prev.animation.open_scale, self.animation.open_scale);
+        chg!("animation.wobble", prev.animation.wobble, self.animation.wobble);
+        chg!("animation.wobble_spring", prev.animation.wobble_spring, self.animation.wobble_spring);
+        chg!(
+            "animation.wobble_friction",
+            prev.animation.wobble_friction,
+            self.animation.wobble_friction
+        );
         if prev.rules != self.rules {
             out.push(format!("rules {}→{}", prev.rules.len(), self.rules.len()));
         }
@@ -369,6 +414,11 @@ mod tests {
         assert!(c.fps.graph);
         assert_eq!(c.fps.scale, 1.0);
         assert_eq!(c.default_opacity, 1.0);
+        assert_eq!(
+            (c.animation.enabled, c.animation.open_scale, c.animation.wobble),
+            (true, 0.85, true)
+        );
+        assert_eq!((c.animation.wobble_spring, c.animation.wobble_friction), (350.0, 14.0));
         assert!(c.rules.is_empty());
     }
 
@@ -396,6 +446,12 @@ hotkey = "Control+Alt+P"
 corner = "bottom-left"
 graph = false
 scale = 2.0
+[animation]
+enabled = false
+open_scale = 0.7
+wobble = false
+wobble_spring = 500.0
+wobble_friction = 20.0
 "#;
         let c: Config = toml::from_str(t).unwrap();
         assert!(!c.unredir);
@@ -409,6 +465,9 @@ scale = 2.0
         assert_eq!(c.fps.corner, "bottom-left");
         assert!(!c.fps.graph);
         assert_eq!(c.fps.scale, 2.0);
+        assert_eq!((c.animation.enabled, c.animation.wobble), (false, false));
+        assert_eq!(c.animation.open_scale, 0.7);
+        assert_eq!((c.animation.wobble_spring, c.animation.wobble_friction), (500.0, 20.0));
     }
 
     #[test]

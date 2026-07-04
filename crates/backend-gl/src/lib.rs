@@ -70,6 +70,42 @@ void main() {
 }
 "#;
 
+/// Wobble mesh grid dimension (`N×N` control points). **Must match**
+/// `wm::anim::WOBBLE_N`: `session` builds the deformed vertex grid there and the
+/// backend builds the matching triangle index buffer here. `(N-1)²·2` triangles.
+const MESH_N: usize = 8;
+
+/// Wobbly-windows mesh vertex shader: positions come straight from the CPU spring
+/// sim (already in screen pixels), so — unlike [`BLIT_VS`] — there's no `u_rect`;
+/// each vertex carries its own position + UV. Same top-left→NDC Y-flip as the blit.
+const MESH_VS: &str = r#"#version 330 core
+layout(location = 0) in vec2 a_px;    // control-point position (px, top-left origin)
+layout(location = 1) in vec2 a_uv;    // texture coord, (0,0) = window top-left
+uniform vec2 u_screen;                // screen w, h
+out vec2 v_tex;
+void main() {
+    v_tex = a_uv;
+    vec2 ndc = vec2(a_px.x / u_screen.x * 2.0 - 1.0,
+                    1.0 - a_px.y / u_screen.y * 2.0); // flip Y into GL NDC
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+"#;
+
+/// Wobbly-windows mesh fragment shader: sample the window texture × opacity,
+/// premultiplied for the ONE/ONE_MINUS_SRC_ALPHA blend. No corner rounding — a
+/// window is square while it wobbles (rounding returns via the quad path once it
+/// settles).
+const MESH_FS: &str = r#"#version 330 core
+in vec2 v_tex;
+uniform sampler2D u_tex;
+uniform float u_opacity;   // whole-window opacity, 0..1
+out vec4 frag;
+void main() {
+    float a = u_opacity;
+    frag = vec4(texture(u_tex, v_tex).rgb * a, a);
+}
+"#;
+
 /// Soft drop-shadow fragment shader (reuses [`BLIT_VS`], so it also has `u_rect`
 /// = the shadow quad and `u_screen`). Casts only to the **left** and **bottom**
 /// of the window (light from the top-right), fading off over the radius with a
@@ -262,13 +298,24 @@ pub struct Quad {
 pub struct WindowDraw {
     pub quad: Quad,
     pub clip: Vec<region::Rect>,
+    /// Wobble mesh: `MESH_N × MESH_N` deformed vertices as `[x_px, y_px, u, v]`,
+    /// row-major (from `wm::anim::Wobble::vertices`). `Some` → draw the textured
+    /// mesh (no shadow / frost / corner rounding — square while wobbling); `None`
+    /// → the normal quad path. `quad.x/y/w/h` still give the un-deformed rect (for
+    /// texture binding and, when settled, the quad path).
+    pub mesh: Option<Vec<[f32; 4]>>,
 }
 
 impl WindowDraw {
     /// Draw `quad` in full — a single clip rect equal to its own bounds (no
-    /// occlusion). Used by the diagnostic `--blit-test` / `--opacity-test` paths.
+    /// occlusion), no wobble mesh. Used by the diagnostic `--blit-test` /
+    /// `--opacity-test` paths.
     pub fn whole(quad: Quad) -> Self {
-        WindowDraw { quad, clip: vec![region::Rect::from_xywh(quad.x, quad.y, quad.w, quad.h)] }
+        WindowDraw {
+            quad,
+            clip: vec![region::Rect::from_xywh(quad.x, quad.y, quad.w, quad.h)],
+            mesh: None,
+        }
     }
 }
 
@@ -474,6 +521,15 @@ pub struct GlBackend {
     u_tex: Option<glow::NativeUniformLocation>,
     u_opacity: Option<glow::NativeUniformLocation>,
     u_corner: Option<glow::NativeUniformLocation>,
+    // Wobble mesh program: its own VAO with a dynamic vertex VBO (re-uploaded each
+    // frame from the spring sim) + a static triangle index EBO (built once).
+    mesh_program: glow::NativeProgram,
+    mesh_vao: glow::NativeVertexArray,
+    mesh_vbo: glow::NativeBuffer,
+    mesh_index_count: i32,
+    m_screen: Option<glow::NativeUniformLocation>,
+    m_tex: Option<glow::NativeUniformLocation>,
+    m_opacity: Option<glow::NativeUniformLocation>,
     // Drop-shadow program (shares the unit-quad VAO and BLIT_VS).
     shadow_program: glow::NativeProgram,
     s_rect: Option<glow::NativeUniformLocation>,
@@ -608,6 +664,51 @@ impl GlBackend {
             )
         };
 
+        // Wobble mesh program + its VAO: a dynamic vertex VBO ([x,y,u,v] per
+        // control point, re-uploaded per frame) and a static triangle-index EBO
+        // (two triangles per grid cell). The EBO binding is captured in the VAO.
+        let (mesh_program, mesh_vao, mesh_vbo, mesh_index_count, m_screen, m_tex, m_opacity) = unsafe {
+            let program = make_program(&gl, MESH_VS, MESH_FS)?;
+            let vao = gl.create_vertex_array().map_err(|e| anyhow!("mesh vao: {e}"))?;
+            gl.bind_vertex_array(Some(vao));
+            let vbo = gl.create_buffer().map_err(|e| anyhow!("mesh vbo: {e}"))?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            // N*N vertices × (vec2 pos + vec2 uv) × 4 bytes; filled each frame.
+            let vbo_bytes = (MESH_N * MESH_N * 4 * std::mem::size_of::<f32>()) as i32;
+            gl.buffer_data_size(glow::ARRAY_BUFFER, vbo_bytes, glow::DYNAMIC_DRAW);
+            let stride = (4 * std::mem::size_of::<f32>()) as i32; // [x, y, u, v]
+            gl.enable_vertex_attrib_array(0); // a_px
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, stride, 0);
+            gl.enable_vertex_attrib_array(1); // a_uv
+            gl.vertex_attrib_pointer_f32(1, 2, glow::FLOAT, false, stride, 2 * std::mem::size_of::<f32>() as i32);
+            let ebo = gl.create_buffer().map_err(|e| anyhow!("mesh ebo: {e}"))?;
+            gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
+            let mut idx: Vec<u32> = Vec::with_capacity((MESH_N - 1) * (MESH_N - 1) * 6);
+            for j in 0..MESH_N - 1 {
+                for i in 0..MESH_N - 1 {
+                    let v00 = (j * MESH_N + i) as u32;
+                    let v10 = (j * MESH_N + i + 1) as u32;
+                    let v01 = ((j + 1) * MESH_N + i) as u32;
+                    let v11 = ((j + 1) * MESH_N + i + 1) as u32;
+                    idx.extend_from_slice(&[v00, v10, v11, v00, v11, v01]);
+                }
+            }
+            let idx_bytes =
+                std::slice::from_raw_parts(idx.as_ptr() as *const u8, idx.len() * std::mem::size_of::<u32>());
+            gl.buffer_data_u8_slice(glow::ELEMENT_ARRAY_BUFFER, idx_bytes, glow::STATIC_DRAW);
+            let count = idx.len() as i32;
+            gl.bind_vertex_array(None); // captures the EBO binding in the VAO
+            (
+                program,
+                vao,
+                vbo,
+                count,
+                gl.get_uniform_location(program, "u_screen"),
+                gl.get_uniform_location(program, "u_tex"),
+                gl.get_uniform_location(program, "u_opacity"),
+            )
+        };
+
         // Shadow program: same vertex shader (unit quad -> u_rect), shadow FS.
         let (shadow_program, s_rect, s_screen, s_inner, s_shadow, s_corner) = unsafe {
             let sp = make_program(&gl, BLIT_VS, SHADOW_FS)?;
@@ -677,6 +778,7 @@ impl GlBackend {
         Ok(GlBackend {
             xlib, xdisplay, egl, display, surface, buffer_age_supported, context, gl,
             program, vao, u_rect, u_screen, u_tex, u_opacity, u_corner,
+            mesh_program, mesh_vao, mesh_vbo, mesh_index_count, m_screen, m_tex, m_opacity,
             shadow_program, s_rect, s_screen, s_inner, s_shadow, s_corner,
             down_program, d_src, d_halfpixel, d_offset,
             up_program, up_src, up_halfpixel, up_offset,
@@ -1095,7 +1197,7 @@ impl GlBackend {
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
         }
-        for WindowDraw { quad, clip } in items {
+        for WindowDraw { quad, clip, mesh } in items {
             if clip.is_empty() {
                 continue; // fully occluded — nothing visible to draw
             }
@@ -1104,7 +1206,8 @@ impl GlBackend {
             let win_rect = region::Rect::from_xywh(x, y, w, h);
             // Frost the backdrop first (renders the offscreen blur pyramid — must
             // run BEFORE the scissor test is enabled, or those passes get clipped).
-            let frost = if blur {
+            // Skipped while wobbling — the mesh path draws no frost.
+            let frost = if blur && mesh.is_none() {
                 self.blur_backdrop(screen_w, screen_h, blur_passes, blur_radius)
             } else {
                 None
@@ -1138,6 +1241,43 @@ impl GlBackend {
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
                 (self.image_target)(glow::TEXTURE_2D, image.as_ptr() as *const c_void);
+                // Wobbling window: draw the deformed textured mesh (no shadow /
+                // frost / corner rounding — square while it jiggles), scissored to
+                // each visible clip rect. GL's scissor origin is bottom-left.
+                if let Some(v) = mesh {
+                    if v.len() == MESH_N * MESH_N {
+                        self.gl.bind_buffer(glow::ARRAY_BUFFER, Some(self.mesh_vbo));
+                        let bytes = std::slice::from_raw_parts(
+                            v.as_ptr() as *const u8,
+                            v.len() * std::mem::size_of::<[f32; 4]>(),
+                        );
+                        self.gl.buffer_sub_data_u8_slice(glow::ARRAY_BUFFER, 0, bytes);
+                        self.gl.use_program(Some(self.mesh_program));
+                        self.gl.uniform_2_f32(self.m_screen.as_ref(), screen_w as f32, screen_h as f32);
+                        self.gl.uniform_1_i32(self.m_tex.as_ref(), 0);
+                        self.gl.uniform_1_f32(self.m_opacity.as_ref(), opacity);
+                        self.gl.bind_vertex_array(Some(self.mesh_vao));
+                        self.gl.enable(glow::SCISSOR_TEST);
+                        for r in clip {
+                            self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
+                            self.gl.draw_elements(
+                                glow::TRIANGLES, self.mesh_index_count, glow::UNSIGNED_INT, 0,
+                            );
+                        }
+                        self.gl.disable(glow::SCISSOR_TEST);
+                        // Restore the unit-quad VAO + blit program for the next item.
+                        self.gl.bind_vertex_array(Some(self.vao));
+                        self.gl.use_program(Some(self.program));
+                    } else {
+                        tracing::warn!(
+                            len = v.len(), expected = MESH_N * MESH_N,
+                            "wobble mesh vertex count mismatch — skipping window"
+                        );
+                    }
+                    self.gl.delete_texture(tex);
+                    let _ = self.egl.destroy_image(self.display, image);
+                    continue;
+                }
                 // Draw only where this window is visible: scissor to each clip rect.
                 // GL's scissor origin is bottom-left, so flip Y from our top-left rects.
                 self.gl.enable(glow::SCISSOR_TEST);

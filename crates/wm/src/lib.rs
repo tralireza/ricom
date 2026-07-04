@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 pub mod anim;
-use anim::Fade;
+use anim::{Fade, Wobble};
 
 /// An X window id.
 pub type WindowId = u32;
@@ -35,6 +35,12 @@ pub struct Win {
     /// Animated whole-window opacity. `fade.current()` is what to display now;
     /// `fade.target()` is the goal (from `_NET_WM_WINDOW_OPACITY`, default 1.0).
     pub fade: Fade,
+    /// Animated scale-about-centre for the open/close "pop". `scale.current()` is
+    /// the factor to render at now (1.0 = full size); settled at 1.0 when idle.
+    pub scale: Fade,
+    /// Active move/resize wobble (spring-mesh), or `None` when the window is not
+    /// wobbling. Dropped by [`WindowStack::advance_anims`] once it settles.
+    pub wobble: Option<Wobble>,
     /// Fading out (unmapped/destroyed) — kept in the composite set until the fade
     /// reaches 0, then reaped. See [`WindowStack::begin_fade_out`].
     pub closing: bool,
@@ -65,6 +71,8 @@ impl Win {
             override_redirect,
             map_state: if mapped { MapState::Mapped } else { MapState::Unmapped },
             fade: Fade::settled(1.0),
+            scale: Fade::settled(1.0),
+            wobble: None,
             closing: false,
             destroyed: false,
         }
@@ -203,13 +211,64 @@ impl WindowStack {
         }
     }
 
-    /// Advance every window's fade by `dt` seconds; returns whether any window
-    /// is still animating (i.e. the frame clock should keep running).
-    pub fn advance_fades(&mut self, dt: f64) -> bool {
+    /// Start the open "pop": scale-about-centre from `from` (e.g. 0.85) up to 1.0
+    /// over `duration`. Pairs with [`fade_in`](Self::fade_in). No-op if untracked.
+    pub fn scale_in(&mut self, id: WindowId, from: f64, duration: f64) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.scale = Fade::animating(from, 1.0, duration);
+        }
+    }
+
+    /// Ease a window's scale toward `to` from its current value (e.g. down to 0.85
+    /// on close, paired with [`begin_fade_out`](Self::begin_fade_out)). No-op if
+    /// untracked.
+    pub fn retarget_scale(&mut self, id: WindowId, to: f64, duration: f64) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.scale.retarget(to, duration);
+        }
+    }
+
+    /// Start (or continue) a move/resize wobble: aim the spring mesh at outer rect
+    /// `new`, creating it from `old` first if the window isn't already wobbling.
+    /// Rects are `[x, y, w, h]` in screen px. No-op if untracked.
+    pub fn wobble_to(
+        &mut self,
+        id: WindowId,
+        old: [f32; 4],
+        new: [f32; 4],
+        spring: f32,
+        friction: f32,
+    ) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            match &mut w.wobble {
+                Some(wob) => wob.retarget(new),
+                None => {
+                    let mut wob = Wobble::new(old, spring, friction);
+                    wob.retarget(new);
+                    w.wobble = Some(wob);
+                }
+            }
+        }
+    }
+
+    /// Advance every window's animations (opacity fade, scale pop, and wobble) by
+    /// `dt` seconds; settled wobbles are dropped. Returns whether any window is
+    /// still animating (i.e. the frame clock should keep running).
+    pub fn advance_anims(&mut self, dt: f64) -> bool {
         let mut animating = false;
         for w in self.wins.values_mut() {
             if w.fade.advance(dt) {
                 animating = true;
+            }
+            if w.scale.advance(dt) {
+                animating = true;
+            }
+            if let Some(wob) = &mut w.wobble {
+                if wob.advance(dt as f32) {
+                    animating = true;
+                } else {
+                    w.wobble = None;
+                }
             }
         }
         animating
@@ -353,10 +412,10 @@ mod tests {
         s.fade_in(1, 1.0, 0.2);
         assert_eq!(s.get(1).unwrap().fade.current(), 0.0); // starts transparent
         assert!(s.get(1).unwrap().fade.is_animating());
-        assert!(s.advance_fades(0.1)); // still going
+        assert!(s.advance_anims(0.1)); // still going
         let mid = s.get(1).unwrap().fade.current();
         assert!(mid > 0.0 && mid < 1.0);
-        assert!(!s.advance_fades(0.2)); // past the end -> settled
+        assert!(!s.advance_anims(0.2)); // past the end -> settled
         assert_eq!(s.get(1).unwrap().fade.current(), 1.0);
     }
 
@@ -369,9 +428,9 @@ mod tests {
         assert!(s.get(1).unwrap().closing && !s.get(1).unwrap().destroyed);
         // unmapped yet still composited while fading
         assert_eq!(s.visible_bottom_to_top().count(), 1);
-        assert!(s.advance_fades(0.1));
+        assert!(s.advance_anims(0.1));
         assert!(s.finished_fadeouts().is_empty());
-        assert!(!s.advance_fades(0.2)); // finishes
+        assert!(!s.advance_anims(0.2)); // finishes
         assert_eq!(s.finished_fadeouts(), vec![(1, false)]);
         s.clear_closing(1); // not destroyed -> keep in stack, just cleared
         assert!(s.get(1).is_some());
@@ -383,7 +442,7 @@ mod tests {
         let mut s = WindowStack::new();
         s.add_top(win(1, true));
         assert!(s.begin_fade_out(1, 0.2, true)); // destroyed
-        s.advance_fades(0.3); // finish
+        s.advance_anims(0.3); // finish
         assert_eq!(s.finished_fadeouts(), vec![(1, true)]);
     }
 

@@ -27,6 +27,9 @@ use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
 const MAX_BUFFER_AGE: usize = 4;
+/// Extra px around a wobble's mesh bbox when damaging/clipping it — headroom for
+/// spring overshoot and the AA fringe, so no jiggling pixel is ever left stale.
+const WOBBLE_PAD: f32 = 8.0;
 use config::{Config, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
@@ -61,6 +64,28 @@ fn hud_corner(s: &str) -> HudCorner {
 /// ricom's "fullscreen" test, shared by unredir-if-possible and rule matching.
 fn covers_root(x: i32, y: i32, w: i32, h: i32, bw: i32, rw: i32, rh: i32) -> bool {
     x <= 0 && y <= 0 && x + w + 2 * bw >= rw && y + h + 2 * bw >= rh
+}
+
+/// Padded, pixel-aligned bounding box of a wobble mesh's vertices (`[x, y, u, v]`
+/// per control point). Used as the deforming window's damage/clip footprint.
+fn mesh_bbox(verts: &[[f32; 4]], pad: f32) -> Rect {
+    if verts.is_empty() {
+        return Rect::new(0, 0, 0, 0);
+    }
+    let (mut mnx, mut mny, mut mxx, mut mxy) =
+        (f32::INFINITY, f32::INFINITY, f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for v in verts {
+        mnx = mnx.min(v[0]);
+        mny = mny.min(v[1]);
+        mxx = mxx.max(v[0]);
+        mxy = mxy.max(v[1]);
+    }
+    Rect::new(
+        (mnx - pad).floor() as i32,
+        (mny - pad).floor() as i32,
+        (mxx + pad).ceil() as i32,
+        (mxy + pad).ceil() as i32,
+    )
 }
 
 /// Direction for the HUD move hotkeys (a modifier + an arrow key).
@@ -269,6 +294,10 @@ pub struct App {
     /// A structural change this frame → repaint the whole screen (safe default; only
     /// same-frame DamageNotify batches stay partial).
     force_full: bool,
+    /// Last frame's damage extent per animating window (scale pop / wobble), so a
+    /// tick can repaint `prev ∪ curr` — the retreating side of a moving animation
+    /// — under use-damage instead of forcing a full repaint. Empty when idle.
+    anim_damage: HashMap<WindowId, Rect>,
     /// Own-damage of recent presented frames (newest first) for EGL buffer-age
     /// partial repaint; bounded to `MAX_BUFFER_AGE`.
     damage_history: VecDeque<Region>,
@@ -324,6 +353,7 @@ impl App {
             dirty: true,
             frame_damage: Region::new(),
             force_full: true,
+            anim_damage: HashMap::new(),
             damage_history: VecDeque::new(),
             redirected: false,
             loop_handle: None,
@@ -349,6 +379,13 @@ impl App {
         } else {
             0.0
         }
+    }
+
+    /// Duration for the open scale "pop", in seconds. Shares the fade's configured
+    /// duration so the pop and any opacity fade settle together — but independent
+    /// of `[fade] enabled`, so the pop still runs with opacity fades switched off.
+    fn scale_duration(&self) -> f64 {
+        self.config.fade.duration
     }
 
     /// (Re)bind the FPS-HUD toggle hotkey: drop any previous grab, parse the
@@ -620,6 +657,13 @@ impl App {
         self.config.resolve(&wm)
     }
 
+    /// A window's outer rect `[x, y, w, h]` (border included) as floats — the
+    /// anchor rect the wobble mesh (and its damage) is built over.
+    fn outer_rect(&self, w: &Win) -> [f32; 4] {
+        let bw = w.border_width as f32;
+        [w.x as f32, w.y as f32, w.width as f32 + 2.0 * bw, w.height as f32 + 2.0 * bw]
+    }
+
     /// Whether `w`'s outer rectangle (border included) covers the whole root.
     fn covers_screen(&self, w: &Win) -> bool {
         covers_root(
@@ -650,12 +694,51 @@ impl App {
             let now = Instant::now();
             let dt = app.last_frame.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
             app.last_frame = Some(now);
-            let animating = app.windows.advance_fades(dt);
+            let animating = app.windows.advance_anims(dt);
             if app.reap_finished_fadeouts() {
                 app.update_redirection(); // a reaped window can change the top window
             }
-            tracing::trace!(dt, animating, "fade tick");
-            app.damage_full(); // repaint happens once, in the run callback
+            tracing::trace!(dt, animating, "anim tick");
+            // Damage only the animating windows' moving paths (this frame's extent
+            // ∪ last frame's), so animations ride use-damage instead of forcing a
+            // full-screen repaint every tick. `prev ∪ curr` covers the retreating
+            // side of a move and clears windows that just settled or were reaped.
+            let sr = app.config.shadow.radius as i32;
+            let cur: Vec<(WindowId, Rect)> = app
+                .windows
+                .iter_bottom_to_top()
+                .filter(|w| w.fade.is_animating() || w.scale.is_animating() || w.wobble.is_some())
+                .map(|w| {
+                    let bw = w.border_width as i32;
+                    let (x, y) = (w.x as i32, w.y as i32);
+                    let (ow, oh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
+                    // Un-scaled outer rect grown by the shadow reach — the scale pop
+                    // only shrinks inward, so this always covers it — then unioned
+                    // with the padded wobble bbox.
+                    let mut r = Rect::new(x - sr, y - sr, x + ow + sr, y + oh + sr);
+                    if let Some(wob) = &w.wobble {
+                        let b = wob.bounds(WOBBLE_PAD);
+                        let wr = Rect::new(
+                            b[0].floor() as i32, b[1].floor() as i32,
+                            b[2].ceil() as i32, b[3].ceil() as i32,
+                        );
+                        r = Rect::new(r.x1.min(wr.x1), r.y1.min(wr.y1), r.x2.max(wr.x2), r.y2.max(wr.y2));
+                    }
+                    (w.id, r)
+                })
+                .collect();
+            let had_prev = !app.anim_damage.is_empty();
+            for (_, r) in &cur {
+                app.frame_damage.add_rect(*r);
+            }
+            for r in app.anim_damage.values() {
+                app.frame_damage.add_rect(*r);
+            }
+            let has_cur = !cur.is_empty();
+            app.anim_damage = cur.into_iter().collect();
+            if has_cur || had_prev {
+                app.dirty = true; // repaint happens once, in the run callback
+            }
             if animating {
                 // While compositing, eglSwapBuffers(vsync) paces us to the refresh
                 // rate, so an immediate re-arm self-throttles; when unredirected
@@ -778,36 +861,63 @@ impl App {
         let Some(backend) = self.backend.as_ref() else {
             return;
         };
-        let mut items: Vec<Quad> = Vec::new();
+        // Each entry is a quad plus an optional wobble mesh (`Some` while the
+        // window is wobbling → the backend draws the deformed grid instead).
+        let mut items: Vec<(Quad, Option<Vec<[f32; 4]>>)> = Vec::new();
         for w in self.windows.visible_bottom_to_top() {
             if w.id == self.overlay {
                 continue;
             }
             if let Some(pm) = self.gfx.get(&w.id).and_then(|g| g.pixmap) {
                 let bw = w.border_width as i32;
-                let (qw, qh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
+                let (ow, oh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
                 // Per-window rule overrides, falling back to the global config.
                 let rr = self.resolve_rules(w.id);
-                items.push(Quad {
-                    pixmap: pm,
-                    x: w.x as i32,
-                    y: w.y as i32,
-                    w: qw,
-                    h: qh,
-                    // Opacity animates via the fade, whose target already folds
-                    // explicit / rule / default opacity (see read_opacity).
-                    opacity: w.fade.current() as f32,
-                    // Drop the shadow the instant a window starts closing, so it
-                    // disappears on close/hide rather than lingering through the fade-out.
-                    shadow: rr.shadow.unwrap_or(self.config.shadow.enabled)
-                        && qw >= self.config.shadow.min_size
-                        && qh >= self.config.shadow.min_size
-                        && !w.closing,
-                    // Frost the backdrop only for translucent windows (opaque ones
-                    // hide their backdrop).
-                    blur: rr.blur.unwrap_or(self.config.blur.enabled) && w.fade.current() < 1.0,
-                    corner_radius: rr.corner_radius.unwrap_or(self.config.corner_radius),
-                });
+                let wobbling = w.wobble.is_some();
+                // Scale-about-centre for the open/close pop. Skipped while wobbling —
+                // the mesh path positions the window from the spring sim instead.
+                let s = w.scale.current();
+                let (qx, qy, qw, qh) = if !wobbling && (s - 1.0).abs() > f64::EPSILON {
+                    let (cx, cy) = (w.x as f64 + ow as f64 / 2.0, w.y as f64 + oh as f64 / 2.0);
+                    let (sw, sh) = (ow as f64 * s, oh as f64 * s);
+                    ((cx - sw / 2.0).round() as i32, (cy - sh / 2.0).round() as i32, sw.round() as i32, sh.round() as i32)
+                } else {
+                    (w.x as i32, w.y as i32, ow, oh)
+                };
+                // A wobbling window draws as a bare textured mesh: no shadow, frost,
+                // or corner rounding (square while it jiggles; they return on settle).
+                let mesh = w.wobble.as_ref().map(|wob| wob.vertices());
+                items.push((
+                    Quad {
+                        pixmap: pm,
+                        x: qx,
+                        y: qy,
+                        w: qw,
+                        h: qh,
+                        // Opacity animates via the fade, whose target already folds
+                        // explicit / rule / default opacity (see read_opacity).
+                        opacity: w.fade.current() as f32,
+                        // Drop the shadow the instant a window starts closing (so it
+                        // disappears on close rather than lingering through the fade)
+                        // or while it wobbles. Size test uses the un-scaled rect.
+                        shadow: !wobbling
+                            && rr.shadow.unwrap_or(self.config.shadow.enabled)
+                            && ow >= self.config.shadow.min_size
+                            && oh >= self.config.shadow.min_size
+                            && !w.closing,
+                        // Frost the backdrop only for translucent windows (opaque
+                        // ones hide their backdrop); never while wobbling.
+                        blur: !wobbling
+                            && rr.blur.unwrap_or(self.config.blur.enabled)
+                            && w.fade.current() < 1.0,
+                        corner_radius: if wobbling {
+                            0.0
+                        } else {
+                            rr.corner_radius.unwrap_or(self.config.corner_radius)
+                        },
+                    },
+                    mesh,
+                ));
             }
         }
         // Region-level occlusion: walk top-to-bottom, accumulating the region
@@ -833,25 +943,28 @@ impl App {
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
-        for q in items.iter().rev() {
+        for (q, mesh) in items.iter().rev() {
             let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
-            // Conservative footprint: add the shadow reach so a window whose shadow
-            // still peeks out isn't culled. Off-screen area never shows, so clamp.
-            let footprint = if q.shadow {
-                Rect::new(q.x - sr, q.y - sr, q.x + q.w + sr, q.y + q.h + sr)
-            } else {
-                rect
+            // Footprint = the area the window might touch this frame. A wobbler can
+            // deform outside its rect, so use its padded mesh bbox; otherwise the
+            // rect, grown by the shadow reach when it casts one. Clamped to screen.
+            let footprint = match mesh {
+                Some(v) => mesh_bbox(v, WOBBLE_PAD),
+                None if q.shadow => Rect::new(q.x - sr, q.y - sr, q.x + q.w + sr, q.y + q.h + sr),
+                None => rect,
             };
             let mut visible = Region::from_rect(footprint);
             visible.intersect_rect(&screen);
             visible.subtract(&covered);
             visible.intersect(&paint); // repaint only the damaged part
             if !visible.is_empty() {
-                draws.push(WindowDraw { quad: *q, clip: visible.rects().to_vec() });
+                draws.push(WindowDraw { quad: *q, clip: visible.rects().to_vec(), mesh: mesh.clone() });
             }
             // Opaque windows occlude what's below: a square one covers its whole
             // rect; a rounded one covers all but its (transparent) corner squares.
-            if q.opacity >= 1.0 {
+            // A wobbling window is *deforming*, so it never occludes (its rect is
+            // unreliable) — draw everything beneath it.
+            if mesh.is_none() && q.opacity >= 1.0 {
                 let cr = q.corner_radius as i32;
                 if cr <= 0 {
                     covered.add_rect(rect);
@@ -1056,6 +1169,10 @@ impl App {
                 if self.gfx.contains_key(&e.window)
                     && self.windows.begin_fade_out(e.window, d, true)
                 {
+                    // Close "pop": shrink back to `open_scale` as it fades out.
+                    if self.config.animation.enabled {
+                        self.windows.retarget_scale(e.window, self.config.animation.open_scale, d);
+                    }
                     self.ensure_frame_timer();
                 } else {
                     self.windows.remove(e.window);
@@ -1074,6 +1191,10 @@ impl App {
                 let o = self.read_opacity(e.window);
                 let d = self.fade_duration();
                 self.windows.fade_in(e.window, o, d);
+                // Open "pop": scale-about-centre from `open_scale` up to full size.
+                if self.config.animation.enabled {
+                    self.windows.scale_in(e.window, self.config.animation.open_scale, self.scale_duration());
+                }
                 self.update_redirection();
                 if self.redirected && !self.gfx.contains_key(&e.window) {
                     self.acquire_gfx(e.window);
@@ -1089,6 +1210,10 @@ impl App {
                 if self.gfx.contains_key(&e.window)
                     && self.windows.begin_fade_out(e.window, d, false)
                 {
+                    // Close "pop": shrink back to `open_scale` as it fades out.
+                    if self.config.animation.enabled {
+                        self.windows.retarget_scale(e.window, self.config.animation.open_scale, d);
+                    }
                     self.ensure_frame_timer();
                 } else {
                     self.release_gfx(e.window);
@@ -1106,8 +1231,32 @@ impl App {
                     window = e.window, x = e.x, y = e.y, w = e.width, h = e.height,
                     above = e.above_sibling, resized, "configure"
                 );
+                // Capture the OLD outer rect before `configure` overwrites it — the
+                // wobble mesh lags from here toward the new geometry. Only a mapped,
+                // non-closing window wobbles (skips create-time placement + fade-outs).
+                let old_wobble = self.windows.get(e.window).map(|w| (self.outer_rect(w), w.is_mapped() && !w.closing));
                 self.windows
                     .configure(e.window, e.x, e.y, e.width, e.height, e.border_width, above);
+                // Move/resize wobble: aim the spring mesh at the new outer rect.
+                // `mv` is Some only for a mapped, non-closing window that actually
+                // moved; then gated on the compositing + config switches. (Flattened
+                // into one `if let` — the deploy target's rustc predates let-chains.)
+                let wobble_on =
+                    self.redirected && self.config.animation.enabled && self.config.animation.wobble;
+                let mv = old_wobble.filter(|&(_, animatable)| animatable).and_then(|(old_rect, _)| {
+                    let new_rect = self.windows.get(e.window).map(|w| self.outer_rect(w))?;
+                    (new_rect != old_rect).then_some((old_rect, new_rect))
+                });
+                if let Some((old_rect, new_rect)) = mv.filter(|_| wobble_on) {
+                    self.windows.wobble_to(
+                        e.window,
+                        old_rect,
+                        new_rect,
+                        self.config.animation.wobble_spring,
+                        self.config.animation.wobble_friction,
+                    );
+                    self.ensure_frame_timer();
+                }
                 // A resize can cross the fullscreen threshold (or a size-sensitive
                 // match), changing the effective opacity — re-target if it moved.
                 if resized {
