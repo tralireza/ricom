@@ -79,6 +79,10 @@ fn burn_seed(id: WindowId) -> f32 {
     (id.wrapping_mul(2_654_435_761) % 100_000) as f32 / 100_000.0
 }
 
+/// One compositable window for [`App::composite`]: quad + optional wobble mesh +
+/// optional burn + always-on-top flag (from the `above` rule).
+type CompositeItem = (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool);
+
 /// Padded, pixel-aligned bounding box of a wobble mesh's vertices (`[x, y, u, v]`
 /// per control point). Used as the deforming window's damage/clip footprint.
 fn mesh_bbox(verts: &[[f32; 4]], pad: f32) -> Rect {
@@ -882,7 +886,7 @@ impl App {
         // Each entry is a quad, an optional wobble mesh (`Some` while the window is
         // wobbling → the backend draws the deformed grid instead), an optional burn,
         // and an always-on-top flag (from the `above` rule) used to reorder below.
-        let mut items: Vec<(Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool)> = Vec::new();
+        let mut items: Vec<CompositeItem> = Vec::new();
         for w in self.windows.visible_bottom_to_top() {
             if w.id == self.overlay {
                 continue;

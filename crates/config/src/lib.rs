@@ -108,11 +108,11 @@ pub struct RuleResult {
 impl Match {
     /// True if every specified condition holds for `w`.
     fn matches(&self, w: &WindowMatch) -> bool {
-        self.class.as_ref().map_or(true, |c| *c == w.class)
-            && self.instance.as_ref().map_or(true, |i| *i == w.instance)
-            && self.window_type.as_ref().map_or(true, |t| *t == w.window_type)
-            && self.title.as_ref().map_or(true, |t| w.title.contains(t.as_str()))
-            && self.fullscreen.map_or(true, |fs| fs == w.fullscreen)
+        self.class.as_ref().is_none_or(|c| *c == w.class)
+            && self.instance.as_ref().is_none_or(|i| *i == w.instance)
+            && self.window_type.as_ref().is_none_or(|t| *t == w.window_type)
+            && self.title.as_ref().is_none_or(|t| w.title.contains(t.as_str()))
+            && self.fullscreen.is_none_or(|fs| fs == w.fullscreen)
     }
 }
 

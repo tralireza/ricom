@@ -49,10 +49,10 @@ fn modifier(tok: &str) -> Option<u16> {
 /// `F1..=F24`, single ASCII letters/digits, and a handful of named keys.
 fn keysym(tok: &str) -> Option<u32> {
     // Function keys: F1..=F24 -> XK_F1 (0xFFBE) upward.
-    if let Some(n) = tok.strip_prefix(['F', 'f']).and_then(|d| d.parse::<u32>().ok()) {
-        if (1..=24).contains(&n) {
-            return Some(0xFFBE + (n - 1));
-        }
+    if let Some(n) = tok.strip_prefix(['F', 'f']).and_then(|d| d.parse::<u32>().ok())
+        && (1..=24).contains(&n)
+    {
+        return Some(0xFFBE + (n - 1));
     }
     // Single ASCII letter/digit -> its (lowercase) Latin-1 keysym, which equals
     // the ASCII code. Shift, if present, is a separate modifier bit.

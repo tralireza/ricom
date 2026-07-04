@@ -1099,6 +1099,7 @@ impl GlBackend {
     /// Fill a screen-space rect (optionally rounded — `radius` px, 0 = square) with
     /// a solid (premultiplied) colour. Assumes the unit-quad VAO is bound and
     /// blending is enabled (as in `present_windows`).
+    #[allow(clippy::too_many_arguments)]
     fn fill_rect(&self, x: f32, y: f32, w: f32, h: f32, radius: f32, color: [f32; 4], sw: i32, sh: i32) {
         unsafe {
             self.gl.use_program(Some(self.solid_program));

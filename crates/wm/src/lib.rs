@@ -307,10 +307,10 @@ impl WindowStack {
                     w.wobble = None;
                 }
             }
-            if let Some(b) = &mut w.burn {
-                if b.progress.advance(dt) {
-                    animating = true;
-                }
+            if let Some(b) = &mut w.burn
+                && b.progress.advance(dt)
+            {
+                animating = true;
             }
         }
         animating
