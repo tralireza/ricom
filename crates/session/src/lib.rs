@@ -24,6 +24,9 @@ use x11rb::protocol::xproto::{Place, Window};
 
 use backend_gl::{GlBackend, Hud, HudCorner, HudLoad, Quad, RenderParams, WindowDraw};
 use region::{Rect, Region};
+
+/// Max frames of damage history kept for EGL buffer-age partial repaint.
+const MAX_BUFFER_AGE: usize = 4;
 use config::{Config, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
@@ -260,6 +263,15 @@ pub struct App {
     /// Cached per-window identity (WM_CLASS / type / title) for rule matching.
     identities: HashMap<WindowId, WinIdentity>,
     dirty: bool,
+    /// Damage accumulated for the next composite (screen coords) — the paint region
+    /// unless a structural change forces a full repaint.
+    frame_damage: Region,
+    /// A structural change this frame → repaint the whole screen (safe default; only
+    /// same-frame DamageNotify batches stay partial).
+    force_full: bool,
+    /// Own-damage of recent presented frames (newest first) for EGL buffer-age
+    /// partial repaint; bounded to `MAX_BUFFER_AGE`.
+    damage_history: VecDeque<Region>,
     /// Whether the screen is redirected (i.e. we are compositing). When false we
     /// have unredirected + unmapped the overlay so a fullscreen window bypasses
     /// the compositor (unredir-if-possible).
@@ -310,6 +322,9 @@ impl App {
             gfx: HashMap::new(),
             identities: HashMap::new(),
             dirty: true,
+            frame_damage: Region::new(),
+            force_full: true,
+            damage_history: VecDeque::new(),
             redirected: false,
             loop_handle: None,
             frame_timer: None,
@@ -447,7 +462,7 @@ impl App {
                 }
                 // unredir may have toggled; re-evaluate, then repaint.
                 self.update_redirection();
-                self.dirty = true;
+                self.damage_full();
             }
             Err(e) => tracing::error!("config reload failed, keeping current: {e}"),
         }
@@ -640,7 +655,7 @@ impl App {
                 app.update_redirection(); // a reaped window can change the top window
             }
             tracing::trace!(dt, animating, "fade tick");
-            app.dirty = true; // repaint happens once, in the run callback
+            app.damage_full(); // repaint happens once, in the run callback
             if animating {
                 // While compositing, eglSwapBuffers(vsync) paces us to the refresh
                 // rate, so an immediate re-arm self-throttles; when unredirected
@@ -718,6 +733,29 @@ impl App {
         }
     }
 
+    /// Mark the whole screen for repaint next composite (any structural change).
+    fn damage_full(&mut self) {
+        self.force_full = true;
+        self.dirty = true;
+    }
+
+    /// Mark a window's on-screen rect for repaint; falls back to full if unknown.
+    fn damage_window(&mut self, win: WindowId) {
+        match self.windows.get(win) {
+            Some(w) => {
+                let bw = w.border_width as i32;
+                self.frame_damage.add_rect(Rect::from_xywh(
+                    w.x as i32,
+                    w.y as i32,
+                    w.width as i32 + 2 * bw,
+                    w.height as i32 + 2 * bw,
+                ));
+                self.dirty = true;
+            }
+            None => self.damage_full(),
+        }
+    }
+
     /// Composite the visible window stack (bottom-to-top) onto the overlay —
     /// mapped windows plus any fading out.
     fn composite(&mut self) {
@@ -778,6 +816,20 @@ impl App {
         // means fully occluded, so it's dropped from the draw list entirely.
         let (sw, sh) = (self.x.root_width as i32, self.x.root_height as i32);
         let screen = Rect::from_xywh(0, 0, sw, sh);
+        // Paint region: only the damaged area (buffer-age partial repaint), unless a
+        // structural change / HUD / disabled damage / unusable buffer age forces full.
+        let age = backend.buffer_age();
+        let own_full = self.force_full || !self.config.use_damage || self.show_fps;
+        let paint = if own_full || age <= 0 || age as usize > self.damage_history.len() + 1 {
+            Region::from_rect(screen)
+        } else {
+            let mut p = self.frame_damage.clone();
+            for h in self.damage_history.iter().take(age as usize - 1) {
+                p.union(h);
+            }
+            p.intersect_rect(&screen);
+            p
+        };
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
@@ -793,6 +845,7 @@ impl App {
             let mut visible = Region::from_rect(footprint);
             visible.intersect_rect(&screen);
             visible.subtract(&covered);
+            visible.intersect(&paint); // repaint only the damaged part
             if !visible.is_empty() {
                 draws.push(WindowDraw { quad: *q, clip: visible.rects().to_vec() });
             }
@@ -827,11 +880,13 @@ impl App {
         } else {
             None
         };
+        tracing::debug!(paint_rects = paint.rects().len(), paint_px = paint.area(), age, "damage");
         if let Err(e) = backend.present_windows(
             &draws,
             sw,
             sh,
             hud.as_ref(),
+            paint.rects(),
         ) {
             tracing::error!("composite failed: {e}");
         }
@@ -847,6 +902,17 @@ impl App {
             samples = self.fps_meter.samples().len(),
             "fps: frame"
         );
+        // Record this frame's own damage for future frames' buffer-age; a forced
+        // full repaint counts as a whole-screen change.
+        let own = if own_full {
+            Region::from_rect(screen)
+        } else {
+            self.frame_damage.clone()
+        };
+        self.damage_history.push_front(own);
+        self.damage_history.truncate(MAX_BUFFER_AGE);
+        self.frame_damage.clear();
+        self.force_full = false;
     }
 
     /// unredir-if-possible: should the screen be unredirected? True when the
@@ -911,6 +977,7 @@ impl App {
         tracing::info!("redirected — compositing");
         // Paint immediately: otherwise the overlay we just mapped sits unpainted
         // over the (previously bypassing) fullscreen window for a frame — a flash.
+        self.force_full = true;
         self.composite();
     }
 
@@ -995,7 +1062,7 @@ impl App {
                     self.release_gfx(e.window);
                 }
                 self.update_redirection();
-                self.dirty = true;
+                self.damage_full();
             }
             Event::MapNotify(e) if e.window != self.overlay => {
                 tracing::debug!(window = e.window, "map");
@@ -1012,7 +1079,7 @@ impl App {
                     self.acquire_gfx(e.window);
                 }
                 self.ensure_frame_timer();
-                self.dirty = true;
+                self.damage_full();
             }
             Event::UnmapNotify(e) => {
                 tracing::debug!(window = e.window, "unmap");
@@ -1027,7 +1094,7 @@ impl App {
                     self.release_gfx(e.window);
                 }
                 self.update_redirection();
-                self.dirty = true;
+                self.damage_full();
             }
             Event::ConfigureNotify(e) => {
                 let above = (e.above_sibling != 0).then_some(e.above_sibling);
@@ -1063,7 +1130,7 @@ impl App {
                 if self.redirected && resized && self.gfx.contains_key(&e.window) {
                     self.rebind_pixmap(e.window);
                 }
-                self.dirty = true;
+                self.damage_full();
             }
             Event::ReparentNotify(e) => {
                 if e.parent != self.x.root {
@@ -1071,7 +1138,7 @@ impl App {
                     self.windows.remove(e.window);
                     self.release_gfx(e.window);
                     self.update_redirection();
-                    self.dirty = true;
+                    self.damage_full();
                 }
             }
             Event::CirculateNotify(e) => {
@@ -1083,7 +1150,7 @@ impl App {
                     self.windows.lower(e.window);
                 }
                 self.update_redirection();
-                self.dirty = true;
+                self.damage_full();
             }
             Event::PropertyNotify(e) => {
                 // Opacity, or an identity property (WM_CLASS/type/title) whose change
@@ -1099,13 +1166,13 @@ impl App {
                     let d = self.fade_duration();
                     self.windows.retarget_opacity(e.window, o, d);
                     self.ensure_frame_timer();
-                    self.dirty = true;
+                    self.damage_full();
                 }
             }
             Event::DamageNotify(e) => {
                 tracing::trace!(damage = e.damage, "damage");
                 let _ = self.x.subtract_damage(e.damage);
-                self.dirty = true;
+                self.damage_window(e.drawable);
             }
             Event::RandrScreenChangeNotify(e) => {
                 // Screen resized (e.g. xrandr). The composite overlay + EGL surface
@@ -1125,7 +1192,7 @@ impl App {
                 self.refresh_hz = self.x.refresh_hz().unwrap_or(self.refresh_hz);
                 // A new resolution changes the fullscreen threshold — re-decide.
                 self.update_redirection();
-                self.dirty = true;
+                self.damage_full();
             }
             Event::KeyPress(e) => {
                 // Ignore CapsLock (Lock) / NumLock (Mod2) so binds match regardless
@@ -1134,13 +1201,13 @@ impl App {
                 if self.fps_key == Some((e.detail, state)) {
                     self.show_fps = !self.show_fps;
                     tracing::info!(show_fps = self.show_fps, "fps: HUD toggled");
-                    self.dirty = true;
+                    self.damage_full();
                 } else if let Some(&(_, _, dir)) =
                     self.move_keys.iter().find(|&&(kc, m, _)| kc == e.detail && m == state)
                 {
                     self.hud_corner = move_corner(self.hud_corner, dir);
                     tracing::info!(corner = ?self.hud_corner, "fps: HUD moved");
-                    self.dirty = true;
+                    self.damage_full();
                 }
             }
             _ => {}

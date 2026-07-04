@@ -226,9 +226,11 @@ fn composite_windows_test(opacity: f32) -> Result<()> {
         // No occlusion in the diagnostic path: draw every window in full.
         let draws: Vec<backend_gl::WindowDraw> =
             items.iter().map(|&q| backend_gl::WindowDraw::whole(q)).collect();
+        // Diagnostic path: always clear the whole screen (no damage tracking).
+        let clear = [backend_gl::Rect::from_xywh(0, 0, x.root_width as i32, x.root_height as i32)];
         let start = std::time::Instant::now();
         while start.elapsed().as_secs() < 5 {
-            backend.present_windows(&draws, x.root_width as i32, x.root_height as i32, None)?;
+            backend.present_windows(&draws, x.root_width as i32, x.root_height as i32, None, &clear)?;
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         tracing::info!("composited {} windows for 5s", items.len());

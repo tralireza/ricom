@@ -37,7 +37,8 @@ Working today:
 - **Renderer** — composite the visible window stack (mapped + fading-out) back-to-front with
   per-window opacity and drop shadows; **damage-driven**, plus a frame clock while anything animates.
   **Region-level occlusion culling** paints each window only where it isn't hidden behind an opaque
-  one, so stacked fullscreen windows don't pay for the covered layers.
+  one, and **`use-damage` partial repaint** (EGL buffer-age) redraws only the region that changed —
+  so a static screen with one updating window repaints just that window, not the whole surface.
 - **Resolution changes** — follows RandR screen-size changes (`xrandr`) and re-composites at the new size.
 - **unredir-if-possible** — when one window covers the whole screen (e.g. fullscreen video), ricom
   unredirects and steps aside so it page-flips straight to the display (compositor cost → ~0); it drops
@@ -65,8 +66,8 @@ Working today:
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** window dimming, the `use-damage` partial-repaint optimisation,
-animations, and the xrender/glx backends + D-Bus IPC. See [Roadmap](#roadmap).
+**Not yet implemented:** window dimming, animations, and the xrender/glx backends + D-Bus IPC.
+See [Roadmap](#roadmap).
 
 ## How it works
 
@@ -121,9 +122,9 @@ The stages map onto the crates: **xconn** speaks the X protocol (extension setup
 overlay + redirect, `NameWindowPixmap`, damage); **wm** keeps the bottom-to-top window stack
 in sync with structure events; **backend-gl** owns the EGL context and does texture-from-pixmap,
 the blit, and the vsync present; **region** is the pixman-style damage maths; and **session**
-ties them together in the event loop. (`region` drives occlusion culling — each window is painted
-only where it isn't covered by an opaque window above; the `use-damage` partial-repaint
-optimisation on the roadmap builds on the same region maths.)
+ties them together in the event loop. (`region` drives both occlusion culling — each window is
+painted only where it isn't covered by an opaque window above — and `use-damage` partial repaint:
+only the region that changed since the back buffer was last drawn, tracked via EGL buffer age.)
 
 When one window covers the whole screen with nothing on top (e.g. fullscreen video), ricom
 **unredirects** — it unmaps the overlay and steps out of the way so that window page-flips directly to
@@ -243,13 +244,14 @@ See [`ricom.toml.example`](ricom.toml.example).
 Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, background blur
 (dual-Kawase), a TOML config file with live (SIGHUP) reload, an on-demand FPS HUD (global hotkey)
 built on a general SDF text engine, per-window rules (match on class/type/title/fullscreen), a
-loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), and region-level occlusion
-culling (skip windows/pixels hidden behind an opaque one).
+loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), region-level occlusion
+culling (skip windows/pixels hidden behind an opaque one), and `use-damage` partial repaint
+(EGL buffer-age; repaint only the changed region).
 
 Next:
 
-1. `use-damage` partial repaint — repaint only damaged regions (biggest win on mostly-static screens).
-2. Animations (picom-style transition scripts).
+1. Animations (picom-style transition scripts).
+2. Window dimming (per-window / rule — slots into the rules engine).
 
 ## License
 

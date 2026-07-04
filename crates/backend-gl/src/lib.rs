@@ -23,6 +23,11 @@ type ImageTargetTexture2DOes = unsafe extern "system" fn(target: u32, image: *co
 
 /// `EGL_NATIVE_PIXMAP_KHR` (from EGL_KHR_image_pixmap; not exported by khronos-egl).
 const EGL_NATIVE_PIXMAP_KHR: egl::Enum = 0x30B0;
+/// `EGL_BUFFER_AGE_EXT` (from EGL_EXT_buffer_age) — queried per frame for partial repaint.
+const EGL_BUFFER_AGE_EXT: egl::Int = 0x313D;
+
+/// Re-exported so callers can build clip/clear rects without a direct `region` dep.
+pub use region::Rect;
 
 /// How many recent per-composite render times the HUD graph keeps.
 const HUD_GRAPH_SAMPLES: usize = 120;
@@ -458,6 +463,8 @@ pub struct GlBackend {
     egl: egl::DynamicInstance<egl::EGL1_5>,
     display: egl::Display,
     surface: egl::Surface,
+    /// Whether `EGL_EXT_buffer_age` is available (enables damage-based partial repaint).
+    buffer_age_supported: bool,
     context: egl::Context,
     gl: glow::Context,
     program: glow::NativeProgram,
@@ -559,6 +566,12 @@ impl GlBackend {
         egl.make_current(display, Some(surface), Some(surface), Some(context))
             .map_err(|e| anyhow!("eglMakeCurrent: {e:?}"))?;
         let _ = egl.swap_interval(display, 1); // vsync
+        // EGL_EXT_buffer_age lets us repaint only the damaged region each frame.
+        let buffer_age_supported = egl
+            .query_string(Some(display), egl::EXTENSIONS)
+            .map(|s| s.to_string_lossy().contains("EGL_EXT_buffer_age"))
+            .unwrap_or(false);
+        tracing::info!(buffer_age = buffer_age_supported, "EGL surface ready");
 
         let gl = load_glow(&egl);
         let renderer = unsafe { gl.get_parameter_string(glow::RENDERER) };
@@ -662,7 +675,7 @@ impl GlBackend {
         tracing::info!(%renderer, window, "GL window backend ready (blit + shadow + blur + text + solid programs loaded)");
 
         Ok(GlBackend {
-            xlib, xdisplay, egl, display, surface, context, gl,
+            xlib, xdisplay, egl, display, surface, buffer_age_supported, context, gl,
             program, vao, u_rect, u_screen, u_tex, u_opacity, u_corner,
             shadow_program, s_rect, s_screen, s_inner, s_shadow, s_corner,
             down_program, d_src, d_halfpixel, d_offset,
@@ -998,6 +1011,18 @@ impl GlBackend {
         self.render_ms.get()
     }
 
+    /// Age of the back buffer about to be drawn: frames since it was last the front
+    /// buffer (1 = last frame, N = N-frames stale). `0` = undefined / unsupported
+    /// (`EGL_EXT_buffer_age` absent) → the caller must repaint fully.
+    pub fn buffer_age(&self) -> i32 {
+        if !self.buffer_age_supported {
+            return 0;
+        }
+        self.egl
+            .query_surface(self.display, self.surface, EGL_BUFFER_AGE_EXT)
+            .unwrap_or(0)
+    }
+
     /// Read the render-time query that finished ~2 frames ago (so the read never
     /// stalls the pipeline), and push it to the HUD graph ring. No-op until both
     /// double-buffered queries have been recorded at least once.
@@ -1032,6 +1057,7 @@ impl GlBackend {
         screen_w: i32,
         screen_h: i32,
         hud: Option<&Hud>,
+        clear: &[region::Rect],
     ) -> Result<()> {
         tracing::trace!(items = items.len(), screen_w, screen_h, "present");
         // Collect the render time measured ~2 frames ago, then time this composite.
@@ -1045,8 +1071,15 @@ impl GlBackend {
                 self.gl.begin_query(glow::TIME_ELAPSED, q);
             }
             self.gl.viewport(0, 0, screen_w, screen_h);
+            // Clear only the region being repainted this frame (damage-scissored).
+            // GL's scissor origin is bottom-left, so flip Y from our top-left rects.
             self.gl.clear_color(background[0], background[1], background[2], 1.0);
-            self.gl.clear(glow::COLOR_BUFFER_BIT);
+            self.gl.enable(glow::SCISSOR_TEST);
+            for r in clear {
+                self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
+                self.gl.clear(glow::COLOR_BUFFER_BIT);
+            }
+            self.gl.disable(glow::SCISSOR_TEST);
             // Premultiplied-alpha "over" so per-window opacity (and the black
             // shadows) blend onto the clear and the windows already drawn beneath.
             self.gl.enable(glow::BLEND);

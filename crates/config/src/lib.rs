@@ -31,6 +31,9 @@ pub struct Config {
     /// bypasses the compositor and page-flips straight to the display. When
     /// `false`, ricom always composites — even a single fullscreen window.
     pub unredir: bool,
+    /// Repaint only the damaged region each frame (buffer-age partial repaint)
+    /// instead of the whole screen. `true` (default); `false` forces full repaints.
+    pub use_damage: bool,
     /// Composite background colour (RGB, `0.0..=1.0`), seen where no window covers.
     pub background: [f32; 3],
     /// Window corner radius in px. `0.0` (default) = square corners.
@@ -164,6 +167,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             unredir: true,
+            use_damage: true,
             background: [0.05, 0.05, 0.07],
             corner_radius: 0.0,
             default_opacity: 1.0,
@@ -266,6 +270,7 @@ impl Config {
             };
         }
         chg!("unredir", prev.unredir, self.unredir);
+        chg!("use_damage", prev.use_damage, self.use_damage);
         chg!("background", prev.background, self.background);
         chg!("corner_radius", prev.corner_radius, self.corner_radius);
         chg!("default_opacity", prev.default_opacity, self.default_opacity);
@@ -349,6 +354,7 @@ mod tests {
     fn defaults_match_compiled_behaviour() {
         let c = Config::default();
         assert!(c.unredir);
+        assert!(c.use_damage);
         assert_eq!(c.background, [0.05, 0.05, 0.07]);
         assert_eq!(c.corner_radius, 0.0);
         assert_eq!((c.fade.enabled, c.fade.duration), (true, 0.2));
