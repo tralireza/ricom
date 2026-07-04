@@ -70,6 +70,50 @@ void main() {
 }
 "#;
 
+/// Burn / dissolve close animation (reuses [`BLIT_VS`], so it has `u_rect`/
+/// `u_screen`/`v_tex`). The window erodes away on animated value-noise with a
+/// glowing ember band at the dissolving front — "uniform segments": chunky
+/// patches ignite all over (no directional axis). `u_progress` marches the
+/// threshold 0→1; `u_seed` de-correlates each window so no two burns match.
+/// `u_segscale`/`u_ember` are the live-tunable size knobs (from `[burn]` config,
+/// via [`RenderParams`]): patch granularity and ember-band half-width.
+/// Output is premultiplied for the same ONE/ONE_MINUS_SRC_ALPHA blend as the blit.
+const BURN_FS: &str = r#"#version 330 core
+in vec2 v_tex;
+uniform sampler2D u_tex;
+uniform float u_opacity;   // whole-window opacity, 0..1
+uniform float u_progress;  // burn progress, 0 (intact) .. 1 (fully gone)
+uniform float u_seed;      // per-window offset so each burn differs
+uniform float u_segscale;  // segment/hole granularity (higher = finer patches)
+uniform float u_ember;     // ember / transition band half-width (smaller = thinner glow)
+uniform vec3 u_ember_cool; // cooler trailing ember colour (em→0)
+uniform vec3 u_ember_hot;  // hottest leading-edge ember colour (em→1)
+out vec4 frag;
+// Cheap hash value-noise + 4-octave fbm (no textures/assets).
+float hash(vec2 p) { p = fract(p * vec2(127.31, 311.7)); p += dot(p, p + 34.23); return fract(p.x * p.y); }
+float vnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    float a = hash(i), b = hash(i + vec2(1.0, 0.0));
+    float c = hash(i + vec2(0.0, 1.0)), d = hash(i + vec2(1.0, 1.0));
+    return mix(mix(a, b, u.x), mix(c, d, u.x), u.y);
+}
+float fbm(vec2 p) { float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++) { s += a * vnoise(p); p *= 2.0; a *= 0.5; } return s; }
+void main() {
+    vec2 uv = v_tex + vec2(u_seed, u_seed * 1.7);
+    float nHi  = fbm(uv * u_segscale);          // ragged hole detail
+    float nLo  = fbm(uv * u_segscale * 0.25);   // chunky segments + wavy front
+    float bias = 0.6 * nLo;                     // segments: no positional axis
+    float thr  = mix(-u_ember, 1.0 + u_ember, u_progress) - bias;
+    float dis  = smoothstep(thr - u_ember, thr, nHi);              // 1 intact .. 0 gone
+    float em   = clamp(1.0 - abs(nHi - thr) / u_ember, 0.0, 1.0);  // hot band at the front
+    float a    = dis * u_opacity;                               // premultiplied coverage
+    vec3 win   = texture(u_tex, v_tex).rgb;
+    vec3 ember = mix(u_ember_cool, u_ember_hot, em); // cool -> hot ember ramp (config)
+    frag = vec4(win * a + ember * em, a);      // window + glowing ember (premultiplied)
+}
+"#;
+
 /// Wobble mesh grid dimension (`N×N` control points). **Must match**
 /// `wm::anim::WOBBLE_N`: `session` builds the deformed vertex grid there and the
 /// backend builds the matching triangle index buffer here. `(N-1)²·2` triangles.
@@ -256,6 +300,14 @@ pub struct RenderParams {
     pub blur_passes: i32,
     /// Blur sample offset per pass (px).
     pub blur_radius: f32,
+    /// Burn/dissolve segment granularity (`u_segscale`): higher = finer patches.
+    pub burn_seg_scale: f32,
+    /// Burn/dissolve ember-band half-width (`u_ember`): smaller = thinner glow.
+    pub burn_ember: f32,
+    /// Cooler trailing ember colour (`u_ember_cool`, RGB).
+    pub burn_ember_cool: [f32; 3],
+    /// Hottest leading-edge ember colour (`u_ember_hot`, RGB).
+    pub burn_ember_hot: [f32; 3],
 }
 
 impl Default for RenderParams {
@@ -268,6 +320,10 @@ impl Default for RenderParams {
             blur_enabled: false,
             blur_passes: 3,
             blur_radius: 4.0,
+            burn_seg_scale: 36.0,
+            burn_ember: 0.07,
+            burn_ember_cool: [0.28, 0.02, 0.0],
+            burn_ember_hot: [0.75, 0.22, 0.04],
         }
     }
 }
@@ -291,6 +347,17 @@ pub struct Quad {
     pub corner_radius: f32,
 }
 
+/// Per-window burn/dissolve state for the close animation. When a [`WindowDraw`]
+/// carries `Some`, the backend draws it through [`BURN_FS`] instead of the plain
+/// blit (no shadow / frost / corner rounding, like the wobble-mesh path).
+#[derive(Debug, Clone, Copy)]
+pub struct Burn {
+    /// `0.0` = intact … `1.0` = fully burnt away.
+    pub progress: f32,
+    /// Per-window random offset so no two windows burn with the same pattern.
+    pub seed: f32,
+}
+
 /// A window to composite plus the screen-space rectangles it's actually visible
 /// in (region-level occlusion): [`GlBackend::present_windows`] scissors each of
 /// the quad's draws to `clip`, so pixels covered by an opaque window on top are
@@ -304,6 +371,9 @@ pub struct WindowDraw {
     /// → the normal quad path. `quad.x/y/w/h` still give the un-deformed rect (for
     /// texture binding and, when settled, the quad path).
     pub mesh: Option<Vec<[f32; 4]>>,
+    /// Burn/dissolve close effect. `Some` → draw via [`BURN_FS`] at this progress
+    /// (mutually exclusive with `mesh`; a closing window doesn't wobble).
+    pub burn: Option<Burn>,
 }
 
 impl WindowDraw {
@@ -315,6 +385,7 @@ impl WindowDraw {
             quad,
             clip: vec![region::Rect::from_xywh(quad.x, quad.y, quad.w, quad.h)],
             mesh: None,
+            burn: None,
         }
     }
 }
@@ -552,6 +623,18 @@ pub struct GlBackend {
     f_screen: Option<glow::NativeUniformLocation>,
     f_rect: Option<glow::NativeUniformLocation>,
     f_corner: Option<glow::NativeUniformLocation>,
+    // Burn/dissolve close program (reuses BLIT_VS for placement).
+    burn_program: glow::NativeProgram,
+    bu_rect: Option<glow::NativeUniformLocation>,
+    bu_screen: Option<glow::NativeUniformLocation>,
+    bu_tex: Option<glow::NativeUniformLocation>,
+    bu_opacity: Option<glow::NativeUniformLocation>,
+    bu_progress: Option<glow::NativeUniformLocation>,
+    bu_seed: Option<glow::NativeUniformLocation>,
+    bu_segscale: Option<glow::NativeUniformLocation>,
+    bu_ember: Option<glow::NativeUniformLocation>,
+    bu_ember_cool: Option<glow::NativeUniformLocation>,
+    bu_ember_hot: Option<glow::NativeUniformLocation>,
     blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
@@ -752,6 +835,23 @@ impl GlBackend {
                 gl.get_uniform_location(p, "u_corner"),
             )
         };
+        // Burn/dissolve program (reuses BLIT_VS → u_rect/u_screen).
+        let (burn_program, bu_rect, bu_screen, bu_tex, bu_opacity, bu_progress, bu_seed, bu_segscale, bu_ember, bu_ember_cool, bu_ember_hot) = unsafe {
+            let p = make_program(&gl, BLIT_VS, BURN_FS)?;
+            (
+                p,
+                gl.get_uniform_location(p, "u_rect"),
+                gl.get_uniform_location(p, "u_screen"),
+                gl.get_uniform_location(p, "u_tex"),
+                gl.get_uniform_location(p, "u_opacity"),
+                gl.get_uniform_location(p, "u_progress"),
+                gl.get_uniform_location(p, "u_seed"),
+                gl.get_uniform_location(p, "u_segscale"),
+                gl.get_uniform_location(p, "u_ember"),
+                gl.get_uniform_location(p, "u_ember_cool"),
+                gl.get_uniform_location(p, "u_ember_hot"),
+            )
+        };
         let text = text::TextRenderer::new(&gl)?;
         let (solid_program, sol_rect, sol_screen, sol_color, sol_radius) = unsafe {
             let p = make_program(&gl, BLIT_VS, SOLID_FS)?;
@@ -783,6 +883,7 @@ impl GlBackend {
             down_program, d_src, d_halfpixel, d_offset,
             up_program, up_src, up_halfpixel, up_offset,
             frost_program, f_tex, f_screen, f_rect, f_corner,
+            burn_program, bu_rect, bu_screen, bu_tex, bu_opacity, bu_progress, bu_seed, bu_segscale, bu_ember, bu_ember_cool, bu_ember_hot,
             blur: RefCell::new(None),
             image_target, render, text,
             solid_program, sol_rect, sol_screen, sol_color, sol_radius,
@@ -1197,7 +1298,7 @@ impl GlBackend {
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
         }
-        for WindowDraw { quad, clip, mesh } in items {
+        for WindowDraw { quad, clip, mesh, burn } in items {
             if clip.is_empty() {
                 continue; // fully occluded — nothing visible to draw
             }
@@ -1241,6 +1342,33 @@ impl GlBackend {
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
                 self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
                 (self.image_target)(glow::TEXTURE_2D, image.as_ptr() as *const c_void);
+                // Burning window: dissolve via the burn program (no shadow / frost /
+                // corner rounding — like the mesh path), scissored to each clip rect.
+                if let Some(b) = burn {
+                    self.gl.use_program(Some(self.burn_program));
+                    self.gl.uniform_2_f32(self.bu_screen.as_ref(), screen_w as f32, screen_h as f32);
+                    self.gl.uniform_1_i32(self.bu_tex.as_ref(), 0);
+                    self.gl.uniform_4_f32(self.bu_rect.as_ref(), fx, fy, fw, fh);
+                    self.gl.uniform_1_f32(self.bu_opacity.as_ref(), opacity);
+                    self.gl.uniform_1_f32(self.bu_progress.as_ref(), b.progress);
+                    self.gl.uniform_1_f32(self.bu_seed.as_ref(), b.seed);
+                    self.gl.uniform_1_f32(self.bu_segscale.as_ref(), self.render.burn_seg_scale);
+                    self.gl.uniform_1_f32(self.bu_ember.as_ref(), self.render.burn_ember);
+                    let ec = self.render.burn_ember_cool;
+                    let eh = self.render.burn_ember_hot;
+                    self.gl.uniform_3_f32(self.bu_ember_cool.as_ref(), ec[0], ec[1], ec[2]);
+                    self.gl.uniform_3_f32(self.bu_ember_hot.as_ref(), eh[0], eh[1], eh[2]);
+                    self.gl.enable(glow::SCISSOR_TEST);
+                    for r in clip {
+                        self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+                    self.gl.disable(glow::SCISSOR_TEST);
+                    self.gl.use_program(Some(self.program)); // restore blit for the next item
+                    self.gl.delete_texture(tex);
+                    let _ = self.egl.destroy_image(self.display, image);
+                    continue;
+                }
                 // Wobbling window: draw the deformed textured mesh (no shadow /
                 // frost / corner rounding — square while it jiggles), scissored to
                 // each visible clip rect. GL's scissor origin is bottom-left.

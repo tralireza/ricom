@@ -21,6 +21,15 @@ pub enum MapState {
     Mapped,
 }
 
+/// Burn/dissolve close state: `progress` animates `0.0 → 1.0` over the burn
+/// duration (a `Fade` reused as a generic eased scalar); `seed` de-correlates each
+/// window's noise so no two burns look the same.
+#[derive(Debug, Clone)]
+pub struct BurnState {
+    pub progress: Fade,
+    pub seed: f32,
+}
+
 /// A tracked top-level window.
 #[derive(Debug, Clone)]
 pub struct Win {
@@ -41,6 +50,9 @@ pub struct Win {
     /// Active move/resize wobble (spring-mesh), or `None` when the window is not
     /// wobbling. Dropped by [`WindowStack::advance_anims`] once it settles.
     pub wobble: Option<Wobble>,
+    /// Active burn/dissolve close, or `None`. When `Some`, the window is dissolving
+    /// (progress 0→1) instead of fading; reaped when progress reaches 1.
+    pub burn: Option<BurnState>,
     /// Fading out (unmapped/destroyed) — kept in the composite set until the fade
     /// reaches 0, then reaped. See [`WindowStack::begin_fade_out`].
     pub closing: bool,
@@ -73,6 +85,7 @@ impl Win {
             fade: Fade::settled(1.0),
             scale: Fade::settled(1.0),
             wobble: None,
+            burn: None,
             closing: false,
             destroyed: false,
         }
@@ -165,6 +178,7 @@ impl WindowStack {
             w.fade = Fade::animating(0.0, target, duration);
             w.closing = false;
             w.destroyed = false;
+            w.burn = None;
         }
     }
 
@@ -184,11 +198,28 @@ impl WindowStack {
         }
     }
 
-    /// Clear a window's closing flag (its fade-out completed but the window still
-    /// exists — merely unmapped, not destroyed).
+    /// Begin a burn/dissolve close: run `progress` 0→1 over `duration` (keeping the
+    /// window composited via its pixmap) with noise `seed`. `destroyed` marks it for
+    /// removal (vs merely unmapped) on completion. Returns `true` if there is
+    /// something still visible to burn, `false` if it can be dropped immediately.
+    pub fn begin_burn(&mut self, id: WindowId, duration: f64, seed: f32, destroyed: bool) -> bool {
+        match self.wins.get_mut(&id) {
+            Some(w) if w.fade.current() > 0.0 => {
+                w.closing = true;
+                w.destroyed |= destroyed;
+                w.burn = Some(BurnState { progress: Fade::animating(0.0, 1.0, duration), seed });
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Clear a window's closing flag (its fade-out/burn completed but the window
+    /// still exists — merely unmapped, not destroyed).
     pub fn clear_closing(&mut self, id: WindowId) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.closing = false;
+            w.burn = None;
         }
     }
 
@@ -198,7 +229,13 @@ impl WindowStack {
     pub fn finished_fadeouts(&self) -> Vec<(WindowId, bool)> {
         self.wins
             .values()
-            .filter(|w| w.closing && !w.fade.is_animating() && w.fade.current() <= 0.0)
+            .filter(|w| {
+                w.closing
+                    && match &w.burn {
+                        Some(b) => !b.progress.is_animating() && b.progress.current() >= 1.0,
+                        None => !w.fade.is_animating() && w.fade.current() <= 0.0,
+                    }
+            })
             .map(|w| (w.id, w.destroyed))
             .collect()
     }
@@ -268,6 +305,11 @@ impl WindowStack {
                     animating = true;
                 } else {
                     w.wobble = None;
+                }
+            }
+            if let Some(b) = &mut w.burn {
+                if b.progress.advance(dt) {
+                    animating = true;
                 }
             }
         }

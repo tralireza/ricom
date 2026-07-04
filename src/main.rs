@@ -75,8 +75,8 @@ fn main() -> Result<()> {
     }
     // Reject unknown flags so a typo doesn't silently launch the compositor.
     const FLAGS: &[&str] = &[
-        "--gl-check", "--paint-test", "--blit-test", "--opacity-test", "--config", "--print-config",
-        "--fps",
+        "--gl-check", "--paint-test", "--blit-test", "--opacity-test", "--burn-test", "--config",
+        "--print-config", "--fps",
     ];
     if let Some(bad) = args[1..]
         .iter()
@@ -118,6 +118,12 @@ fn main() -> Result<()> {
             .unwrap_or(0.5)
             .clamp(0.0, 1.0);
         return composite_windows_test(frac);
+    }
+
+    // `ricom --burn-test` sweeps the burn/dissolve shader over the current
+    // windows (progress 0→1 over ~4s) so the effect can be eyeballed / framegrabbed.
+    if args.iter().any(|a| a == "--burn-test") {
+        return composite_burn_test();
     }
 
     // Config: `--config <path>` overrides the default XDG location.
@@ -242,5 +248,74 @@ fn composite_windows_test(opacity: f32) -> Result<()> {
     x.release_overlay()?;
     x.flush()?;
     tracing::info!("done; redirect released");
+    Ok(())
+}
+
+/// `--burn-test`: composite every mapped window through the burn/dissolve shader,
+/// sweeping progress 0→1 over ~4s (uniform-segments mode), so the effect can be
+/// eyeballed / framegrabbed without wiring the close lifecycle. Each window gets a
+/// distinct seed so their burns don't match.
+fn composite_burn_test() -> Result<()> {
+    use backend_gl::{Burn, Quad, WindowDraw};
+    use xconn::XConn;
+    let x = XConn::connect()?;
+    x.setup_extensions()?;
+    let overlay = x.get_overlay()?;
+    x.overlay_input_passthrough(overlay)?;
+    let visual = x.window_visual(overlay)?;
+    x.redirect_subwindows()?;
+
+    let mut quads: Vec<Quad> = Vec::new();
+    let mut pixmaps: Vec<u32> = Vec::new();
+    for w in x.list_tree()? {
+        if !w.mapped || w.window == overlay {
+            continue;
+        }
+        match x.name_window_pixmap(w.window) {
+            Ok(pm) => {
+                let bw = w.border_width as i32;
+                let (qw, qh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
+                quads.push(Quad {
+                    pixmap: pm, x: w.x as i32, y: w.y as i32, w: qw, h: qh,
+                    opacity: 1.0, shadow: false, blur: false, corner_radius: 0.0,
+                });
+                pixmaps.push(pm);
+            }
+            Err(e) => tracing::warn!("name pixmap for {}: {e}", w.window),
+        }
+    }
+    tracing::info!(count = quads.len(), "burn-test: dissolving mapped windows over ~4s");
+    x.flush()?;
+    {
+        let backend = backend_gl::GlBackend::new(overlay, visual, backend_gl::RenderParams::default())?;
+        let clear = [backend_gl::Rect::from_xywh(0, 0, x.root_width as i32, x.root_height as i32)];
+        let start = std::time::Instant::now();
+        loop {
+            let t = start.elapsed().as_secs_f32();
+            let progress = (t / 4.0).min(1.0);
+            let draws: Vec<WindowDraw> = quads
+                .iter()
+                .enumerate()
+                .map(|(i, &q)| {
+                    let mut wd = WindowDraw::whole(q);
+                    let seed = ((i as f32 + 1.0) * 0.618_034).fract();
+                    wd.burn = Some(Burn { progress, seed });
+                    wd
+                })
+                .collect();
+            backend.present_windows(&draws, x.root_width as i32, x.root_height as i32, None, &clear)?;
+            if t >= 5.0 {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+        tracing::info!("burn-test done");
+    }
+    for pm in pixmaps {
+        let _ = x.free_pixmap(pm);
+    }
+    x.unredirect_subwindows()?;
+    x.release_overlay()?;
+    x.flush()?;
     Ok(())
 }

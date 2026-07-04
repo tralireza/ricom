@@ -46,6 +46,7 @@ pub struct Config {
     pub blur: Blur,
     pub fps: Fps,
     pub animation: Animation,
+    pub burn: Burn,
     /// Per-window override rules, applied in order (last match wins per field).
     /// Written as `[[rule]]` tables in TOML.
     #[serde(rename = "rule")]
@@ -142,6 +143,27 @@ pub struct Fps {
     pub scale: f32,
 }
 
+/// Burn / dissolve close animation: the window disintegrates on animated noise
+/// with a glowing ember front. These two size knobs are live-tunable (reload with
+/// `SIGHUP`, then close a window to see the change). The on/off switch, duration,
+/// and propagation mode are still compiled-in for now (Phase 4 remainder).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Burn {
+    /// Segment/hole granularity (shader `u_segscale`): higher = finer, smaller
+    /// patches; lower = chunkier. Default `9.0`.
+    pub seg_scale: f32,
+    /// Ember hot-band half-width (shader `u_ember`): smaller = a thinner, tighter
+    /// glowing edge (also crisps the dissolve front). Default `0.13`.
+    pub ember_width: f32,
+    /// Cooler trailing ember colour (RGB `0.0..=1.0`), at the edge of the glow.
+    /// Default `[0.6, 0.05, 0.0]` (dark red). Lower for a moodier smoulder.
+    pub ember_cool: [f32; 3],
+    /// Hottest leading-edge ember colour (RGB `0.0..=1.0`). Default
+    /// `[1.0, 0.8, 0.25]` (bright yellow). Lower for a darker fire.
+    pub ember_hot: [f32; 3],
+}
+
 /// Window fade-in (on map) / fade-out (on unmap/destroy).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -199,7 +221,21 @@ impl Default for Config {
             blur: Blur::default(),
             fps: Fps::default(),
             animation: Animation::default(),
+            burn: Burn::default(),
             rules: Vec::new(),
+        }
+    }
+}
+
+impl Default for Burn {
+    fn default() -> Self {
+        // "Deep smoulder": fine segments, a thin-but-present ember band, and a
+        // dark-maroon → burnt-orange ramp (no bright yellow). Dialed in by eye.
+        Burn {
+            seg_scale: 36.0,
+            ember_width: 0.07,
+            ember_cool: [0.28, 0.02, 0.0],
+            ember_hot: [0.75, 0.22, 0.04],
         }
     }
 }
@@ -333,6 +369,10 @@ impl Config {
             prev.animation.wobble_friction,
             self.animation.wobble_friction
         );
+        chg!("burn.seg_scale", prev.burn.seg_scale, self.burn.seg_scale);
+        chg!("burn.ember_width", prev.burn.ember_width, self.burn.ember_width);
+        chg!("burn.ember_cool", prev.burn.ember_cool, self.burn.ember_cool);
+        chg!("burn.ember_hot", prev.burn.ember_hot, self.burn.ember_hot);
         if prev.rules != self.rules {
             out.push(format!("rules {}→{}", prev.rules.len(), self.rules.len()));
         }
@@ -419,6 +459,9 @@ mod tests {
             (true, 0.85, true)
         );
         assert_eq!((c.animation.wobble_spring, c.animation.wobble_friction), (350.0, 14.0));
+        assert_eq!((c.burn.seg_scale, c.burn.ember_width), (36.0, 0.07));
+        assert_eq!(c.burn.ember_cool, [0.28, 0.02, 0.0]);
+        assert_eq!(c.burn.ember_hot, [0.75, 0.22, 0.04]);
         assert!(c.rules.is_empty());
     }
 
@@ -452,6 +495,11 @@ open_scale = 0.7
 wobble = false
 wobble_spring = 500.0
 wobble_friction = 20.0
+[burn]
+seg_scale = 18.0
+ember_width = 0.08
+ember_cool = [0.3, 0.02, 0.0]
+ember_hot = [0.75, 0.25, 0.05]
 "#;
         let c: Config = toml::from_str(t).unwrap();
         assert!(!c.unredir);
@@ -468,6 +516,9 @@ wobble_friction = 20.0
         assert_eq!((c.animation.enabled, c.animation.wobble), (false, false));
         assert_eq!(c.animation.open_scale, 0.7);
         assert_eq!((c.animation.wobble_spring, c.animation.wobble_friction), (500.0, 20.0));
+        assert_eq!((c.burn.seg_scale, c.burn.ember_width), (18.0, 0.08));
+        assert_eq!(c.burn.ember_cool, [0.3, 0.02, 0.0]);
+        assert_eq!(c.burn.ember_hot, [0.75, 0.25, 0.05]);
     }
 
     #[test]

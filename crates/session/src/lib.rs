@@ -22,7 +22,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{Place, Window};
 
-use backend_gl::{GlBackend, Hud, HudCorner, HudLoad, Quad, RenderParams, WindowDraw};
+use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Quad, RenderParams, WindowDraw};
 use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
@@ -30,6 +30,10 @@ const MAX_BUFFER_AGE: usize = 4;
 /// Extra px around a wobble's mesh bbox when damaging/clipping it — headroom for
 /// spring overshoot and the AA fringe, so no jiggling pixel is ever left stale.
 const WOBBLE_PAD: f32 = 8.0;
+/// P2 (temporary — until the `[burn]` config block lands in P3): burn every window
+/// on close, ~0.5 s. Phase 3 replaces these with config + per-window-rule gating.
+const BURN_ON_CLOSE: bool = true;
+const BURN_DURATION: f64 = 0.5;
 use config::{Config, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
@@ -46,6 +50,10 @@ fn render_params(cfg: &Config) -> RenderParams {
         blur_enabled: cfg.blur.enabled,
         blur_passes: cfg.blur.passes,
         blur_radius: cfg.blur.radius,
+        burn_seg_scale: cfg.burn.seg_scale,
+        burn_ember: cfg.burn.ember_width,
+        burn_ember_cool: cfg.burn.ember_cool,
+        burn_ember_hot: cfg.burn.ember_hot,
     }
 }
 
@@ -64,6 +72,11 @@ fn hud_corner(s: &str) -> HudCorner {
 /// ricom's "fullscreen" test, shared by unredir-if-possible and rule matching.
 fn covers_root(x: i32, y: i32, w: i32, h: i32, bw: i32, rw: i32, rh: i32) -> bool {
     x <= 0 && y <= 0 && x + w + 2 * bw >= rw && y + h + 2 * bw >= rh
+}
+
+/// A stable-but-varied burn seed per window id, so each window's dissolve differs.
+fn burn_seed(id: WindowId) -> f32 {
+    (id.wrapping_mul(2_654_435_761) % 100_000) as f32 / 100_000.0
 }
 
 /// Padded, pixel-aligned bounding box of a wobble mesh's vertices (`[x, y, u, v]`
@@ -707,7 +720,12 @@ impl App {
             let cur: Vec<(WindowId, Rect)> = app
                 .windows
                 .iter_bottom_to_top()
-                .filter(|w| w.fade.is_animating() || w.scale.is_animating() || w.wobble.is_some())
+                .filter(|w| {
+                    w.fade.is_animating()
+                        || w.scale.is_animating()
+                        || w.wobble.is_some()
+                        || w.burn.as_ref().is_some_and(|b| b.progress.is_animating())
+                })
                 .map(|w| {
                     let bw = w.border_width as i32;
                     let (x, y) = (w.x as i32, w.y as i32);
@@ -861,9 +879,10 @@ impl App {
         let Some(backend) = self.backend.as_ref() else {
             return;
         };
-        // Each entry is a quad plus an optional wobble mesh (`Some` while the
-        // window is wobbling → the backend draws the deformed grid instead).
-        let mut items: Vec<(Quad, Option<Vec<[f32; 4]>>)> = Vec::new();
+        // Each entry is a quad, an optional wobble mesh (`Some` while the window is
+        // wobbling → the backend draws the deformed grid instead), and an optional
+        // burn (dissolve-on-close).
+        let mut items: Vec<(Quad, Option<Vec<[f32; 4]>>, Option<Burn>)> = Vec::new();
         for w in self.windows.visible_bottom_to_top() {
             if w.id == self.overlay {
                 continue;
@@ -874,10 +893,12 @@ impl App {
                 // Per-window rule overrides, falling back to the global config.
                 let rr = self.resolve_rules(w.id);
                 let wobbling = w.wobble.is_some();
+                let burning = w.burn.is_some();
+                let burn = w.burn.as_ref().map(|b| Burn { progress: b.progress.current() as f32, seed: b.seed });
                 // Scale-about-centre for the open/close pop. Skipped while wobbling —
                 // the mesh path positions the window from the spring sim instead.
                 let s = w.scale.current();
-                let (qx, qy, qw, qh) = if !wobbling && (s - 1.0).abs() > f64::EPSILON {
+                let (qx, qy, qw, qh) = if !wobbling && !burning && (s - 1.0).abs() > f64::EPSILON {
                     let (cx, cy) = (w.x as f64 + ow as f64 / 2.0, w.y as f64 + oh as f64 / 2.0);
                     let (sw, sh) = (ow as f64 * s, oh as f64 * s);
                     ((cx - sw / 2.0).round() as i32, (cy - sh / 2.0).round() as i32, sw.round() as i32, sh.round() as i32)
@@ -917,6 +938,7 @@ impl App {
                         },
                     },
                     mesh,
+                    burn,
                 ));
             }
         }
@@ -943,7 +965,7 @@ impl App {
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
-        for (q, mesh) in items.iter().rev() {
+        for (q, mesh, burn) in items.iter().rev() {
             let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
             // Footprint = the area the window might touch this frame. A wobbler can
             // deform outside its rect, so use its padded mesh bbox; otherwise the
@@ -958,13 +980,13 @@ impl App {
             visible.subtract(&covered);
             visible.intersect(&paint); // repaint only the damaged part
             if !visible.is_empty() {
-                draws.push(WindowDraw { quad: *q, clip: visible.rects().to_vec(), mesh: mesh.clone() });
+                draws.push(WindowDraw { quad: *q, clip: visible.rects().to_vec(), mesh: mesh.clone(), burn: *burn });
             }
             // Opaque windows occlude what's below: a square one covers its whole
             // rect; a rounded one covers all but its (transparent) corner squares.
             // A wobbling window is *deforming*, so it never occludes (its rect is
             // unreliable) — draw everything beneath it.
-            if mesh.is_none() && q.opacity >= 1.0 {
+            if mesh.is_none() && burn.is_none() && q.opacity >= 1.0 {
                 let cr = q.corner_radius as i32;
                 if cr <= 0 {
                     covered.add_rect(rect);
@@ -1166,9 +1188,13 @@ impl App {
                 // keep compositing the last frame and fade it out; the window is
                 // reaped from the stack once transparent. Nothing visible -> drop now.
                 let d = self.fade_duration();
-                if self.gfx.contains_key(&e.window)
-                    && self.windows.begin_fade_out(e.window, d, true)
+                let has_gfx = self.gfx.contains_key(&e.window);
+                if BURN_ON_CLOSE
+                    && has_gfx
+                    && self.windows.begin_burn(e.window, BURN_DURATION, burn_seed(e.window), true)
                 {
+                    self.ensure_frame_timer();
+                } else if has_gfx && self.windows.begin_fade_out(e.window, d, true) {
                     // Close "pop": shrink back to `open_scale` as it fades out.
                     if self.config.animation.enabled {
                         self.windows.retarget_scale(e.window, self.config.animation.open_scale, d);
@@ -1207,9 +1233,13 @@ impl App {
                 self.windows.set_mapped(e.window, false);
                 // Fade the last frame out if we have it (keep the pixmap); else drop now.
                 let d = self.fade_duration();
-                if self.gfx.contains_key(&e.window)
-                    && self.windows.begin_fade_out(e.window, d, false)
+                let has_gfx = self.gfx.contains_key(&e.window);
+                if BURN_ON_CLOSE
+                    && has_gfx
+                    && self.windows.begin_burn(e.window, BURN_DURATION, burn_seed(e.window), false)
                 {
+                    self.ensure_frame_timer();
+                } else if has_gfx && self.windows.begin_fade_out(e.window, d, false) {
                     // Close "pop": shrink back to `open_scale` as it fades out.
                     if self.config.animation.enabled {
                         self.windows.retarget_scale(e.window, self.config.animation.open_scale, d);

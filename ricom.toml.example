@@ -40,6 +40,14 @@ wobble = true           # wobbly-windows: a spring-mesh jelly that lags/jiggles 
 wobble_spring = 350.0   # spring stiffness k (higher = snappier, faster settle)
 wobble_friction = 14.0  # velocity damping (higher = less jiggle, settles sooner)
 
+[burn]
+# Burn/dissolve close effect. These two size knobs are live-tunable: edit and
+# reload with  kill -HUP $(pidof ricom)  then close a window to see the change.
+seg_scale = 36.0        # segment/hole granularity (higher = finer, smaller patches)
+ember_width = 0.07      # ember hot-band half-width (smaller = thinner, tighter glow)
+ember_cool = [0.28, 0.02, 0.0]  # cooler trailing ember colour (edge of the glow)
+ember_hot  = [0.75, 0.22, 0.04] # hottest leading-edge colour; raise both for a brighter fire
+
 [fps]
 enabled = false          # start with the on-demand FPS HUD visible (also toggles live via the hotkey)
 hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + arrow keys move it
