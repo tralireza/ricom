@@ -77,6 +77,9 @@ pub struct Rule {
     pub shadow: Option<bool>,
     pub corner_radius: Option<f32>,
     pub unredir: Option<bool>,
+    /// Keep matching windows composited on top of all others (always-on-top),
+    /// regardless of the X stacking order. `None`/`false` = normal stacking.
+    pub above: Option<bool>,
 }
 
 /// A window's identity + state, matched against [`Rule`]s. Built by `session`
@@ -99,6 +102,7 @@ pub struct RuleResult {
     pub shadow: Option<bool>,
     pub corner_radius: Option<f32>,
     pub unredir: Option<bool>,
+    pub above: Option<bool>,
 }
 
 impl Match {
@@ -414,6 +418,7 @@ impl Config {
                 r.shadow = rule.shadow.or(r.shadow);
                 r.corner_radius = rule.corner_radius.or(r.corner_radius);
                 r.unredir = rule.unredir.or(r.unredir);
+                r.above = rule.above.or(r.above);
             }
         }
         r
@@ -621,5 +626,18 @@ opacity = 0.9
     #[test]
     fn rule_unknown_field_errors() {
         assert!(toml::from_str::<Config>("[[rule]]\nwobble = true\n").is_err());
+    }
+
+    #[test]
+    fn above_rule_matches_by_title_substring() {
+        let c: Config = toml::from_str(
+            "[[rule]]\nmatch = { title = \"intel-gpu-top\" }\nabove = true\n",
+        )
+        .unwrap();
+        // Substring match against the live WM_NAME (e.g. "intel-gpu-top: Intel …").
+        let w = WindowMatch { title: "intel-gpu-top: Intel Kabylake".into(), ..Default::default() };
+        assert_eq!(c.resolve(&w).above, Some(true));
+        // A non-matching window is untouched.
+        assert_eq!(c.resolve(&WindowMatch { title: "xterm".into(), ..Default::default() }).above, None);
     }
 }

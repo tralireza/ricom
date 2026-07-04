@@ -82,3 +82,7 @@ scale = 1.0              # size multiplier on top of automatic screen-height sca
 # [[rule]]
 # match = { title = "Picture-in-Picture" }
 # corner_radius = 12.0
+
+# [[rule]]
+# match = { title = "intel-gpu-top" }  # keep a monitor/HUD terminal always on top
+# above = true                         # (composited topmost regardless of X stacking)

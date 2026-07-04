@@ -880,9 +880,9 @@ impl App {
             return;
         };
         // Each entry is a quad, an optional wobble mesh (`Some` while the window is
-        // wobbling → the backend draws the deformed grid instead), and an optional
-        // burn (dissolve-on-close).
-        let mut items: Vec<(Quad, Option<Vec<[f32; 4]>>, Option<Burn>)> = Vec::new();
+        // wobbling → the backend draws the deformed grid instead), an optional burn,
+        // and an always-on-top flag (from the `above` rule) used to reorder below.
+        let mut items: Vec<(Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool)> = Vec::new();
         for w in self.windows.visible_bottom_to_top() {
             if w.id == self.overlay {
                 continue;
@@ -939,9 +939,16 @@ impl App {
                     },
                     mesh,
                     burn,
+                    rr.above.unwrap_or(false),
                 ));
             }
         }
+        // Always-on-top: stable-sort so `above` windows move to the end of the
+        // bottom-to-top list (i.e. topmost), keeping relative order within each
+        // group. The occlusion walk below then treats them as the top of the stack
+        // — they occlude what's beneath and are never occluded by normal windows,
+        // regardless of the X stacking order.
+        items.sort_by_key(|it| it.3);
         // Region-level occlusion: walk top-to-bottom, accumulating the region
         // covered by opaque windows above. Each window is drawn only in its
         // visible part (footprint ∩ screen − covered); an empty visible region
@@ -965,7 +972,7 @@ impl App {
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
-        for (q, mesh, burn) in items.iter().rev() {
+        for (q, mesh, burn, _above) in items.iter().rev() {
             let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
             // Footprint = the area the window might touch this frame. A wobbler can
             // deform outside its rect, so use its padded mesh bbox; otherwise the
