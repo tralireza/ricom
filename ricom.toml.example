@@ -1,6 +1,7 @@
 # ricom configuration (TOML). Copy to ~/.config/ricom/ricom.toml and edit.
 # Every key is optional — omitted keys fall back to these built-in defaults.
 # Reload a running ricom live with:  kill -HUP $(pidof ricom)
+# Dump the effective config with:    ricom --print-config
 
 # unredir-if-possible: let a lone fullscreen window bypass the compositor and
 # page-flip straight to the display (compositor cost ~0). Set to false to always
@@ -17,9 +18,55 @@ corner_radius = 0.0
 # (0.0-1.0; 1.0 = opaque). The bottom layer of the opacity stack (see [[rule]]).
 default_opacity = 1.0
 
-[fade]
-enabled = true
-duration = 0.2      # seconds (fade in on map, out on unmap/destroy)
+# ── Animations ───────────────────────────────────────────────────────────────
+# Each lifecycle transition — open (map), close (unmap/destroy), move (resize) —
+# plays a set of composable "blocks" (primitives) that layer together. Pick a
+# named PRESET, or compose blocks explicitly (see below). Per-window overrides go
+# on a [[rule]] (open/close/move keys), so an empty `match = {}` rule is a global
+# default and a specific rule tunes one app.
+#
+# Primitives:  opacity · scale · translate · wobble · burn   (burn owns alpha)
+#
+# Presets:
+#   none     instant — no animation
+#   fade     opacity only
+#   pop      opacity + scale-about-centre                (default `open`)
+#   slide    opacity + translate in/out past a screen edge
+#   drop     opacity + translate downward (close)
+#   boing    spring-mesh "boing" spawn (open)
+#   burn     noise dissolve + ember front (close)
+#   wobble   spring-mesh jelly                           (default `move`)
+#   stretch  a centre line grows to full WIDTH  (scale x; opaque, shows content)
+#   unroll   a centre line grows to full HEIGHT (scale y; opaque, shows content)
+[anim]
+open  = "pop"           # window mapped
+close = "fade"          # window unmapped/destroyed
+move  = "wobble"        # window moved/resized
+duration = 0.2          # default seconds for opacity / scale / translate
+scale_from = 0.85       # default `scale` start factor (open) / end factor (close)
+wobble_spring = 350.0   # default wobble spring stiffness k (higher = snappier)
+wobble_friction = 14.0  # default wobble velocity damping (higher = less jiggle)
+
+# Explicit block composition (overrides the preset for that category). Each block
+# is a table tagged by `block`; a spec may set its own `duration`. `easing` is
+# ease-out (default) | ease-in | linear. Example — Firefox drops in from above:
+#
+#   [[rule]]
+#   match = { class = "firefox" }
+#   [rule.open]
+#   duration = 0.28
+#   blocks = [
+#     { block = "opacity", easing = "ease-out" },
+#     { block = "translate", dy = -60.0, easing = "ease-in" },
+#   ]
+#
+# Block params (all fields optional unless noted):
+#   opacity   { from, easing }
+#   scale     { from, axis = "both"|"x"|"y", easing }   # x/y = directional stretch
+#   translate { dx, dy, edge = "left"|"right"|"top"|"bottom", easing }
+#             #   edge = slide fully off that screen edge; else use dx/dy (px)
+#   wobble    { spring, friction }
+#   burn      # no params here — the dissolve look comes from [burn] below
 
 [shadow]
 enabled = true
@@ -32,17 +79,9 @@ enabled = false     # frost the backdrop behind translucent windows (extra GPU c
 passes = 3          # dual-Kawase iterations (more = wider/softer)
 radius = 4.0        # sample offset per pass (px)
 
-[animation]
-enabled = true          # scale-about-centre "pop" on open/close (pop speed follows [fade] duration;
-                        # the [fade] opacity fade still applies when this is false)
-open_scale = 0.85       # start scale on open / end scale on close (1.0 = no pop)
-wobble = true           # wobbly-windows: a spring-mesh jelly that lags/jiggles on move/resize
-wobble_spring = 350.0   # spring stiffness k (higher = snappier, faster settle)
-wobble_friction = 14.0  # velocity damping (higher = less jiggle, settles sooner)
-
 [burn]
-# Burn/dissolve close effect. These two size knobs are live-tunable: edit and
-# reload with  kill -HUP $(pidof ricom)  then close a window to see the change.
+# The `burn` close effect's look. These knobs are live-tunable: edit and reload
+# with  kill -HUP $(pidof ricom)  then close a `burn` window to see the change.
 seg_scale = 36.0        # segment/hole granularity (higher = finer, smaller patches)
 ember_width = 0.07      # ember hot-band half-width (smaller = thinner, tighter glow)
 ember_cool = [0.28, 0.02, 0.0]  # cooler trailing ember colour (edge of the glow)
@@ -60,15 +99,28 @@ scale = 1.0              # size multiplier on top of automatic screen-height sca
 
 # Per-window rules. Each [[rule]] has a `match` (all listed conditions must hold —
 # class/instance/window_type match exactly, title matches as a substring,
-# fullscreen matches state) plus the settings it overrides. Rules apply in order,
-# last match wins per field. A built-in rule already keeps fullscreen windows
-# opaque + unblurred; add your own to override. Examples (uncomment to use):
+# fullscreen matches state) plus the settings it overrides: opacity / blur /
+# shadow / corner_radius / unredir / above, and the per-category animations
+# open / close / move (a preset name or an explicit [rule.<cat>] block spec).
+# Rules apply in order, last match wins per field. A built-in rule already keeps
+# fullscreen windows opaque + unblurred; add your own to override. Examples
+# (uncomment to use):
 
 # [[rule]]
-# match = { class = "mpv" }         # video: never dim or blur, keep it crisp
+# match = { class = "mpv" }         # video: never dim or blur, keep the burn on close
 # opacity = 1.0
 # blur = false
 # shadow = false
+# close = "burn"
+
+# [[rule]]
+# match = { instance = "Alacritty" }  # terminal: pop open, slide away on close
+# open = "pop"
+# close = "slide"
+
+# [[rule]]
+# match = {}                        # global default via a catch-all rule:
+# close = "fade"                    # fade every window closed (same as [anim] close)
 
 # [[rule]]
 # match = { class = "com.mitchellh.ghostty" }  # frosted terminals (Ghostty's default

@@ -48,10 +48,14 @@ Working today:
   unmap/destroy (200 ms ease-out on a `calloop` frame clock; a closing window's last frame is kept and
   faded), soft **left+bottom drop shadows**, **rounded corners** (shadow follows the corner), and
   **background blur** — dual-Kawase frost behind translucent windows.
-- **Transition animations** — a scale-about-centre **open/close "pop"** (alongside the fade), and
-  **wobbly-windows**: a spring-mesh jelly that lags and jiggles as a window settles after a
-  move/resize (an `N×N` grid warped by a CPU spring sim, drawn through a dedicated GL mesh path).
-  Both ride `use-damage`, so an animating window repaints only its moving path, not the whole screen.
+- **Transition animations** — a composable **animation-block** system: each transition (open / close
+  / move) plays a set of layered primitives — **opacity, scale, translate, wobble, burn** — chosen by a
+  named preset (`fade`, `pop`, `slide`, `drop`, `boing`, `burn`, `wobble`, `stretch`, `unroll`) or an
+  explicit block spec, set globally (`[anim]`) or per-window (`[[rule]]`). Includes the scale-about-centre
+  **open/close "pop"**, **wobbly-windows** (a spring-mesh move/resize jelly on a dedicated GL mesh path),
+  **slide/drop** (an eased translate), and **directional stretch/unroll** (a centre line growing to full
+  width/height). All ride `use-damage`, so an animating window repaints only its moving path, not the
+  whole screen.
 - **On-demand FPS HUD** — a global hotkey (`Super+Shift+F` by default) toggles an overlay showing
   FPS, frame-time, and a rolling frame-time graph, drawn with a general **SDF text engine**
   (arbitrary strings, crisp at any size, no runtime font dependency) — ricom's first on-screen text.
@@ -63,9 +67,11 @@ Working today:
   (ricom stepped aside) rather than showing false load.
 - **Window rules** — per-window overrides matched on `WM_CLASS` (class/instance),
   `_NET_WM_WINDOW_TYPE`, title (substring), and fullscreen state, each setting `opacity` /
-  `blur` / `shadow` / `corner_radius` / `unredir`. Precedence: an explicit `_NET_WM_WINDOW_OPACITY`
-  beats a rule, which beats a built-in "fullscreen → opaque + unblurred" rule, which beats the
-  global `default_opacity`. Live-reloads with the rest of the config.
+  `blur` / `shadow` / `corner_radius` / `unredir` / `above`, plus the per-transition animations
+  `open` / `close` / `move` (a preset or explicit block spec; an empty `match = {}` is a global
+  default). Precedence: an explicit `_NET_WM_WINDOW_OPACITY` beats a rule, which beats a built-in
+  "fullscreen → opaque + unblurred" rule, which beats the global `default_opacity`. Live-reloads
+  with the rest of the config.
 
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
@@ -200,10 +206,6 @@ background = [0.05, 0.05, 0.07]  # composite background colour (RGB, seen where 
 corner_radius = 0.0             # window corner radius in px (0 = square)
 default_opacity = 1.0           # opacity for windows with no _NET_WM_WINDOW_OPACITY and no rule
 
-[fade]
-enabled = true
-duration = 0.2                  # seconds (fade in on map, out on unmap/destroy)
-
 [shadow]
 enabled = true
 radius = 12.0                   # left/bottom falloff distance (px)
@@ -215,12 +217,14 @@ enabled = false                 # frost the backdrop behind translucent windows
 passes = 3                      # dual-Kawase iterations (wider/softer)
 radius = 4.0                    # sample offset per pass (px)
 
-[animation]                     # transition animations (pop speed follows [fade] duration)
-enabled = true                  # scale-about-centre "pop" on open/close (fade still applies if off)
-open_scale = 0.85               # start scale on open / end scale on close (1.0 = no pop)
-wobble = true                   # wobbly-windows: spring-mesh jelly on move/resize
-wobble_spring = 350.0           # spring stiffness k (higher = snappier, faster settle)
-wobble_friction = 14.0          # velocity damping (higher = less jiggle, settles sooner)
+[anim]                          # per-transition animations built from composable blocks
+open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|wobble|stretch|unroll
+close = "fade"                  # …or compose blocks explicitly (see ricom.toml.example)
+move  = "wobble"
+duration = 0.2                  # default seconds (opacity / scale / translate)
+scale_from = 0.85               # default `scale` start factor (open) / end factor (close)
+wobble_spring = 350.0           # wobble spring stiffness k (higher = snappier)
+wobble_friction = 14.0          # wobble velocity damping (higher = less jiggle)
 
 [fps]
 enabled = false                 # start with the FPS HUD visible (also toggled by the hotkey)
@@ -246,9 +250,15 @@ blur = true
 [[rule]]
 match = { window_type = "dock" }  # no shadow on panels/bars
 shadow = false
+
+[[rule]]
+match = { instance = "Alacritty" }  # terminal: pop open, slide away on close
+open = "pop"
+close = "slide"
 ```
 
-See [`ricom.toml.example`](ricom.toml.example).
+See [`ricom.toml.example`](ricom.toml.example) for the full schema, every preset, and
+explicit block composition.
 
 ## Roadmap
 
@@ -257,8 +267,10 @@ Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners
 built on a general SDF text engine, per-window rules (match on class/type/title/fullscreen), a
 loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), region-level occlusion
 culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial repaint
-(EGL buffer-age; repaint only the changed region), and transition animations — an open/close
-scale "pop" plus wobbly-windows (a spring-mesh move/resize jelly on a dedicated GL mesh path).
+(EGL buffer-age; repaint only the changed region), and a composable transition-animation system —
+layered primitives (opacity / scale / translate / wobble / burn) selected per transition (open /
+close / move) by a named preset or explicit block spec, globally or per-rule: pop, slide/drop,
+wobbly-windows, burn dissolve, and directional stretch/unroll.
 
 Next:
 
