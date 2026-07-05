@@ -70,6 +70,28 @@ void main() {
 }
 "#;
 
+/// Spin vertex shader: like [`BLIT_VS`] but rotates the quad about the window
+/// centre by `u_angle` radians **in pixel space** (before the NDC transform, so a
+/// non-square window doesn't shear). Paired with [`BLIT_FS`].
+const SPIN_VS: &str = r#"#version 330 core
+layout(location = 0) in vec2 a_pos;   // unit quad, 0..1
+uniform vec4 u_rect;                   // x, y, w, h  (pixels, top-left origin)
+uniform vec2 u_screen;                 // screen w, h
+uniform float u_angle;                 // rotation about the centre (radians)
+out vec2 v_tex;
+void main() {
+    v_tex = a_pos;
+    vec2 px = u_rect.xy + a_pos * u_rect.zw;          // pixel position
+    vec2 c = u_rect.xy + u_rect.zw * 0.5;             // window centre (px)
+    float s = sin(u_angle), co = cos(u_angle);
+    vec2 rel = px - c;
+    px = c + vec2(rel.x * co - rel.y * s, rel.x * s + rel.y * co); // rotate in px space
+    vec2 ndc = vec2(px.x / u_screen.x * 2.0 - 1.0,
+                    1.0 - px.y / u_screen.y * 2.0);
+    gl_Position = vec4(ndc, 0.0, 1.0);
+}
+"#;
+
 /// Burn / dissolve close animation (reuses [`BLIT_VS`], so it has `u_rect`/
 /// `u_screen`/`v_tex`). The window erodes away on animated value-noise with a
 /// glowing ember band at the dissolving front — "uniform segments": chunky
@@ -374,6 +396,10 @@ pub struct WindowDraw {
     /// Burn/dissolve close effect. `Some` → draw via [`BURN_FS`] at this progress
     /// (mutually exclusive with `mesh`; a closing window doesn't wobble).
     pub burn: Option<Burn>,
+    /// Rotation about the window centre (radians) for the `spin` primitive. `Some`
+    /// → draw via [`SPIN_VS`] (no shadow/frost; corners suppressed), mutually
+    /// exclusive with `mesh`/`burn`. `None` → the normal quad path.
+    pub spin: Option<f32>,
 }
 
 impl WindowDraw {
@@ -386,6 +412,7 @@ impl WindowDraw {
             clip: vec![region::Rect::from_xywh(quad.x, quad.y, quad.w, quad.h)],
             mesh: None,
             burn: None,
+            spin: None,
         }
     }
 }
@@ -635,6 +662,15 @@ pub struct GlBackend {
     bu_ember: Option<glow::NativeUniformLocation>,
     bu_ember_cool: Option<glow::NativeUniformLocation>,
     bu_ember_hot: Option<glow::NativeUniformLocation>,
+    // Spin (rotate-about-centre) program: SPIN_VS + the shared BLIT_FS, own VAO.
+    spin_program: glow::NativeProgram,
+    spin_vao: glow::NativeVertexArray,
+    sp_rect: Option<glow::NativeUniformLocation>,
+    sp_screen: Option<glow::NativeUniformLocation>,
+    sp_tex: Option<glow::NativeUniformLocation>,
+    sp_opacity: Option<glow::NativeUniformLocation>,
+    sp_corner: Option<glow::NativeUniformLocation>,
+    sp_angle: Option<glow::NativeUniformLocation>,
     blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
@@ -748,6 +784,32 @@ impl GlBackend {
                 gl.get_uniform_location(program, "u_tex"),
                 gl.get_uniform_location(program, "u_opacity"),
                 gl.get_uniform_location(program, "u_corner"),
+            )
+        };
+
+        // Spin program: SPIN_VS + the shared BLIT_FS, its own unit-quad VAO.
+        // Selected per-window when a spin angle is active (rotate about centre).
+        let (spin_program, spin_vao, sp_rect, sp_screen, sp_tex, sp_opacity, sp_corner, sp_angle) = unsafe {
+            let program = make_program(&gl, SPIN_VS, BLIT_FS)?;
+            let vao = gl.create_vertex_array().map_err(|e| anyhow!("spin vao: {e}"))?;
+            gl.bind_vertex_array(Some(vao));
+            let vbo = gl.create_buffer().map_err(|e| anyhow!("spin vbo: {e}"))?;
+            gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+            let verts: [f32; 8] = [0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+            let bytes = std::slice::from_raw_parts(verts.as_ptr() as *const u8, 32);
+            gl.buffer_data_u8_slice(glow::ARRAY_BUFFER, bytes, glow::STATIC_DRAW);
+            gl.enable_vertex_attrib_array(0);
+            gl.vertex_attrib_pointer_f32(0, 2, glow::FLOAT, false, 0, 0);
+            gl.bind_vertex_array(None);
+            (
+                program,
+                vao,
+                gl.get_uniform_location(program, "u_rect"),
+                gl.get_uniform_location(program, "u_screen"),
+                gl.get_uniform_location(program, "u_tex"),
+                gl.get_uniform_location(program, "u_opacity"),
+                gl.get_uniform_location(program, "u_corner"),
+                gl.get_uniform_location(program, "u_angle"),
             )
         };
 
@@ -888,6 +950,7 @@ impl GlBackend {
             up_program, up_src, up_halfpixel, up_offset,
             frost_program, f_tex, f_screen, f_rect, f_corner,
             burn_program, bu_rect, bu_screen, bu_tex, bu_opacity, bu_progress, bu_seed, bu_segscale, bu_ember, bu_ember_cool, bu_ember_hot,
+            spin_program, spin_vao, sp_rect, sp_screen, sp_tex, sp_opacity, sp_corner, sp_angle,
             blur: RefCell::new(None),
             image_target, render, text,
             solid_program, sol_rect, sol_screen, sol_color, sol_radius,
@@ -1304,7 +1367,7 @@ impl GlBackend {
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
         }
-        for WindowDraw { quad, clip, mesh, burn } in items {
+        for WindowDraw { quad, clip, mesh, burn, spin } in items {
             if clip.is_empty() {
                 continue; // fully occluded — nothing visible to draw
             }
@@ -1375,6 +1438,30 @@ impl GlBackend {
                         self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
                     }
                     self.gl.disable(glow::SCISSOR_TEST);
+                    self.gl.use_program(Some(self.program)); // restore blit for the next item
+                    self.gl.delete_texture(tex);
+                    let _ = self.egl.destroy_image(self.display, image);
+                    continue;
+                }
+                // Spinning window: rotate about the centre via the spin program (no
+                // shadow / frost; corners suppressed — square while it spins),
+                // scissored to each clip rect. GL's scissor origin is bottom-left.
+                if let Some(angle) = spin {
+                    self.gl.use_program(Some(self.spin_program));
+                    self.gl.bind_vertex_array(Some(self.spin_vao));
+                    self.gl.uniform_2_f32(self.sp_screen.as_ref(), screen_w as f32, screen_h as f32);
+                    self.gl.uniform_1_i32(self.sp_tex.as_ref(), 0);
+                    self.gl.uniform_4_f32(self.sp_rect.as_ref(), fx, fy, fw, fh);
+                    self.gl.uniform_1_f32(self.sp_opacity.as_ref(), opacity);
+                    self.gl.uniform_1_f32(self.sp_corner.as_ref(), 0.0);
+                    self.gl.uniform_1_f32(self.sp_angle.as_ref(), *angle);
+                    self.gl.enable(glow::SCISSOR_TEST);
+                    for r in clip {
+                        self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+                    self.gl.disable(glow::SCISSOR_TEST);
+                    self.gl.bind_vertex_array(Some(self.vao)); // restore unit-quad VAO
                     self.gl.use_program(Some(self.program)); // restore blit for the next item
                     self.gl.delete_texture(tex);
                     let _ = self.egl.destroy_image(self.display, image);

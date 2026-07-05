@@ -8,6 +8,7 @@
 //! resources (redirect, overlay, pixmaps, damage), restoring normal drawing.
 
 use std::collections::{HashMap, VecDeque};
+use std::f64::consts::PI;
 use std::os::fd::AsFd;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -30,6 +31,8 @@ const MAX_BUFFER_AGE: usize = 4;
 /// Extra px around a wobble's mesh bbox when damaging/clipping it — headroom for
 /// spring overshoot and the AA fringe, so no jiggling pixel is ever left stale.
 const WOBBLE_PAD: f32 = 8.0;
+/// Default `spin` rotation in degrees when a `Spin` block sets none (a full turn).
+const SPIN_DEFAULT_DEG: f64 = 360.0;
 use config::{Axis, Category, Config, Edge, Primitive, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
@@ -129,9 +132,25 @@ fn squash_rect(rect: [f32; 4], factor: f32) -> [f32; 4] {
     [cx - nw / 2.0, cy - nh / 2.0, nw, nh]
 }
 
-/// One compositable window for [`App::composite`]: quad + optional wobble mesh +
-/// optional burn + always-on-top flag (from the `above` rule).
-type CompositeItem = (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool);
+/// One compositable window for [`App::composite`]: quad, optional wobble mesh,
+/// optional burn, always-on-top flag (from the `above` rule), and optional spin
+/// angle (radians).
+type CompositeItem = (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>);
+
+/// Axis-aligned bounding box of a rect rotated `angle` radians about its centre —
+/// the footprint/damage a spinning window covers. `rect` is `[x, y, w, h]`.
+fn rotated_aabb(rect: [f32; 4], angle: f32) -> Rect {
+    let [x, y, w, h] = rect;
+    let (cx, cy) = (x + w / 2.0, y + h / 2.0);
+    let (c, s) = (angle.cos().abs(), angle.sin().abs());
+    let (hw, hh) = (w / 2.0 * c + h / 2.0 * s, w / 2.0 * s + h / 2.0 * c);
+    Rect::new(
+        (cx - hw).floor() as i32,
+        (cy - hh).floor() as i32,
+        (cx + hw).ceil() as i32,
+        (cy + hh).ceil() as i32,
+    )
+}
 
 /// Padded, pixel-aligned bounding box of a wobble mesh's vertices (`[x, y, u, v]`
 /// per control point). Used as the deforming window's damage/clip footprint.
@@ -774,6 +793,10 @@ impl App {
                                 friction.unwrap_or(self.config.anim.wobble_friction),
                             );
                         }
+                        Primitive::Spin { degrees, easing } => {
+                            let rad = degrees.unwrap_or(SPIN_DEFAULT_DEG as f32) as f64 * PI / 180.0;
+                            self.windows.spin_in(id, rad, dur, map_easing(*easing));
+                        }
                         Primitive::Opacity { .. } | Primitive::Burn => {}
                     }
                 }
@@ -803,6 +826,10 @@ impl App {
                         }
                         Primitive::Burn => {
                             started |= self.windows.begin_burn(id, dur, burn_seed(id), destroyed);
+                        }
+                        Primitive::Spin { degrees, easing } => {
+                            let rad = degrees.unwrap_or(SPIN_DEFAULT_DEG as f32) as f64 * PI / 180.0;
+                            self.windows.spin_out(id, rad, dur, map_easing(*easing));
                         }
                         Primitive::Opacity { .. } | Primitive::Wobble { .. } => {}
                     }
@@ -877,6 +904,7 @@ impl App {
                     w.fade.is_animating()
                         || w.scale.is_animating()
                         || w.translate.is_animating()
+                        || w.spin.is_animating()
                         || w.wobble.is_some()
                         || w.burn.as_ref().is_some_and(|b| b.progress.is_animating())
                 })
@@ -907,6 +935,14 @@ impl App {
                             b[2].ceil() as i32, b[3].ceil() as i32,
                         );
                         r = Rect::new(r.x1.min(wr.x1), r.y1.min(wr.y1), r.x2.max(wr.x2), r.y2.max(wr.y2));
+                    }
+                    // Spin: the rotated bounding box exceeds the rect at ~45°.
+                    if w.spin.current() != 0.0 {
+                        let sa = rotated_aabb(
+                            [x as f32, y as f32, ow as f32, oh as f32],
+                            w.spin.current() as f32,
+                        );
+                        r = Rect::new(r.x1.min(sa.x1), r.y1.min(sa.y1), r.x2.max(sa.x2), r.y2.max(sa.y2));
                     }
                     (w.id, r)
                 })
@@ -1075,6 +1111,10 @@ impl App {
                 // A directional stretch skips corner rounding + shadow while active (a
                 // rounded/shadowed 1-px sliver looks wrong); they return once settled.
                 let directional = scaling && !matches!(w.scale_axis, wm::anim::Axis::Both);
+                // Spin (rotate-about-centre): active whenever the angle isn't upright.
+                // Drawn via the spin GL program; like a directional stretch it takes
+                // no shadow/frost/corner rounding while turning.
+                let spin = (w.spin.current() != 0.0).then_some(w.spin.current() as f32);
                 // Animated translate (slide/drop) offset, added to the on-screen
                 // position — CPU-side, so the blit needs no shader change.
                 let off = w.translate.current();
@@ -1119,6 +1159,7 @@ impl App {
                         // or while it wobbles. Size test uses the un-scaled rect.
                         shadow: !wobbling
                             && !directional
+                            && spin.is_none()
                             && rr.shadow.unwrap_or(self.config.shadow.enabled)
                             && ow >= self.config.shadow.min_size
                             && oh >= self.config.shadow.min_size
@@ -1128,7 +1169,7 @@ impl App {
                         blur: !wobbling
                             && rr.blur.unwrap_or(self.config.blur.enabled)
                             && w.fade.current() < 1.0,
-                        corner_radius: if wobbling || directional {
+                        corner_radius: if wobbling || directional || spin.is_some() {
                             0.0
                         } else {
                             rr.corner_radius.unwrap_or(self.config.corner_radius)
@@ -1137,6 +1178,7 @@ impl App {
                     mesh,
                     burn,
                     rr.above.unwrap_or(false),
+                    spin,
                 ));
             }
         }
@@ -1169,28 +1211,38 @@ impl App {
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
-        for (q, mesh, burn, _above) in items.iter().rev() {
+        for (q, mesh, burn, _above, spin) in items.iter().rev() {
             let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
-            // Footprint = the area the window might touch this frame. A wobbler can
-            // deform outside its rect, so use its padded mesh bbox; otherwise the
-            // rect, grown by the shadow reach when it casts one. Clamped to screen.
-            let footprint = match mesh {
-                Some(v) => mesh_bbox(v, WOBBLE_PAD),
-                None if q.shadow => Rect::new(q.x - sr, q.y - sr, q.x + q.w + sr, q.y + q.h + sr),
-                None => rect,
+            // Footprint = the area the window might touch this frame. A spinner
+            // sweeps its rotated bounding box; a wobbler can deform outside its rect
+            // (padded mesh bbox); otherwise the rect, grown by the shadow reach when
+            // it casts one. Clamped to screen below.
+            let footprint = match (spin, mesh) {
+                (Some(a), _) => rotated_aabb([q.x as f32, q.y as f32, q.w as f32, q.h as f32], *a),
+                (None, Some(v)) => mesh_bbox(v, WOBBLE_PAD),
+                (None, None) if q.shadow => {
+                    Rect::new(q.x - sr, q.y - sr, q.x + q.w + sr, q.y + q.h + sr)
+                }
+                (None, None) => rect,
             };
             let mut visible = Region::from_rect(footprint);
             visible.intersect_rect(&screen);
             visible.subtract(&covered);
             visible.intersect(&paint); // repaint only the damaged part
             if !visible.is_empty() {
-                draws.push(WindowDraw { quad: *q, clip: visible.rects().to_vec(), mesh: mesh.clone(), burn: *burn });
+                draws.push(WindowDraw {
+                    quad: *q,
+                    clip: visible.rects().to_vec(),
+                    mesh: mesh.clone(),
+                    burn: *burn,
+                    spin: *spin,
+                });
             }
             // Opaque windows occlude what's below: a square one covers its whole
             // rect; a rounded one covers all but its (transparent) corner squares.
             // A wobbling window is *deforming*, so it never occludes (its rect is
             // unreliable) — draw everything beneath it.
-            if mesh.is_none() && burn.is_none() && q.opacity >= 1.0 {
+            if mesh.is_none() && burn.is_none() && spin.is_none() && q.opacity >= 1.0 {
                 let cr = q.corner_radius as i32;
                 if cr <= 0 {
                     covered.add_rect(rect);

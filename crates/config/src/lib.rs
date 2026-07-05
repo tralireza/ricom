@@ -276,6 +276,14 @@ pub enum Primitive {
         #[serde(default)]
         friction: Option<f32>,
     },
+    /// Rotate about the window centre by `degrees` (default 360, a full turn):
+    /// spin in on open (rotated → 0) / spin out on close (0 → rotated). GPU primitive.
+    Spin {
+        #[serde(default)]
+        degrees: Option<f32>,
+        #[serde(default)]
+        easing: Easing,
+    },
     /// Noise dissolve with ember front (close). Shader params from `[burn]`.
     Burn,
 }
@@ -288,6 +296,7 @@ impl Primitive {
             Primitive::Scale { .. } => "scale",
             Primitive::Translate { .. } => "translate",
             Primitive::Wobble { .. } => "wobble",
+            Primitive::Spin { .. } => "spin",
             Primitive::Burn => "burn",
         }
     }
@@ -324,6 +333,7 @@ pub enum AnimSel {
 /// Known preset names, for diagnostics + docs.
 pub const PRESETS: &[&str] = &[
     "none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble", "stretch", "unroll", "minimize",
+    "spin",
 ];
 
 /// Expand a preset name into its block list. `None` if the name is unknown.
@@ -356,6 +366,8 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
             Scale { from: Some(0.0), axis: Axis::Both, easing: Easing::EaseIn },
             Translate { dx: 0.0, dy: 0.0, edge: Some(Edge::Bottom), easing: Easing::EaseIn },
         ],
+        // Rotate in/out about the centre (with a fade); half-turn by default.
+        "spin" => vec![opacity, Spin { degrees: None, easing: Easing::EaseOut }],
         _ => return None,
     })
 }
@@ -938,6 +950,22 @@ opacity = 0.9
                 Primitive::Translate { dx: 0.0, dy: 0.0, edge: Some(Edge::Bottom), easing: Easing::EaseIn },
             ]
         );
+    }
+
+    #[test]
+    fn spin_preset_fades_and_rotates() {
+        let b = expand_sel(&AnimSel::Preset("spin".into())).blocks;
+        assert_eq!(b.len(), 2);
+        assert!(matches!(b[0], Primitive::Opacity { .. }));
+        assert_eq!(b[1], Primitive::Spin { degrees: None, easing: Easing::EaseOut });
+    }
+
+    #[test]
+    fn spin_degrees_parses() {
+        let c: Config =
+            toml::from_str("[anim.open]\nblocks = [ { block = \"spin\", degrees = 360.0 } ]\n").unwrap();
+        let AnimSel::Spec(s) = &c.anim.open else { panic!("expected spec") };
+        assert_eq!(s.blocks, [Primitive::Spin { degrees: Some(360.0), easing: Easing::EaseOut }]);
     }
 
     #[test]

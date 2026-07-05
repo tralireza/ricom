@@ -50,12 +50,12 @@ Working today:
   **background blur** — dual-Kawase frost behind translucent windows.
 - **Transition animations** — a composable **animation-block** system: each transition (open / close
   / move) plays a set of layered primitives — **opacity, scale, translate, wobble, burn** — chosen by a
-  named preset (`fade`, `pop`, `slide`, `drop`, `boing`, `burn`, `wobble`, `stretch`, `unroll`, `minimize`) or an
+  named preset (`fade`, `pop`, `slide`, `drop`, `boing`, `burn`, `wobble`, `stretch`, `unroll`, `minimize`, `spin`) or an
   explicit block spec, set globally (`[anim]`) or per-window (`[[rule]]`). Includes the scale-about-centre
   **open/close "pop"**, **wobbly-windows** (a spring-mesh move/resize jelly on a dedicated GL mesh path),
-  **slide/drop** (an eased translate), and **directional stretch/unroll** (a centre line growing to full
-  width/height). All ride `use-damage`, so an animating window repaints only its moving path, not the
-  whole screen.
+  **slide/drop** (an eased translate), **directional stretch/unroll** (a centre line growing to full
+  width/height), and **spin** (a GPU rotate-about-centre). All ride `use-damage`, so an animating window
+  repaints only its moving path, not the whole screen.
 - **On-demand FPS HUD** — a global hotkey (`Super+Shift+F` by default) toggles an overlay showing
   FPS, frame-time, and a rolling frame-time graph, drawn with a general **SDF text engine**
   (arbitrary strings, crisp at any size, no runtime font dependency) — ricom's first on-screen text.
@@ -218,7 +218,7 @@ passes = 3                      # dual-Kawase iterations (wider/softer)
 radius = 4.0                    # sample offset per pass (px)
 
 [anim]                          # per-transition animations built from composable blocks
-open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|wobble|stretch|unroll|minimize
+open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|wobble|stretch|unroll|minimize|spin
 close = "fade"                  # …or compose blocks explicitly (see ricom.toml.example)
 move  = "wobble"
 duration = 0.2                  # default seconds (opacity / scale / translate)
@@ -270,7 +270,7 @@ culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial 
 (EGL buffer-age; repaint only the changed region), and a composable transition-animation system —
 layered primitives (opacity / scale / translate / wobble / burn) selected per transition (open /
 close / move) by a named preset or explicit block spec, globally or per-rule: pop, slide/drop,
-wobbly-windows, burn dissolve, and directional stretch/unroll.
+wobbly-windows, burn dissolve, directional stretch/unroll, and a GPU spin (rotate-about-centre).
 
 Next:
 

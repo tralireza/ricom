@@ -54,6 +54,9 @@ pub struct Win {
     /// drop). `translate.current()` is added to the window's position when
     /// compositing; `[0, 0]` when at rest.
     pub translate: Offset,
+    /// Animated rotation about the window centre (radians) for the `spin`
+    /// primitive; `spin.current()` is the angle to draw at, `settled(0.0)` at rest.
+    pub spin: Fade,
     /// Active move/resize wobble (spring-mesh), or `None` when the window is not
     /// wobbling. Dropped by [`WindowStack::advance_anims`] once it settles.
     pub wobble: Option<Wobble>,
@@ -93,6 +96,7 @@ impl Win {
             scale: Fade::settled(1.0),
             scale_axis: Axis::Both,
             translate: Offset::settled(),
+            spin: Fade::settled(0.0),
             wobble: None,
             burn: None,
             closing: false,
@@ -322,16 +326,37 @@ impl WindowStack {
         }
     }
 
+    /// Start an open spin: ease the rotation from `from` (radians) to its resting
+    /// `0.0` over `duration`. Pairs with [`fade_in`](Self::fade_in). No-op if
+    /// untracked.
+    pub fn spin_in(&mut self, id: WindowId, from: f64, duration: f64, easing: Easing) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.spin = Fade::animating_eased(from, 0.0, duration, easing);
+        }
+    }
+
+    /// Start a close spin: ease the rotation to `to` (radians) from its current
+    /// value over `duration`. Pairs with [`begin_fade_out`](Self::begin_fade_out).
+    /// No-op if untracked.
+    pub fn spin_out(&mut self, id: WindowId, to: f64, duration: f64, easing: Easing) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            let from = w.spin.current();
+            w.spin = Fade::animating_eased(from, to, duration, easing);
+        }
+    }
+
     /// Reset a window's transient transforms to their resting state (full scale,
-    /// no translate offset, no burn). Opacity is left to the caller. Called at
-    /// map time before applying an open animation, so blocks *absent* from the
-    /// spec leave their property at rest (e.g. a window re-mapped after fading or
-    /// sliding out doesn't reappear scaled-down or shifted). No-op if untracked.
+    /// no translate offset, no rotation, no burn). Opacity is left to the caller.
+    /// Called at map time before applying an open animation, so blocks *absent*
+    /// from the spec leave their property at rest (e.g. a window re-mapped after
+    /// fading or sliding out doesn't reappear scaled-down, shifted, or rotated).
+    /// No-op if untracked.
     pub fn reset_transforms(&mut self, id: WindowId) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.scale = Fade::settled(1.0);
             w.scale_axis = Axis::Both;
             w.translate = Offset::settled();
+            w.spin = Fade::settled(0.0);
             w.burn = None;
         }
     }
@@ -359,8 +384,8 @@ impl WindowStack {
         }
     }
 
-    /// Advance every window's animations (opacity fade, scale pop, translate, and
-    /// wobble) by `dt` seconds; settled wobbles are dropped. Returns whether any
+    /// Advance every window's animations (opacity fade, scale pop, translate, spin,
+    /// and wobble) by `dt` seconds; settled wobbles are dropped. Returns whether any
     /// window is still animating (i.e. the frame clock should keep running).
     pub fn advance_anims(&mut self, dt: f64) -> bool {
         let mut animating = false;
@@ -372,6 +397,9 @@ impl WindowStack {
                 animating = true;
             }
             if w.translate.advance(dt) {
+                animating = true;
+            }
+            if w.spin.advance(dt) {
                 animating = true;
             }
             if let Some(wob) = &mut w.wobble {
@@ -596,6 +624,18 @@ mod tests {
         assert!(!s.advance_anims(0.2)); // scale settles at 0 (a line)
         // Completes via the collapse (not a fade) and is marked for removal.
         assert_eq!(s.finished_fadeouts(), vec![(1, true)]);
+    }
+
+    #[test]
+    fn spin_in_eases_angle_to_zero() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        s.spin_in(1, 2.0, 0.2, anim::Easing::Linear);
+        assert_eq!(s.get(1).unwrap().spin.current(), 2.0);
+        assert!(s.advance_anims(0.1)); // still rotating
+        assert!((s.get(1).unwrap().spin.current() - 1.0).abs() < 1e-2); // ~halfway (linear)
+        assert!(!s.advance_anims(0.2)); // settles upright at 0
+        assert_eq!(s.get(1).unwrap().spin.current(), 0.0);
     }
 
     #[test]
