@@ -1,10 +1,118 @@
-# ricom
+# ricom 🦀
 
-A **minimalistic X11 compositor written in Rust** — a from-scratch reimplementation of the core of
-[picom](https://github.com/yshui/picom).
+A robust **X11 compositor written from scratch in Rust** — a clean reimplementation of
+[picom](https://github.com/yshui/picom)'s core, built straight on `x11rb` + EGL. It redirects the
+screen and composites every window onto the X overlay with **OpenGL/EGL** and zero-copy
+texture-from-pixmap, tear-free at vsync — then goes well past the basics: a full **composable
+animation engine** (windows spin, wobble, stretch, dissolve, slide, and dim), region-level
+occlusion culling, and `use-damage` partial repaint so an idle screen costs next to nothing.
 
-`ricom` redirects the screen and composites all windows onto the X composite overlay using
-**OpenGL via EGL** (texture-from-pixmap), presenting tear-free with vsync.
+## Highlights
+
+- **A real animation engine — not a fixed effect list.** Every window transition (open · close ·
+  move) is a recipe over composable primitives — opacity, scale, translate, spring-wobble, GPU
+  spin, noise-dissolve — chosen by a preset or hand-composed, applied globally or per-app, and
+  live-reloaded from TOML on `SIGHUP`. Windows *boing* in, *spin* out, *stretch* open from a centre
+  line, *dissolve* into embers, or slide off-screen — your call.
+- **Wobbly windows.** The Compiz spring-mesh jelly: windows lag and jiggle as they settle after a
+  move or resize, on a dedicated GL mesh path.
+- **Nearly free when idle.** Damage-driven, with region-level occlusion culling and EGL
+  buffer-age partial repaint — a static screen with one updating window repaints *just that window*.
+  A lone fullscreen window trips *unredir*: ricom steps aside so it page-flips straight to the
+  display (compositor cost → ~0), then jumps back the instant a corner overlay appears.
+- **The staples, done properly.** Per-window opacity, fade in/out, soft drop shadows, rounded
+  corners, dual-Kawase background blur, and inactive-window dimming.
+- **A HUD it draws itself.** On-demand FPS / frame-time / loadavg overlay, rendered by a
+  hand-rolled SDF text engine (crisp at any size, no font dependency), hotkey-toggled and movable
+  between corners live.
+- **All hand-rolled.** Six small Rust crates, pure-Rust deps only (`x11rb`, `calloop`, `glow`,
+  `khronos-egl`) — the Composite / Damage / Render / Present / RandR plumbing is written from
+  scratch, no compositing toolkit.
+
+## Effects & animations
+
+A text gallery of what ricom draws — no assets required. Each **animation** is a filmstrip of
+keyframes (`t=0 → t=½ → t=1`); each static **effect** is the look it produces:
+
+```
+OPEN ──────────────────────────────────────────────────────────────
+
+  pop       ┌┐        ┌──┐       ┌────┐     scale up about the
+            ││   →    │  │   →   │    │     centre, fading in
+            └┘        └──┘       └────┘
+
+  boing     ┌┐        ┌─────┐    ┌────┐     spring-mesh spawn —
+            ││   →    │     │ →  │    │     overshoots, then
+            └┘        └─────┘    └────┘     springs back to size
+
+  slide    »»»┌────┐        ┌────┐          slides in from a
+            »»│    │   →     │    │          screen edge
+           »»»└────┘        └────┘          (translate + fade)
+
+  stretch    │         ┌──┐       ┌────┐    a centre line grows
+            ─│─   →   ─┤  ├─  →   │    │    out to full WIDTH
+             │         └──┘       └────┘    (content squashed)
+
+  unroll     ──        ┌────┐      ┌────┐   a centre line grows
+                  →    └────┘  →   │    │   out to full HEIGHT
+                                   └────┘
+
+CLOSE ─────────────────────────────────────────────────────────────
+
+  fade      ┌────┐     ┌┈┈┈┈┐      ∙   ∙    opacity fades to 0
+            │    │  →  ┊    ┊  →             in place
+            └────┘     └┈┈┈┈┘
+
+  drop      ┌────┐          ┌┈┈┈┈┐          translates downward
+            │    │  ↓↓↓     ┊    ┊          while fading out
+            └────┘          └┈┈┈┈┘
+
+  spin      ┌────┐      ╱╲        ◇         rotate about the
+            │    │  →   ╲╱   →  (gone)      centre (GPU) + fade
+            └────┘
+
+  burn      ┌────┐     ┌▓▒░·┐     ·˙  ˙     noise dissolve, eaten
+            │    │  →  ▒·▓ ░  →   ˙ ·· ˙    by a glowing ember
+            └────┘     └░▒▓·┘     ·  ˙·     front
+
+  minimize  ┌────┐     ┌──┐         ∙       shrinks to a point,
+            │    │  →  │  │   →      ╲      slides off the bottom
+            └────┘     └──┘           ˎ
+
+MOVE ──────────────────────────────────────────────────────────────
+
+  wobble    ┌────┐     ┌────┐~     ~┌────┐  springy jelly — lags,
+            │    │ →→  │    │ ~~ →  │    │  jiggles, then settles
+            └────┘     └────┘~     ~└────┘
+
+EFFECTS ───────────────────────────────────────────────────────────
+
+  opacity    ┌──────┐     per-window alpha — the desktop
+             │░░░░░░│     behind shows through
+             └──────┘     (_NET_WM_WINDOW_OPACITY)
+
+  shadow    ▒┌──────┐     soft drop shadow on the
+            ▒│      │     left + bottom edges
+            ▒└──────┘
+             ▒▒▒▒▒▒▒▒
+
+  corners    ╭──────╮     rounded corners — the
+             │      │     shadow follows the curve
+             ╰──────╯
+
+  blur       ▓▒░▒▓░▒▓     dual-Kawase frost: the backdrop
+             ▒┌────┐▓     behind a translucent window
+             ░│░░░░│▒     is blurred
+             ▓└────┘░
+
+  dim        ┌────┐ ┌┈┈┈┈┐   focused window stays bright;
+             │    │ ┊░░░░┊   unfocused ones dim back
+             └────┘ └┈┈┈┈┘
+             active  inactive
+```
+
+> Every preset above is configurable — set it per-window or globally under `[anim]`, or compose the
+> underlying primitives by hand. See [`ricom.toml.example`](ricom.toml.example) for the full schema.
 
 ## Screenshots
 
@@ -23,7 +131,7 @@ video with a picture-in-picture corner overlay. Composited tear-free.*
 graph, and a `loadavg`-style 1m/5m/15m block (fps + GPU render time), drawn by the built-in SDF
 text engine over running video. The same figures are logged on `SIGUSR1`.*
 
-## Status
+## Features
 
 Working today:
 
@@ -130,9 +238,10 @@ DamageNotify, MapNotify, UnmapNotify, ConfigureNotify, ...  ->  mark dirty
 
 The stages map onto the crates: **xconn** speaks the X protocol (extension setup, become-CM,
 overlay + redirect, `NameWindowPixmap`, damage); **wm** keeps the bottom-to-top window stack
-in sync with structure events; **backend-gl** owns the EGL context and does texture-from-pixmap,
-the blit, and the vsync present; **region** is the pixman-style damage maths; and **session**
-ties them together in the event loop. (`region` drives both occlusion culling — each window is
+in sync with structure events and holds each window's animation state; **backend-gl** owns the EGL
+context and does texture-from-pixmap, the blit, and the vsync present; **config** parses the TOML
+(settings, rules, and the composable animation/effect specs) and resolves it live on `SIGHUP`;
+**region** is the pixman-style damage maths; and **session** ties them together in the event loop. (`region` drives both occlusion culling — each window is
 painted only where it isn't covered by an opaque window above — and `use-damage` partial repaint:
 only the region that changed since the back buffer was last drawn, tracked via EGL buffer age.)
 
@@ -151,10 +260,11 @@ A Cargo workspace whose root package is the `ricom` binary; the library crates l
 ricom             workspace root + binary (event-loop wiring, CLI)
 └─ crates/
    ├─ region      pure-Rust pixman-style rectangle regions (damage maths)
-   ├─ xconn       x11rb wrapper: connection, extensions, atoms, overlay/redirect, pixmap/damage
-   ├─ wm          window model + bottom-to-top stacking, updated from X events
-   ├─ backend-gl  EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/mesh/SDF-text shaders, present
-   └─ session     the compositor: owns X + wm + backend, runs the calloop event loop
+   ├─ xconn       x11rb wrapper: connection, extensions, atoms, overlay/redirect, pixmap/damage/focus
+   ├─ wm          window model + bottom-to-top stacking + per-window animation state (fade/scale/translate/spin/wobble)
+   ├─ backend-gl  EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/mesh/spin/SDF-text shaders, present
+   ├─ config      TOML: settings, window rules, and composable animation/effect specs (parse/resolve/diff for live reload)
+   └─ session     the compositor: owns X + wm + backend + config, runs the calloop event loop
 ```
 
 Dependencies are pure-Rust: [`x11rb`](https://github.com/psychon/x11rb) (XCB protocol),
