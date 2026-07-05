@@ -236,7 +236,7 @@ fn composite_windows_test(opacity: f32) -> Result<()> {
         let clear = [backend_gl::Rect::from_xywh(0, 0, x.root_width as i32, x.root_height as i32)];
         let start = std::time::Instant::now();
         while start.elapsed().as_secs() < 5 {
-            backend.present_windows(&draws, x.root_width as i32, x.root_height as i32, None, &clear)?;
+            backend.present_windows(&draws, x.root_width as i32, x.root_height as i32, None, None, &clear)?;
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         tracing::info!("composited {} windows for 5s", items.len());
@@ -303,7 +303,7 @@ fn composite_burn_test() -> Result<()> {
                     wd
                 })
                 .collect();
-            backend.present_windows(&draws, x.root_width as i32, x.root_height as i32, None, &clear)?;
+            backend.present_windows(&draws, x.root_width as i32, x.root_height as i32, None, None, &clear)?;
             if t >= 5.0 {
                 break;
             }

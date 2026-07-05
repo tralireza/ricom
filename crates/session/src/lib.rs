@@ -23,7 +23,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
-use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Quad, RenderParams, WindowDraw};
+use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, WindowDraw};
 use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
@@ -33,7 +33,8 @@ const MAX_BUFFER_AGE: usize = 4;
 const WOBBLE_PAD: f32 = 8.0;
 /// Default `spin` rotation in degrees when a `Spin` block sets none (a full turn).
 const SPIN_DEFAULT_DEG: f64 = 360.0;
-use config::{Axis, Category, Config, Edge, FocusSource, Primitive, RuleResult, WindowMatch};
+use config::{Axis, Category, Config, Edge, FocusSource, OsdEffect, Primitive, RuleResult, WindowMatch};
+use wm::anim::Fade;
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
 
@@ -365,6 +366,51 @@ struct WinIdentity {
     title: String,
 }
 
+/// OSD text colours by kind: content (light), ack (green), error (red), cool (blue).
+const OSD_FG: [f32; 3] = [0.92, 0.98, 1.0];
+const OSD_ACK: [f32; 3] = [0.62, 1.0, 0.72];
+const OSD_ERR: [f32; 3] = [1.0, 0.55, 0.5];
+const OSD_COOL: [f32; 3] = [0.50, 0.78, 1.0];
+
+/// Lifecycle phase of the on-screen toast.
+enum OsdPhase {
+    In,
+    Hold,
+    Out,
+}
+
+/// What the OSD did on a frame tick: nothing, a moving frame (repaint), or a
+/// static hold (keep the clock alive to count down, but don't repaint).
+#[derive(PartialEq)]
+enum OsdTick {
+    Idle,
+    Moving,
+    Holding,
+}
+
+/// On-screen notification state: a `presence` fade (0→1 in, 1→0 out) drives both
+/// the slide and the alpha; `hold_remaining` is the time left at full presence.
+struct OsdState {
+    text: String,
+    presence: Fade,
+    phase: OsdPhase,
+    hold_remaining: f64,
+    open: OsdEffect,
+    close: OsdEffect,
+    color: [f32; 3],
+}
+
+/// Map a config OSD effect to the backend's rendering effect.
+fn osd_effect(e: OsdEffect) -> backend_gl::OsdEffect {
+    match e {
+        OsdEffect::Fade => backend_gl::OsdEffect::Fade,
+        OsdEffect::Slide => backend_gl::OsdEffect::Slide,
+        OsdEffect::Pop => backend_gl::OsdEffect::Pop,
+        OsdEffect::Unroll => backend_gl::OsdEffect::Unroll,
+        OsdEffect::Stretch => backend_gl::OsdEffect::Stretch,
+    }
+}
+
 pub struct App {
     pub x: XConn,
     windows: WindowStack,
@@ -428,6 +474,8 @@ pub struct App {
     /// signals remain). Startup reclaim handles the Ctrl-C-left-stale case.
     #[cfg(unix)]
     socket_path: Option<PathBuf>,
+    /// Active on-screen notification toast, if any (driven by the frame clock).
+    osd: Option<OsdState>,
 }
 
 /// Build a `proto::WinInfo` snapshot of one tracked window for the control channel.
@@ -505,6 +553,7 @@ impl App {
             load: LoadTracker::new(Instant::now()),
             #[cfg(unix)]
             socket_path: None,
+            osd: None,
         })
     }
 
@@ -851,15 +900,23 @@ impl App {
     fn handle_command(&mut self, cmd: proto::Command) -> proto::Reply {
         use proto::{Command as C, Reply};
         match cmd {
-            C::Ping => Reply::Text(format!(
-                "ricom {} (control v{})",
-                env!("CARGO_PKG_VERSION"),
-                proto::PROTOCOL_VERSION
-            )),
+            C::Ping => {
+                if self.config.osd.enabled && self.config.osd.ack {
+                    self.show_osd(">> pong!".into(), self.config.osd.duration.min(1.2), OSD_ACK);
+                }
+                Reply::Text(format!(
+                    "ricom {} (control v{})",
+                    env!("CARGO_PKG_VERSION"),
+                    proto::PROTOCOL_VERSION
+                ))
+            }
             C::Reload => {
                 #[cfg(target_os = "linux")]
                 {
                     self.reload_config();
+                    if self.config.osd.enabled && self.config.osd.ack {
+                        self.show_osd(">> config reloaded.".into(), self.config.osd.duration.min(1.2), OSD_ACK);
+                    }
                     Reply::Ok
                 }
                 #[cfg(not(target_os = "linux"))]
@@ -870,21 +927,91 @@ impl App {
             C::FpsToggle => {
                 self.show_fps = !self.show_fps;
                 self.damage_full();
+                if self.config.osd.enabled && self.config.osd.ack {
+                    let s = if self.show_fps { "on" } else { "off" };
+                    self.show_osd(format!(">> FPS HUD {s}."), self.config.osd.duration.min(1.2), OSD_ACK);
+                }
                 Reply::Ok
             }
             C::List => {
-                let list = self
+                let list: Vec<proto::WinInfo> = self
                     .windows
                     .iter_bottom_to_top()
                     .map(|w| win_info(w, self.identities.get(&w.id)))
                     .collect();
+                // Also show the mapped windows on-screen (one per line).
+                if self.config.osd.enabled {
+                    let text = list
+                        .iter()
+                        .filter(|w| w.mapped)
+                        .map(|w| {
+                            let cls: String = w.class.chars().take(12).collect();
+                            format!("0x{:07x}  {cls:<12}  {}", w.id, w.title)
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    if !text.is_empty() {
+                        self.show_osd(text, self.config.osd.duration, OSD_FG);
+                    }
+                }
                 Reply::Windows(list)
             }
-            C::Inspect { win } => match self.windows.get(win) {
-                Some(w) => Reply::Window(win_info(w, self.identities.get(&win))),
-                None => Reply::Error(format!("no such window {win:#x}")),
-            },
+            C::Inspect { win } => {
+                let Some(w) = self.windows.get(win) else {
+                    if self.config.osd.enabled {
+                        self.show_osd(">> no such window.".into(), self.config.osd.duration.min(1.2), OSD_ERR);
+                    }
+                    return Reply::Error(format!("no such window {win:#x}"));
+                };
+                let info = win_info(w, self.identities.get(&win));
+                if self.config.osd.enabled {
+                    let cls: String = info.class.chars().take(16).collect();
+                    self.show_osd(
+                        format!("0x{:07x} {cls} {}x{}", info.id, info.width, info.height),
+                        self.config.osd.duration,
+                        OSD_FG,
+                    );
+                }
+                Reply::Window(info)
+            }
+            C::Notify { text, timeout_ms } => {
+                if !self.config.osd.enabled {
+                    return Reply::Error("osd disabled in config".into());
+                }
+                let hold = timeout_ms
+                    .map(|ms| ms as f64 / 1000.0)
+                    .unwrap_or(self.config.osd.duration);
+                self.show_osd(text, hold, OSD_FG);
+                Reply::Ok
+            }
+            C::Version => {
+                let banner = format!(
+                    "ricom {} (control v{})",
+                    env!("CARGO_PKG_VERSION"),
+                    proto::PROTOCOL_VERSION
+                );
+                if self.config.osd.enabled {
+                    self.show_osd(format!("_.* {banner} *._"), self.config.osd.duration, OSD_COOL);
+                }
+                Reply::Text(banner)
+            }
         }
+    }
+
+    /// Start (or replace) the OSD toast with `text` in `color`, held for `hold` seconds.
+    #[cfg(unix)]
+    fn show_osd(&mut self, text: String, hold: f64, color: [f32; 3]) {
+        self.osd = Some(OsdState {
+            text,
+            presence: Fade::animating(0.0, 1.0, self.config.osd.in_dur),
+            phase: OsdPhase::In,
+            hold_remaining: hold,
+            open: self.config.osd.open,
+            close: self.config.osd.close,
+            color,
+        });
+        self.ensure_frame_timer();
+        self.damage_full();
     }
 
     /// Effective opacity target for a window: an explicit `_NET_WM_WINDOW_OPACITY`
@@ -1127,6 +1254,7 @@ impl App {
             let dt = app.last_frame.map_or(0.0, |t| now.duration_since(t).as_secs_f64());
             app.last_frame = Some(now);
             let animating = app.windows.advance_anims(dt);
+            let osd = app.advance_osd(dt);
             if app.reap_finished_fadeouts() {
                 app.update_redirection(); // a reaped window can change the top window
             }
@@ -1196,15 +1324,20 @@ impl App {
             }
             let has_cur = !cur.is_empty();
             app.anim_damage = cur.into_iter().collect();
-            if has_cur || had_prev {
+            if has_cur || had_prev || osd == OsdTick::Moving {
                 app.dirty = true; // repaint happens once, in the run callback
             }
-            if animating {
+            let moving = animating || osd == OsdTick::Moving;
+            if moving {
                 // While compositing, eglSwapBuffers(vsync) paces us to the refresh
                 // rate, so an immediate re-arm self-throttles; when unredirected
                 // there is no swap to block on, so step to avoid busy-looping.
                 let step = if app.redirected { Duration::ZERO } else { Duration::from_millis(16) };
                 TimeoutAction::ToDuration(step)
+            } else if osd == OsdTick::Holding {
+                // OSD sitting at full presence: keep the clock alive to count the
+                // hold down, but don't repaint (the banner is static).
+                TimeoutAction::ToDuration(Duration::from_millis(50))
             } else {
                 app.frame_timer = None;
                 TimeoutAction::Drop
@@ -1213,6 +1346,41 @@ impl App {
         match token {
             Ok(tok) => self.frame_timer = Some(tok),
             Err(e) => tracing::error!("insert frame timer: {e}"),
+        }
+    }
+
+    /// Advance the OSD toast one frame; returns what it did this tick. `In`/`Out`
+    /// are moving (need a repaint); `Hold` just counts down (no repaint).
+    fn advance_osd(&mut self, dt: f64) -> OsdTick {
+        let out_dur = self.config.osd.out_dur;
+        let Some(osd) = self.osd.as_mut() else {
+            return OsdTick::Idle;
+        };
+        match osd.phase {
+            OsdPhase::In => {
+                if !osd.presence.advance(dt) {
+                    osd.phase = OsdPhase::Hold;
+                }
+                OsdTick::Moving
+            }
+            OsdPhase::Hold => {
+                osd.hold_remaining -= dt;
+                if osd.hold_remaining <= 0.0 {
+                    osd.presence.retarget(0.0, out_dur);
+                    osd.phase = OsdPhase::Out;
+                    OsdTick::Moving
+                } else {
+                    OsdTick::Holding
+                }
+            }
+            OsdPhase::Out => {
+                if osd.presence.advance(dt) {
+                    OsdTick::Moving
+                } else {
+                    self.osd = None;
+                    OsdTick::Idle
+                }
+            }
         }
     }
 
@@ -1438,7 +1606,8 @@ impl App {
         // Paint region: only the damaged area (buffer-age partial repaint), unless a
         // structural change / HUD / disabled damage / unusable buffer age forces full.
         let age = backend.buffer_age();
-        let own_full = self.force_full || !self.config.use_damage || self.show_fps;
+        let own_full =
+            self.force_full || !self.config.use_damage || self.show_fps || self.osd.is_some();
         let paint = if own_full || age <= 0 || age as usize > self.damage_history.len() + 1 {
             Region::from_rect(screen)
         } else {
@@ -1512,12 +1681,20 @@ impl App {
         } else {
             None
         };
+        let osd = self.osd.as_ref().map(|o| Osd {
+            text: o.text.clone(),
+            presence: o.presence.current() as f32,
+            scale: self.config.osd.scale,
+            effect: osd_effect(if matches!(o.phase, OsdPhase::Out) { o.close } else { o.open }),
+            color: o.color,
+        });
         tracing::debug!(paint_rects = paint.rects().len(), paint_px = paint.area(), age, "damage");
         if let Err(e) = backend.present_windows(
             &draws,
             sw,
             sh,
             hud.as_ref(),
+            osd.as_ref(),
             paint.rects(),
         ) {
             tracing::error!("composite failed: {e}");

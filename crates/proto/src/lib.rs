@@ -31,6 +31,11 @@ pub enum Command {
     List,
     /// Detailed info for one window.
     Inspect { win: WinId },
+    /// Show an on-screen notification (OSD toast). `timeout_ms` overrides the
+    /// configured default hold time.
+    Notify { text: String, timeout_ms: Option<u32> },
+    /// Show ricom's version as an OSD toast; the reply also carries the banner text.
+    Version,
 }
 
 /// The compositor's reply to a [`Command`].

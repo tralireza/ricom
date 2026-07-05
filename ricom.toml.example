@@ -90,6 +90,19 @@ focus = "ewmh"      # focus source: "ewmh" = root _NET_ACTIVE_WINDOW (needs an E
                     # "x11" = X FocusChange events (works with a non-EWMH WM / focus-follows-
                     # mouse / XSetInputFocus — but still needs something to move X focus)
 
+[osd]
+# On-screen toast shown by `ricomctl notify "text" [secs]` — a top-center banner
+# drawn by the SDF text engine. `open`/`close` pick how it appears/disappears.
+enabled = true      # false = ignore notify requests
+duration = 2.5      # default on-screen hold (seconds) when the command omits one
+scale = 1.0         # size multiplier on top of automatic screen-height scaling
+open  = "stretch"   # appear effect:  fade | slide | pop | unroll | stretch
+close = "stretch"   # disappear effect (same set). stretch = grow/squeeze width;
+                    # unroll = height; slide = drop from top; pop = zoom; fade = plain
+in_dur  = 0.06      # appear-animation length (seconds); lower = snappier
+out_dur = 0.08      # disappear-animation length (seconds)
+ack = true          # toast a short confirmation for ping / reload / fps toggle
+
 [burn]
 # The `burn` close effect's look. These knobs are live-tunable: edit and reload
 # with  kill -HUP $(pidof ricom)  then close a `burn` window to see the change.

@@ -29,10 +29,13 @@ COMMANDS:
     fps toggle        Toggle the FPS HUD
     list              List tracked windows
     inspect <win>     Show one window (id: decimal or 0x hex)
+    notify <text> [s] Show an on-screen message for [s] seconds (default: config)
+    version           Show ricom's version (on-screen toast + stdout)
 
 EXAMPLES:
     ricomctl list
     ricomctl inspect 0x1a00007
+    ricomctl notify \"hello ricom\" 3
     ricomctl reload
 ";
 
@@ -97,6 +100,7 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
         "ping" => Command::Ping,
         "reload" => Command::Reload,
         "list" => Command::List,
+        "version" => Command::Version,
         "fps" => match a.next() {
             Some("toggle") => Command::FpsToggle,
             Some(other) => {
@@ -107,6 +111,18 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
         "inspect" => {
             let w = a.next().ok_or_else(|| Exit::Usage("inspect needs a <win> id\n".into()))?;
             Command::Inspect { win: parse_win(w)? }
+        }
+        "notify" => {
+            let text = a.next().ok_or_else(|| Exit::Usage("notify needs <text>\n".into()))?;
+            let timeout_ms = match a.next() {
+                Some(s) => Some(
+                    s.parse::<f64>()
+                        .map(|secs| (secs * 1000.0) as u32)
+                        .map_err(|_| Exit::Usage(format!("invalid timeout '{s}' (seconds)\n")))?,
+                ),
+                None => None,
+            };
+            Command::Notify { text: text.to_string(), timeout_ms }
         }
         other => return Err(Exit::Usage(format!("unknown command '{other}'\n\n{HELP}"))),
     };

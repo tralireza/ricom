@@ -388,7 +388,7 @@ socket at `$XDG_RUNTIME_DIR/ricom-<display>.sock` (falling back to
         │  build Command → connect → write one JSON line → read one JSON reply
         ▼
   ┌───────────────────────────────────────────┐
-  │  $XDG_RUNTIME_DIR/ricom-<display>.sock     │
+  │  $XDG_RUNTIME_DIR/ricom-<display>.sock    │
   └───────────────────────────────────────────┘
         │  (one more calloop source, beside the X fd + signals)
         ▼
@@ -400,13 +400,14 @@ ricomctl list                 # tracked windows (id, class, opacity, geometry, t
 ricomctl inspect 0x1a00007    # one window's details
 ricomctl fps toggle           # flip the FPS HUD
 ricomctl reload               # re-read the config (same as SIGHUP)
+ricomctl notify "hello" 3     # on-screen toast for 3s (top-center; effect via [osd] open/close)
 ricomctl ping                 # liveness + version banner
 ricomctl --json list          # machine-readable reply
 ```
 
 `ricomctl` is a thin client (std + a shared `proto` crate — no GL); the wire format is
-newline-delimited JSON. More commands — live per-window opacity / dim / animation overrides —
-are planned.
+newline-delimited JSON. `notify` renders a native OSD banner via the SDF text engine (styled under
+`[osd]`). More commands — live per-window opacity / dim / animation overrides — are planned.
 
 ## Roadmap
 

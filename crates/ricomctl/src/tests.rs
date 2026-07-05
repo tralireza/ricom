@@ -17,6 +17,9 @@ fn commands_map() {
     assert_eq!(cmd(&["fps", "toggle"]), Command::FpsToggle);
     assert_eq!(cmd(&["inspect", "0x1a00007"]), Command::Inspect { win: 0x1a00007 });
     assert_eq!(cmd(&["inspect", "42"]), Command::Inspect { win: 42 });
+    assert_eq!(cmd(&["notify", "hi"]), Command::Notify { text: "hi".into(), timeout_ms: None });
+    assert_eq!(cmd(&["notify", "hi", "3"]), Command::Notify { text: "hi".into(), timeout_ms: Some(3000) });
+    assert_eq!(cmd(&["version"]), Command::Version);
 }
 
 #[test]
@@ -43,4 +46,5 @@ fn errors_are_usage() {
     assert!(matches!(parse(&["inspect", "zz"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["list", "extra"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["--socket"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["notify"]), Err(Exit::Usage(_))));
 }

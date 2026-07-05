@@ -64,7 +64,8 @@ void main() {
         float r = min(u_corner, min(hs.x, hs.y));
         vec2 p = abs(v_tex * u_rect.zw - hs);
         float d = length(max(p - (hs - r), vec2(0.0))) - r;
-        a *= 1.0 - smoothstep(-0.5, 0.5, d);   // ~1px antialiased edge
+        float aa = fwidth(d);
+        a *= 1.0 - smoothstep(-aa, aa, d);     // derivative-based AA (~2px), like the SDF text
     }
     frag = vec4(texture(u_tex, v_tex).rgb * a, a);
 }
@@ -293,7 +294,8 @@ void main() {
         float r = min(u_corner, min(hs.x, hs.y));
         vec2 p = abs(v_tex * u_rect.zw - hs);
         float d = length(max(p - (hs - r), vec2(0.0))) - r;
-        a *= 1.0 - smoothstep(-0.5, 0.5, d);
+        float aa = fwidth(d);
+        a *= 1.0 - smoothstep(-aa, aa, d);
     }
     frag = vec4(texture(u_tex, uv).rgb * a, a);
 }
@@ -458,6 +460,30 @@ pub struct Hud {
     pub load: Option<HudLoad>,
 }
 
+/// How the OSD toast appears/disappears — the caller picks the open or close
+/// effect per phase (see `session`). Mirrors `config::OsdEffect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OsdEffect {
+    Fade,
+    Slide,
+    Pop,
+    Unroll,
+    Stretch,
+}
+
+/// An on-screen notification banner ("toast"), drawn top-center over everything.
+/// `presence` (0..1) drives the current `effect`: 0 = fully hidden, 1 = fully shown.
+pub struct Osd {
+    pub text: String,
+    pub presence: f32,
+    /// Size multiplier on top of the automatic screen-height scaling.
+    pub scale: f32,
+    /// The effect for this phase (open while appearing, close while disappearing).
+    pub effect: OsdEffect,
+    /// Text colour (RGB); alpha comes from the fade.
+    pub color: [f32; 3],
+}
+
 /// Solid-colour fill with optional rounded corners (HUD panel; graph bars/budget
 /// line pass radius 0). Reuses `BLIT_VS` (position via `u_rect`/`u_screen`, and its
 /// `v_tex` for the corner mask); premultiplied output to match the compositor's blend.
@@ -476,7 +502,8 @@ void main() {
         float r = min(u_radius, min(hs.x, hs.y));
         vec2 p = abs(v_tex * u_rect.zw - hs);
         float d = length(max(p - (hs - r), vec2(0.0))) - r;
-        a *= 1.0 - smoothstep(-0.5, 0.5, d);   // ~1px antialiased edge
+        float aa = fwidth(d);
+        a *= 1.0 - smoothstep(-aa, aa, d);     // derivative-based AA (~2px), like the SDF text
     }
     frag = vec4(u_color.rgb * a, a);
 }
@@ -1174,6 +1201,87 @@ impl GlBackend {
         }
     }
 
+    /// Draw the OSD toast — a top-center rounded pill + text that slides down and
+    /// fades in as `presence` goes 0→1. Drawn over everything (after the HUD).
+    fn draw_osd(&self, osd: &Osd, sw: i32, sh: i32) {
+        let p = osd.presence.clamp(0.0, 1.0);
+        if p <= 0.0 {
+            return;
+        }
+        let sb = (sh as f32 / 1080.0).max(0.5) * osd.scale;
+        // Pop scales the whole banner uniformly; others draw at full size.
+        let zoom = if osd.effect == OsdEffect::Pop { 0.6 + 0.4 * p } else { 1.0 };
+        let s = sb * zoom;
+        let pad = 20.0 * s;
+        let text_px = 34.0 * s;
+        let radius = 14.0 * s;
+        // Per-line metrics (monospace): one glyph's advance + the cell height.
+        let (advance, line_h) = self.text.measure(text_px, "x");
+        // Grow the box up to the screen width (minus a margin); any line longer than
+        // that is cut with a trailing "..." so it never runs off-screen.
+        let hmargin = 40.0 * sb;
+        let max_text_w = (sw as f32 - 2.0 * hmargin - 2.0 * pad).max(advance);
+        let max_chars = (max_text_w / advance).floor() as usize;
+        let lines: Vec<String> = osd
+            .text
+            .split('\n')
+            .map(|l| {
+                if self.text.measure(text_px, l).0 <= max_text_w {
+                    l.to_string()
+                } else {
+                    let kept: String = l.chars().take(max_chars.saturating_sub(3)).collect();
+                    format!("{kept}...")
+                }
+            })
+            .collect();
+        let tw = lines
+            .iter()
+            .map(|l| self.text.measure(text_px, l).0)
+            .fold(0.0_f32, f32::max);
+        let panel_w = tw + 2.0 * pad;
+        let panel_h = lines.len() as f32 * line_h + 2.0 * pad;
+        let px = (sw as f32 - panel_w) * 0.5; // horizontally centred
+        let rest_y = 28.0 * sb; // inset from the top edge (independent of pop zoom)
+        // Slide drops in from above the top edge; every other effect rests in place.
+        let py = if osd.effect == OsdEffect::Slide {
+            -panel_h + (rest_y + panel_h) * p
+        } else {
+            rest_y
+        };
+        // Unroll/Stretch reveal the banner from a centre line via a scissor window
+        // (text isn't distorted); those stay crisp, the rest fade with `p`.
+        let reveal = matches!(osd.effect, OsdEffect::Unroll | OsdEffect::Stretch);
+        let alpha = if reveal { 1.0 } else { p };
+        if reveal {
+            let (rx, ry, rw, rh) = if osd.effect == OsdEffect::Unroll {
+                let h = panel_h * p;
+                (px, py + (panel_h - h) * 0.5, panel_w, h)
+            } else {
+                let w = panel_w * p;
+                (px + (panel_w - w) * 0.5, py, w, panel_h)
+            };
+            unsafe {
+                self.gl.enable(glow::SCISSOR_TEST);
+                // GL scissor origin is bottom-left, so flip Y from our top-left rect.
+                self.gl.scissor(rx as i32, sh - (ry + rh) as i32, rw as i32, rh as i32);
+            }
+        }
+        self.fill_rect(px, py, panel_w, panel_h, radius, [0.05, 0.05, 0.07, 0.88 * alpha], sw, sh);
+        // Left-shift by the square cell's side padding to centre horizontally; per
+        // line, nudge down by the cell's descender excess to centre vertically.
+        let tx = px + pad - (line_h - advance) * 0.5;
+        let c = osd.color;
+        for (i, line) in lines.iter().enumerate() {
+            let ly = py + pad + i as f32 * line_h + (line_h - text_px) * 0.5;
+            self.text.draw(&self.gl, sw, sh, tx, ly, text_px, [c[0], c[1], c[2], alpha], line);
+        }
+        if reveal {
+            unsafe {
+                self.gl.disable(glow::SCISSOR_TEST);
+            }
+        }
+    }
+
     /// Draw the FPS HUD — a translucent panel, an optional frame-time graph, and
     /// the numbers — anchored to `hud.corner`.
     fn draw_hud(&self, hud: &Hud, sw: i32, sh: i32) {
@@ -1329,6 +1437,7 @@ impl GlBackend {
         screen_w: i32,
         screen_h: i32,
         hud: Option<&Hud>,
+        osd: Option<&Osd>,
         clear: &[region::Rect],
     ) -> Result<()> {
         tracing::trace!(items = items.len(), screen_w, screen_h, "present");
@@ -1548,6 +1657,9 @@ impl GlBackend {
         }
         if let Some(hud) = hud {
             self.draw_hud(hud, screen_w, screen_h);
+        }
+        if let Some(osd) = osd {
+            self.draw_osd(osd, screen_w, screen_h);
         }
         unsafe {
             if timer.is_some() {
