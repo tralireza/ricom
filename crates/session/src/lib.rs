@@ -423,6 +423,51 @@ pub struct App {
     /// 1m/5m/15m compositor-load ring, fed one sample per composited frame; shown
     /// in the HUD and logged on `SIGUSR1`.
     load: LoadTracker,
+    /// Bound control-socket path, kept so we can unlink it on graceful exit.
+    /// `None` when the socket failed to bind (control channel simply unavailable;
+    /// signals remain). Startup reclaim handles the Ctrl-C-left-stale case.
+    #[cfg(unix)]
+    socket_path: Option<PathBuf>,
+}
+
+/// Build a `proto::WinInfo` snapshot of one tracked window for the control channel.
+#[cfg(unix)]
+fn win_info(w: &Win, id: Option<&WinIdentity>) -> proto::WinInfo {
+    proto::WinInfo {
+        id: w.id,
+        class: id.map(|i| i.class.clone()).unwrap_or_default(),
+        instance: id.map(|i| i.instance.clone()).unwrap_or_default(),
+        window_type: id.map(|i| i.window_type.clone()).unwrap_or_default(),
+        title: id.map(|i| i.title.clone()).unwrap_or_default(),
+        mapped: w.is_mapped(),
+        x: w.x as i32,
+        y: w.y as i32,
+        width: w.width as u32,
+        height: w.height as u32,
+        opacity: w.fade.current() * w.dim.current(),
+        closing: w.closing,
+    }
+}
+
+/// Read one `\n`-terminated line into `buf` (newline excluded), erroring past
+/// `cap` bytes so a client can't make us buffer unboundedly.
+#[cfg(unix)]
+fn read_line_capped<R: std::io::BufRead>(r: &mut R, buf: &mut Vec<u8>, cap: usize) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    let mut byte = [0u8; 1];
+    loop {
+        if r.read(&mut byte)? == 0 {
+            break; // EOF before newline — take what we have
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        buf.push(byte[0]);
+        if buf.len() > cap {
+            return Err(Error::new(ErrorKind::InvalidData, "control request too large"));
+        }
+    }
+    Ok(())
 }
 
 impl App {
@@ -458,6 +503,8 @@ impl App {
             refresh_hz,
             fps_meter: FpsMeter::new(),
             load: LoadTracker::new(Instant::now()),
+            #[cfg(unix)]
+            socket_path: None,
         })
     }
 
@@ -694,6 +741,57 @@ impl App {
                 .map_err(|e| anyhow::anyhow!("insert signal source: {e}"))?;
         }
 
+        // Control channel: a Unix-domain socket `ricomctl` connects to — one more
+        // calloop source beside the X fd + signals. Best-effort: a bind failure
+        // just disables the control channel (signals still work).
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            use std::os::unix::net::{UnixListener, UnixStream};
+            let path = proto::socket_path();
+            // Reclaim a stale socket from a previous run: if nothing answers a
+            // connect, it's dead — remove it so we can rebind. (Ctrl-C exit skips
+            // the on-exit unlink, so this is the load-bearing cleanup.)
+            if path.exists() && UnixStream::connect(&path).is_err() {
+                let _ = std::fs::remove_file(&path);
+            }
+            match UnixListener::bind(&path) {
+                Ok(listener) => {
+                    let _ = listener.set_nonblocking(true);
+                    // Lock down the /tmp fallback (XDG_RUNTIME_DIR is already 0700).
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+                    let src = Generic::new(listener, Interest::READ, Mode::Level);
+                    match handle.insert_source(src, |_r, listener, app: &mut App| {
+                        // Level-triggered: accept everything ready, then WouldBlock.
+                        loop {
+                            match listener.accept() {
+                                Ok((stream, _addr)) => app.serve_control_conn(stream),
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                                Err(e) => {
+                                    tracing::debug!("control accept: {e}");
+                                    break;
+                                }
+                            }
+                        }
+                        Ok(PostAction::Continue)
+                    }) {
+                        Ok(_) => {
+                            self.socket_path = Some(path.clone());
+                            tracing::info!(socket = %path.display(), "control channel listening");
+                        }
+                        Err(e) => {
+                            tracing::warn!(socket = %path.display(), "control insert failed: {e}");
+                            let _ = std::fs::remove_file(&path);
+                        }
+                    }
+                }
+                Err(e) => tracing::warn!(
+                    socket = %path.display(),
+                    "control socket bind failed: {e} — control channel disabled"
+                ),
+            }
+        }
+
         // Prime the pump: setup already flushed, which may have buffered events
         // inside x11rb that will never re-trigger the fd watch. Drain them (and
         // repaint) before blocking so we don't start out stalled.
@@ -713,7 +811,80 @@ impl App {
                 }
             })
             .context("event loop")?;
+
+        // Graceful-exit cleanup (best-effort; Ctrl-C skips this — the startup
+        // reclaim above is the load-bearing path).
+        #[cfg(unix)]
+        if let Some(p) = self.socket_path.take() {
+            let _ = std::fs::remove_file(&p);
+        }
         Ok(())
+    }
+
+    /// Serve one control-channel connection: read a single command line, dispatch
+    /// it, write the reply, close. A short read/write timeout + a byte cap keep a
+    /// slow or malformed *local* client (the only kind — the socket is user-private)
+    /// from stalling the compositor for more than the timeout.
+    #[cfg(unix)]
+    fn serve_control_conn(&mut self, stream: std::os::unix::net::UnixStream) {
+        use std::io::{BufReader, Write};
+        let timeout = Duration::from_millis(250);
+        let _ = stream.set_nonblocking(false); // accepted sockets are blocking; be explicit
+        let _ = stream.set_read_timeout(Some(timeout));
+        let _ = stream.set_write_timeout(Some(timeout));
+        let mut reader = BufReader::new(stream);
+        let mut line = Vec::with_capacity(256);
+        let reply = match read_line_capped(&mut reader, &mut line, 64 * 1024) {
+            Ok(()) => match proto::decode::<proto::Command>(&line) {
+                Ok(cmd) => self.handle_command(cmd),
+                Err(e) => proto::Reply::Error(format!("bad request: {e}")),
+            },
+            Err(e) => proto::Reply::Error(format!("read: {e}")),
+        };
+        let mut stream = reader.into_inner();
+        let _ = stream.write_all(&proto::encode(&reply));
+        let _ = stream.flush();
+    }
+
+    /// Dispatch one control command against live compositor state → the reply.
+    #[cfg(unix)]
+    fn handle_command(&mut self, cmd: proto::Command) -> proto::Reply {
+        use proto::{Command as C, Reply};
+        match cmd {
+            C::Ping => Reply::Text(format!(
+                "ricom {} (control v{})",
+                env!("CARGO_PKG_VERSION"),
+                proto::PROTOCOL_VERSION
+            )),
+            C::Reload => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.reload_config();
+                    Reply::Ok
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    Reply::Error("reload is only supported on Linux".into())
+                }
+            }
+            C::FpsToggle => {
+                self.show_fps = !self.show_fps;
+                self.damage_full();
+                Reply::Ok
+            }
+            C::List => {
+                let list = self
+                    .windows
+                    .iter_bottom_to_top()
+                    .map(|w| win_info(w, self.identities.get(&w.id)))
+                    .collect();
+                Reply::Windows(list)
+            }
+            C::Inspect { win } => match self.windows.get(win) {
+                Some(w) => Reply::Window(win_info(w, self.identities.get(&win))),
+                None => Reply::Error(format!("no such window {win:#x}")),
+            },
+        }
     }
 
     /// Effective opacity target for a window: an explicit `_NET_WM_WINDOW_OPACITY`

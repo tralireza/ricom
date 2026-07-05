@@ -184,7 +184,7 @@ Working today:
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** the xrender/glx backends + D-Bus IPC.
+**Not yet implemented:** the xrender/glx backends.
 See [Roadmap](#roadmap).
 
 ## How it works
@@ -375,6 +375,39 @@ close = "slide"
 See [`ricom.toml.example`](ricom.toml.example) for the full schema, every preset, and
 explicit block composition.
 
+## Control
+
+Beyond signals (`SIGHUP` reload, `SIGUSR1` load-log) and the FPS hotkey, ricom exposes a
+**Unix-domain-socket control channel** that the `ricomctl` client talks to — targeted, two-way
+commands signals can't express. It's always-on and zero-config: ricom binds a per-`$DISPLAY`
+socket at `$XDG_RUNTIME_DIR/ricom-<display>.sock` (falling back to
+`/tmp/ricom-<uid>-<display>.sock`), and a bind failure is non-fatal — signals still work.
+
+```
+  $ ricomctl list
+        │  build Command → connect → write one JSON line → read one JSON reply
+        ▼
+  ┌───────────────────────────────────────────┐
+  │  $XDG_RUNTIME_DIR/ricom-<display>.sock     │
+  └───────────────────────────────────────────┘
+        │  (one more calloop source, beside the X fd + signals)
+        ▼
+  ricom (session):  accept → decode Command → dispatch(&mut App) → encode Reply → close
+```
+
+```sh
+ricomctl list                 # tracked windows (id, class, opacity, geometry, title)
+ricomctl inspect 0x1a00007    # one window's details
+ricomctl fps toggle           # flip the FPS HUD
+ricomctl reload               # re-read the config (same as SIGHUP)
+ricomctl ping                 # liveness + version banner
+ricomctl --json list          # machine-readable reply
+```
+
+`ricomctl` is a thin client (std + a shared `proto` crate — no GL); the wire format is
+newline-delimited JSON. More commands — live per-window opacity / dim / animation overrides —
+are planned.
+
 ## Roadmap
 
 Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, background blur
@@ -387,11 +420,13 @@ layered primitives (opacity / scale / translate / wobble / burn) selected per tr
 close / move) by a named preset or explicit block spec, globally or per-rule: pop, slide/drop,
 wobbly-windows, burn dissolve, directional stretch/unroll, and a GPU spin (rotate-about-centre);
 and **inactive-window dimming** (unfocused windows dim; focus from `_NET_ACTIVE_WINDOW` or X
-FocusChange, per-rule exemptible).
+FocusChange, per-rule exemptible); and a **Unix-socket control channel** (`ricomctl`) —
+live `list` / `inspect` / `fps toggle` / `reload` over a per-`$DISPLAY` socket.
 
 Next:
 
-1. Alternative render backends (xrender / glx) and D-Bus IPC.
+1. Alternative render backends (xrender / glx); richer `ricomctl` commands (live per-window
+   opacity / dim / animation overrides).
 
 ## License
 

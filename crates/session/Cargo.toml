@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.103"
 calloop = { version = "0.14.4", features = ["signals"] }
 config = { version = "0.1.0", path = "../config" }
+proto = { version = "0.1.0", path = "../proto" }
 region = { version = "0.1.0", path = "../region" }
 tracing = "0.1.44"
 x11rb = { version = "0.13.2", features = ["all-extensions"] }
