@@ -285,18 +285,19 @@ impl WindowStack {
     /// `duration`, on `axis` (`Both` = uniform pop; `X`/`Y` = directional stretch,
     /// e.g. `from = 0.0, axis = X` for a centre line growing to full width). Pairs
     /// with [`fade_in`](Self::fade_in). No-op if untracked.
-    pub fn scale_in(&mut self, id: WindowId, from: f64, duration: f64, axis: Axis) {
+    pub fn scale_in(&mut self, id: WindowId, from: f64, duration: f64, axis: Axis, easing: Easing) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.scale = Fade::animating(from, 1.0, duration);
+            w.scale = Fade::animating_eased(from, 1.0, duration, easing);
             w.scale_axis = axis;
         }
     }
 
-    /// Ease a window's scale toward `to` from its current value on `axis` (e.g.
-    /// down to 0.0 on `X` to collapse to a line on close). No-op if untracked.
-    pub fn retarget_scale(&mut self, id: WindowId, to: f64, duration: f64, axis: Axis) {
+    /// Ease a window's scale toward `to` from its current value on `axis` with
+    /// `easing` (e.g. down to 0.0 on `X` to collapse to a line on close). No-op if
+    /// untracked.
+    pub fn retarget_scale(&mut self, id: WindowId, to: f64, duration: f64, axis: Axis, easing: Easing) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.scale.retarget(to, duration);
+            w.scale = Fade::animating_eased(w.scale.current(), to, duration, easing);
             w.scale_axis = axis;
         }
     }
@@ -587,7 +588,7 @@ mod tests {
         s.set_mapped(1, false); // unmapped (closing out)
         // Stretch-close: mark closing without a fade, collapse scale on X toward 0.
         assert!(s.begin_collapse(1, true));
-        s.retarget_scale(1, 0.0, 0.2, anim::Axis::X);
+        s.retarget_scale(1, 0.0, 0.2, anim::Axis::X, anim::Easing::EaseOut);
         assert!(s.get(1).unwrap().closing);
         assert_eq!(s.get(1).unwrap().fade.current(), 1.0); // opacity untouched
         assert!(s.advance_anims(0.1)); // scale still collapsing

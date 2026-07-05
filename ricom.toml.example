@@ -38,6 +38,7 @@ default_opacity = 1.0
 #   wobble   spring-mesh jelly                           (default `move`)
 #   stretch  a centre line grows to full WIDTH  (scale x; opaque, shows content)
 #   unroll   a centre line grows to full HEIGHT (scale y; opaque, shows content)
+#   minimize shrink to a point + slide off the bottom edge (simplified genie)
 [anim]
 open  = "pop"           # window mapped
 close = "fade"          # window unmapped/destroyed

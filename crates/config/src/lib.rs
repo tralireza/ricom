@@ -322,8 +322,9 @@ pub enum AnimSel {
 }
 
 /// Known preset names, for diagnostics + docs.
-pub const PRESETS: &[&str] =
-    &["none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble", "stretch", "unroll"];
+pub const PRESETS: &[&str] = &[
+    "none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble", "stretch", "unroll", "minimize",
+];
 
 /// Expand a preset name into its block list. `None` if the name is unknown.
 fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
@@ -337,8 +338,9 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
             vec![opacity, Translate { dx: 0.0, dy: 0.0, edge: Some(Edge::Left), easing: Easing::EaseOut }]
         }
         "drop" => {
-            // Fall downward (+y) with an accelerating ease-in as it fades.
-            vec![opacity, Translate { dx: 0.0, dy: 120.0, edge: None, easing: Easing::EaseIn }]
+            // Fall downward (+y). ease-out front-loads the travel so the fall reads
+            // as motion before the fade finishes (ease-in read mostly as a fade).
+            vec![opacity, Translate { dx: 0.0, dy: 140.0, edge: None, easing: Easing::EaseOut }]
         }
         "boing" => vec![Wobble { spring: None, friction: None }],
         "burn" => vec![Burn],
@@ -347,6 +349,13 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
         // content shown squashed throughout. Opaque (no opacity block) by design.
         "stretch" => vec![Scale { from: Some(0.0), axis: Axis::X, easing: Easing::EaseOut }],
         "unroll" => vec![Scale { from: Some(0.0), axis: Axis::Y, easing: Easing::EaseOut }],
+        // Minimize: shrink to a point (both axes → 0) while sliding off the bottom
+        // edge — a simplified "genie" (no curved warp; that would need a mesh
+        // primitive). Stays opaque; the scale-to-0 collapse drives completion.
+        "minimize" => vec![
+            Scale { from: Some(0.0), axis: Axis::Both, easing: Easing::EaseIn },
+            Translate { dx: 0.0, dy: 0.0, edge: Some(Edge::Bottom), easing: Easing::EaseIn },
+        ],
         _ => return None,
     })
 }
@@ -916,6 +925,18 @@ opacity = 0.9
         assert_eq!(
             expand_sel(&AnimSel::Preset("unroll".into())).blocks,
             [Primitive::Scale { from: Some(0.0), axis: Axis::Y, easing: Easing::EaseOut }]
+        );
+    }
+
+    #[test]
+    fn minimize_shrinks_and_slides_off_bottom() {
+        let b = expand_sel(&AnimSel::Preset("minimize".into())).blocks;
+        assert_eq!(
+            b,
+            [
+                Primitive::Scale { from: Some(0.0), axis: Axis::Both, easing: Easing::EaseIn },
+                Primitive::Translate { dx: 0.0, dy: 0.0, edge: Some(Edge::Bottom), easing: Easing::EaseIn },
+            ]
         );
     }
 

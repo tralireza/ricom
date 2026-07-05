@@ -50,7 +50,7 @@ Working today:
   **background blur** — dual-Kawase frost behind translucent windows.
 - **Transition animations** — a composable **animation-block** system: each transition (open / close
   / move) plays a set of layered primitives — **opacity, scale, translate, wobble, burn** — chosen by a
-  named preset (`fade`, `pop`, `slide`, `drop`, `boing`, `burn`, `wobble`, `stretch`, `unroll`) or an
+  named preset (`fade`, `pop`, `slide`, `drop`, `boing`, `burn`, `wobble`, `stretch`, `unroll`, `minimize`) or an
   explicit block spec, set globally (`[anim]`) or per-window (`[[rule]]`). Includes the scale-about-centre
   **open/close "pop"**, **wobbly-windows** (a spring-mesh move/resize jelly on a dedicated GL mesh path),
   **slide/drop** (an eased translate), and **directional stretch/unroll** (a centre line growing to full
@@ -218,7 +218,7 @@ passes = 3                      # dual-Kawase iterations (wider/softer)
 radius = 4.0                    # sample offset per pass (px)
 
 [anim]                          # per-transition animations built from composable blocks
-open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|wobble|stretch|unroll
+open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|wobble|stretch|unroll|minimize
 close = "fade"                  # …or compose blocks explicitly (see ricom.toml.example)
 move  = "wobble"
 duration = 0.2                  # default seconds (opacity / scale / translate)

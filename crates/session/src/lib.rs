@@ -755,9 +755,9 @@ impl App {
                 }
                 for block in &spec.blocks {
                     match block {
-                        Primitive::Scale { from, axis, .. } => {
+                        Primitive::Scale { from, axis, easing } => {
                             let from = from.unwrap_or(self.config.anim.scale_from);
-                            self.windows.scale_in(id, from, dur, map_axis(*axis));
+                            self.windows.scale_in(id, from, dur, map_axis(*axis), map_easing(*easing));
                         }
                         Primitive::Translate { dx, dy, edge, easing } => {
                             let off = resolve_offset(*dx, *dy, *edge, self.outer_rect_of(id), self.screen());
@@ -793,9 +793,9 @@ impl App {
                 let mut started = false;
                 for block in &spec.blocks {
                     match block {
-                        Primitive::Scale { from, axis, .. } => {
+                        Primitive::Scale { from, axis, easing } => {
                             let to = from.unwrap_or(self.config.anim.scale_from);
-                            self.windows.retarget_scale(id, to, dur, map_axis(*axis));
+                            self.windows.retarget_scale(id, to, dur, map_axis(*axis), map_easing(*easing));
                         }
                         Primitive::Translate { dx, dy, edge, easing } => {
                             let off = resolve_offset(*dx, *dy, *edge, self.outer_rect_of(id), self.screen());
