@@ -44,6 +44,7 @@ pub struct Config {
     pub anim: Anim,
     pub shadow: Shadow,
     pub blur: Blur,
+    pub dim: Dim,
     pub fps: Fps,
     pub burn: Burn,
     /// Per-window override rules, applied in order (last match wins per field).
@@ -79,6 +80,9 @@ pub struct Rule {
     /// Keep matching windows composited on top of all others (always-on-top),
     /// regardless of the X stacking order. `None`/`false` = normal stacking.
     pub above: Option<bool>,
+    /// Override inactive-dimming for matching windows: `false` = never dim (stay
+    /// bright even when unfocused), `true` = always dim. `None` = follow `[dim]`.
+    pub dim: Option<bool>,
     /// Override the open animation for matching windows (preset name or an
     /// explicit block spec). `None` = use the global `[anim] open`.
     pub open: Option<AnimSel>,
@@ -110,6 +114,7 @@ pub struct RuleResult {
     pub corner_radius: Option<f32>,
     pub unredir: Option<bool>,
     pub above: Option<bool>,
+    pub dim: Option<bool>,
     /// Per-window animation overrides, already expanded from preset/spec.
     pub open: Option<AnimSpec>,
     pub close: Option<AnimSpec>,
@@ -137,6 +142,20 @@ pub struct Blur {
     pub passes: i32,
     /// Sample offset per pass (px); scales the blur reach.
     pub radius: f32,
+}
+
+/// Inactive-window dimming: unfocused windows fade toward transparent so the
+/// focused one stands out. Needs an EWMH window manager that sets
+/// `_NET_ACTIVE_WINDOW` (ricom is a compositor, not a WM); with none, it's inert.
+/// A per-`[[rule]]` `dim = false` keeps an app bright (e.g. a video player).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Dim {
+    /// Off by default — opt in.
+    pub enabled: bool,
+    /// How much to dim an unfocused window: `0.0` = none, `1.0` = fully
+    /// transparent. An unfocused window renders at `1 - strength` of its opacity.
+    pub strength: f64,
 }
 
 /// On-demand FPS / frame-time HUD, toggled by a global hotkey. Drawn by the
@@ -438,6 +457,7 @@ impl Default for Config {
             anim: Anim::default(),
             shadow: Shadow::default(),
             blur: Blur::default(),
+            dim: Dim::default(),
             fps: Fps::default(),
             burn: Burn::default(),
             rules: Vec::new(),
@@ -475,6 +495,12 @@ impl Default for Anim {
 impl Default for Blur {
     fn default() -> Self {
         Blur { enabled: false, passes: 3, radius: 4.0 }
+    }
+}
+
+impl Default for Dim {
+    fn default() -> Self {
+        Dim { enabled: false, strength: 0.3 }
     }
 }
 
@@ -574,6 +600,8 @@ impl Config {
         chg!("blur.enabled", prev.blur.enabled, self.blur.enabled);
         chg!("blur.passes", prev.blur.passes, self.blur.passes);
         chg!("blur.radius", prev.blur.radius, self.blur.radius);
+        chg!("dim.enabled", prev.dim.enabled, self.dim.enabled);
+        chg!("dim.strength", prev.dim.strength, self.dim.strength);
         chg!("fps.enabled", prev.fps.enabled, self.fps.enabled);
         chg!("fps.hotkey", prev.fps.hotkey, self.fps.hotkey);
         chg!("fps.corner", prev.fps.corner, self.fps.corner);
@@ -616,6 +644,7 @@ impl Config {
         if w.fullscreen {
             r.opacity = Some(1.0);
             r.blur = Some(false);
+            r.dim = Some(false); // don't dim a fullscreen window (video/games)
         }
         for rule in &self.rules {
             if rule.matcher.matches(w) {
@@ -625,6 +654,7 @@ impl Config {
                 r.corner_radius = rule.corner_radius.or(r.corner_radius);
                 r.unredir = rule.unredir.or(r.unredir);
                 r.above = rule.above.or(r.above);
+                r.dim = rule.dim.or(r.dim);
                 // Anim overrides: last matching rule that specifies one wins.
                 if let Some(s) = &rule.open {
                     r.open = Some(expand_sel(s));
@@ -722,6 +752,7 @@ mod tests {
             (true, 12.0, 0.45, 24)
         );
         assert_eq!((c.blur.enabled, c.blur.passes, c.blur.radius), (false, 3, 4.0));
+        assert_eq!((c.dim.enabled, c.dim.strength), (false, 0.3));
         assert!(!c.fps.enabled);
         assert_eq!(c.fps.hotkey, "Super+Shift+F");
         assert_eq!(c.fps.corner, "top-right");
@@ -891,6 +922,27 @@ opacity = 0.9
         // fullscreen mpv: the later mpv rule wins
         let fs_mpv = WindowMatch { class: "mpv".into(), fullscreen: true, ..Default::default() };
         assert_eq!(c.resolve(&fs_mpv).opacity, Some(0.9));
+    }
+
+    #[test]
+    fn dim_rule_override_and_fullscreen() {
+        let t = r#"
+[dim]
+enabled = true
+strength = 0.5
+
+[[rule]]
+match = { class = "mpv" }
+dim = false
+"#;
+        let c: Config = toml::from_str(t).unwrap();
+        assert_eq!((c.dim.enabled, c.dim.strength), (true, 0.5));
+        // mpv rule: never dim
+        assert_eq!(c.resolve(&WindowMatch { class: "mpv".into(), ..Default::default() }).dim, Some(false));
+        // other window: no per-window override → follows global [dim]
+        assert_eq!(c.resolve(&WindowMatch { class: "x".into(), ..Default::default() }).dim, None);
+        // fullscreen: built-in never-dim
+        assert_eq!(c.resolve(&WindowMatch { fullscreen: true, ..Default::default() }).dim, Some(false));
     }
 
     #[test]

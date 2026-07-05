@@ -81,6 +81,13 @@ enabled = false     # frost the backdrop behind translucent windows (extra GPU c
 passes = 3          # dual-Kawase iterations (more = wider/softer)
 radius = 4.0        # sample offset per pass (px)
 
+[dim]
+# Dim unfocused windows so the focused one stands out. NEEDS an EWMH window
+# manager that sets _NET_ACTIVE_WINDOW (ricom is a compositor, not a WM); with
+# none, dimming is inert. Exempt an app with a per-[[rule]]  dim = false.
+enabled = false     # opt in
+strength = 0.3      # how much to dim an unfocused window: 0.0 = none, 1.0 = fully transparent
+
 [burn]
 # The `burn` close effect's look. These knobs are live-tunable: edit and reload
 # with  kill -HUP $(pidof ricom)  then close a `burn` window to see the change.

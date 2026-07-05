@@ -44,6 +44,10 @@ pub struct Win {
     /// Animated whole-window opacity. `fade.current()` is what to display now;
     /// `fade.target()` is the goal (from `_NET_WM_WINDOW_OPACITY`, default 1.0).
     pub fade: Fade,
+    /// Animated inactive-dim factor (`1.0` = full brightness; `<1.0` when the
+    /// window is unfocused). Multiplied with [`fade`](Self::fade) at composite —
+    /// a persistent focus state, independent of the open/close opacity fade.
+    pub dim: Fade,
     /// Animated scale-about-centre for the open/close "pop". `scale.current()` is
     /// the factor to render at now (1.0 = full size); settled at 1.0 when idle.
     pub scale: Fade,
@@ -93,6 +97,7 @@ impl Win {
             override_redirect,
             map_state: if mapped { MapState::Mapped } else { MapState::Unmapped },
             fade: Fade::settled(1.0),
+            dim: Fade::settled(1.0),
             scale: Fade::settled(1.0),
             scale_axis: Axis::Both,
             translate: Offset::settled(),
@@ -285,6 +290,14 @@ impl WindowStack {
         }
     }
 
+    /// Animate a window's inactive-dim factor toward `target` (`1.0` = full bright,
+    /// `<1.0` = dimmed) over `duration` — called on focus changes. No-op if untracked.
+    pub fn set_dim(&mut self, id: WindowId, target: f64, duration: f64) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.dim.retarget(target, duration);
+        }
+    }
+
     /// Start the open scale: scale-about-centre from `from` up to 1.0 over
     /// `duration`, on `axis` (`Both` = uniform pop; `X`/`Y` = directional stretch,
     /// e.g. `from = 0.0, axis = X` for a centre line growing to full width). Pairs
@@ -384,13 +397,16 @@ impl WindowStack {
         }
     }
 
-    /// Advance every window's animations (opacity fade, scale pop, translate, spin,
-    /// and wobble) by `dt` seconds; settled wobbles are dropped. Returns whether any
-    /// window is still animating (i.e. the frame clock should keep running).
+    /// Advance every window's animations (opacity fade, inactive dim, scale pop,
+    /// translate, spin, and wobble) by `dt` seconds; settled wobbles are dropped.
+    /// Returns whether any window is still animating (frame clock keeps running).
     pub fn advance_anims(&mut self, dt: f64) -> bool {
         let mut animating = false;
         for w in self.wins.values_mut() {
             if w.fade.advance(dt) {
+                animating = true;
+            }
+            if w.dim.advance(dt) {
                 animating = true;
             }
             if w.scale.advance(dt) {
@@ -636,6 +652,17 @@ mod tests {
         assert!((s.get(1).unwrap().spin.current() - 1.0).abs() < 1e-2); // ~halfway (linear)
         assert!(!s.advance_anims(0.2)); // settles upright at 0
         assert_eq!(s.get(1).unwrap().spin.current(), 0.0);
+    }
+
+    #[test]
+    fn set_dim_eases_to_target() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        assert_eq!(s.get(1).unwrap().dim.current(), 1.0); // full bright at rest
+        s.set_dim(1, 0.7, 0.2); // unfocused → dim toward 0.7
+        assert!(s.advance_anims(0.1)); // dimming
+        assert!(!s.advance_anims(0.2)); // settled
+        assert!((s.get(1).unwrap().dim.current() - 0.7).abs() < 1e-6);
     }
 
     #[test]

@@ -373,6 +373,9 @@ pub struct App {
     gfx: HashMap<WindowId, WinGfx>,
     /// Cached per-window identity (WM_CLASS / type / title) for rule matching.
     identities: HashMap<WindowId, WinIdentity>,
+    /// The EWMH active (focused) window (`_NET_ACTIVE_WINDOW`), for inactive-dim.
+    /// `None` if no EWMH WM sets it → dimming stays inert.
+    active_window: Option<WindowId>,
     dirty: bool,
     /// Damage accumulated for the next composite (screen coords) — the paint region
     /// unless a structural change forces a full repaint.
@@ -436,6 +439,7 @@ impl App {
             backend: None,
             gfx: HashMap::new(),
             identities: HashMap::new(),
+            active_window: None,
             dirty: true,
             frame_damage: Region::new(),
             force_full: true,
@@ -543,6 +547,7 @@ impl App {
                 let corner_changed = cfg.fps.corner != self.config.fps.corner;
                 let opacity_changed =
                     cfg.default_opacity != self.config.default_opacity || cfg.rules != self.config.rules;
+                let dim_changed = cfg.dim != self.config.dim || cfg.rules != self.config.rules;
                 self.config = cfg;
                 log_config_warnings(&self.config);
                 if let Some(b) = self.backend.as_mut() {
@@ -573,6 +578,10 @@ impl App {
                     if !ids.is_empty() {
                         self.ensure_frame_timer();
                     }
+                }
+                // Changed [dim]/rules: re-apply inactive-dim to every window.
+                if dim_changed {
+                    self.apply_dim(true);
                 }
                 // unredir may have toggled; re-evaluate, then repaint.
                 self.update_redirection();
@@ -605,7 +614,7 @@ impl App {
     pub fn run(&mut self) -> Result<()> {
         log_config_warnings(&self.config);
         self.x.become_cm()?;
-        self.x.select_root_substructure()?;
+        self.x.select_root_events()?;
         self.x.select_screen_change()?;
         self.grab_fps_hotkey();
 
@@ -635,6 +644,10 @@ impl App {
         }
         // A window may already be fullscreen at startup — pick the redirect state now.
         self.update_redirection();
+        // Seed the active window + apply the initial inactive-dim instantly (no-op
+        // unless [dim] is enabled and an EWMH WM sets _NET_ACTIVE_WINDOW).
+        self.active_window = self.x.get_active_window().ok().flatten();
+        self.apply_dim(false);
         self.x.flush()?;
         self.composite();
         tracing::info!(
@@ -737,6 +750,41 @@ impl App {
     /// Fold the config rules for a window into the net per-window overrides.
     fn resolve_rules(&self, win: WindowId) -> RuleResult {
         self.config.resolve(&self.window_match(win))
+    }
+
+    /// The inactive-dim brightness target for a window: `1.0` (full) if it's the
+    /// active window, dim is disabled, or a rule exempts it (`dim = false`); else
+    /// `1 - [dim] strength`.
+    fn dim_target(&self, id: WindowId) -> f64 {
+        // Inert when dim is off, or when no active window is known (no EWMH WM) —
+        // don't dim *everything* just because we can't tell which is focused.
+        if !self.config.dim.enabled || self.active_window.is_none() || Some(id) == self.active_window {
+            return 1.0;
+        }
+        if self.resolve_rules(id).dim == Some(false) {
+            return 1.0;
+        }
+        (1.0 - self.config.dim.strength).clamp(0.0, 1.0)
+    }
+
+    /// (Re)apply the inactive-dim target to every mapped, non-closing window — on
+    /// focus change, reload, or startup. `animate` eases over the anim duration
+    /// (focus change) vs. snapping instantly (startup).
+    fn apply_dim(&mut self, animate: bool) {
+        let d = if animate { self.anim_duration() } else { 0.0 };
+        let ids: Vec<WindowId> = self
+            .windows
+            .iter_bottom_to_top()
+            .filter(|w| w.is_mapped() && !w.closing)
+            .map(|w| w.id)
+            .collect();
+        for id in ids {
+            let t = self.dim_target(id);
+            self.windows.set_dim(id, t, d);
+        }
+        if animate {
+            self.ensure_frame_timer();
+        }
     }
 
     /// Root screen size in px.
@@ -902,6 +950,7 @@ impl App {
                 .iter_bottom_to_top()
                 .filter(|w| {
                     w.fade.is_animating()
+                        || w.dim.is_animating()
                         || w.scale.is_animating()
                         || w.translate.is_animating()
                         || w.spin.is_animating()
@@ -1151,9 +1200,10 @@ impl App {
                         y: qy,
                         w: qw,
                         h: qh,
-                        // Opacity animates via the fade, whose target already folds
-                        // explicit / rule / default opacity (see read_opacity).
-                        opacity: w.fade.current() as f32,
+                        // Opacity animates via the fade (target folds explicit /
+                        // rule / default opacity — see read_opacity), times the
+                        // inactive-dim factor (1.0 unless unfocused with [dim] on).
+                        opacity: (w.fade.current() * w.dim.current()) as f32,
                         // Drop the shadow the instant a window starts closing (so it
                         // disappears on close rather than lingering through the fade)
                         // or while it wobbles. Size test uses the un-scaled rect.
@@ -1574,6 +1624,17 @@ impl App {
                 }
                 self.update_redirection();
                 self.damage_full();
+            }
+            Event::PropertyNotify(e) if e.window == self.x.root => {
+                // Root _NET_ACTIVE_WINDOW change = focus moved → re-apply inactive-dim.
+                if self.x.atom("_NET_ACTIVE_WINDOW").is_ok_and(|a| a == e.atom) {
+                    let new = self.x.get_active_window().ok().flatten();
+                    if new != self.active_window {
+                        self.active_window = new;
+                        self.apply_dim(true);
+                        self.damage_full();
+                    }
+                }
             }
             Event::PropertyNotify(e) => {
                 // Opacity, or an identity property (WM_CLASS/type/title) whose change

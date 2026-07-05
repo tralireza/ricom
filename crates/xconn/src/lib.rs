@@ -201,14 +201,18 @@ impl XConn {
         Ok(owner)
     }
 
-    /// Subscribe to substructure changes on the root window (map/unmap/configure/...).
-    pub fn select_root_substructure(&self) -> Result<()> {
+    /// Subscribe to root substructure changes (map/unmap/configure/…) *and* root
+    /// property changes (for `_NET_ACTIVE_WINDOW` focus tracking → inactive-dim).
+    /// One `change_window_attributes` sets the whole mask — it *replaces* the
+    /// client's mask rather than OR-ing, so both bits must go in together.
+    pub fn select_root_events(&self) -> Result<()> {
         self.conn
             .change_window_attributes(
                 self.root,
-                &ChangeWindowAttributesAux::new().event_mask(EventMask::SUBSTRUCTURE_NOTIFY),
+                &ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::SUBSTRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE),
             )
-            .context("select SubstructureNotify on root")?;
+            .context("select root events")?;
         Ok(())
     }
 
@@ -414,6 +418,21 @@ impl XConn {
             .value32()
             .and_then(|mut it| it.next())
             .map(|v| v as f64 / u32::MAX as f64))
+    }
+
+    /// The EWMH active (focused) window from the root `_NET_ACTIVE_WINDOW`
+    /// property, or `None` if unset / no EWMH WM (`0` = explicit "none" → `None`).
+    /// Read as `ANY` 32-bit type — EWMH WMs use WINDOW, but this also accepts a
+    /// CARDINAL-typed value (some tools set it that way).
+    pub fn get_active_window(&self) -> Result<Option<Window>> {
+        let prop = self.atom("_NET_ACTIVE_WINDOW")?;
+        let reply = self
+            .conn
+            .get_property(false, self.root, prop, AtomEnum::ANY, 0, 1)
+            .context("get_property(_NET_ACTIVE_WINDOW)")?
+            .reply()
+            .context("get_property(_NET_ACTIVE_WINDOW) reply")?;
+        Ok(reply.value32().and_then(|mut it| it.next()).filter(|&w| w != 0))
     }
 
     /// The name of an interned atom (reverse of [`atom`](Self::atom)).

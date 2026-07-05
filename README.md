@@ -67,7 +67,7 @@ Working today:
   (ricom stepped aside) rather than showing false load.
 - **Window rules** — per-window overrides matched on `WM_CLASS` (class/instance),
   `_NET_WM_WINDOW_TYPE`, title (substring), and fullscreen state, each setting `opacity` /
-  `blur` / `shadow` / `corner_radius` / `unredir` / `above`, plus the per-transition animations
+  `blur` / `shadow` / `corner_radius` / `unredir` / `above` / `dim`, plus the per-transition animations
   `open` / `close` / `move` (a preset or explicit block spec; an empty `match = {}` is a global
   default). Precedence: an explicit `_NET_WM_WINDOW_OPACITY` beats a rule, which beats a built-in
   "fullscreen → opaque + unblurred" rule, which beats the global `default_opacity`. Live-reloads
@@ -76,7 +76,7 @@ Working today:
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** window dimming, and the xrender/glx backends + D-Bus IPC.
+**Not yet implemented:** the xrender/glx backends + D-Bus IPC.
 See [Roadmap](#roadmap).
 
 ## How it works
@@ -217,6 +217,10 @@ enabled = false                 # frost the backdrop behind translucent windows
 passes = 3                      # dual-Kawase iterations (wider/softer)
 radius = 4.0                    # sample offset per pass (px)
 
+[dim]                           # dim unfocused windows (needs an EWMH WM setting _NET_ACTIVE_WINDOW)
+enabled = false                 # opt in
+strength = 0.3                  # 0.0 = none, 1.0 = fully transparent (per-[[rule]] `dim = false` exempts)
+
 [anim]                          # per-transition animations built from composable blocks
 open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|wobble|stretch|unroll|minimize|spin
 close = "fade"                  # …or compose blocks explicitly (see ricom.toml.example)
@@ -270,11 +274,12 @@ culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial 
 (EGL buffer-age; repaint only the changed region), and a composable transition-animation system —
 layered primitives (opacity / scale / translate / wobble / burn) selected per transition (open /
 close / move) by a named preset or explicit block spec, globally or per-rule: pop, slide/drop,
-wobbly-windows, burn dissolve, directional stretch/unroll, and a GPU spin (rotate-about-centre).
+wobbly-windows, burn dissolve, directional stretch/unroll, and a GPU spin (rotate-about-centre);
+and **inactive-window dimming** (unfocused windows dim via `_NET_ACTIVE_WINDOW`, per-rule exemptible).
 
 Next:
 
-1. Window dimming (per-window / rule — slots into the rules engine).
+1. Alternative render backends (xrender / glx) and D-Bus IPC.
 
 ## License
 
