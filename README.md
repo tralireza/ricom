@@ -217,9 +217,10 @@ enabled = false                 # frost the backdrop behind translucent windows
 passes = 3                      # dual-Kawase iterations (wider/softer)
 radius = 4.0                    # sample offset per pass (px)
 
-[dim]                           # dim unfocused windows (needs an EWMH WM setting _NET_ACTIVE_WINDOW)
+[dim]                           # dim unfocused windows (needs a focus signal — see `focus`)
 enabled = false                 # opt in
 strength = 0.3                  # 0.0 = none, 1.0 = fully transparent (per-[[rule]] `dim = false` exempts)
+focus = "ewmh"                  # focus source: "ewmh" (_NET_ACTIVE_WINDOW) | "x11" (FocusChange, no EWMH WM)
 
 [anim]                          # per-transition animations built from composable blocks
 open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|wobble|stretch|unroll|minimize|spin
@@ -275,7 +276,8 @@ culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial 
 layered primitives (opacity / scale / translate / wobble / burn) selected per transition (open /
 close / move) by a named preset or explicit block spec, globally or per-rule: pop, slide/drop,
 wobbly-windows, burn dissolve, directional stretch/unroll, and a GPU spin (rotate-about-centre);
-and **inactive-window dimming** (unfocused windows dim via `_NET_ACTIVE_WINDOW`, per-rule exemptible).
+and **inactive-window dimming** (unfocused windows dim; focus from `_NET_ACTIVE_WINDOW` or X
+FocusChange, per-rule exemptible).
 
 Next:
 

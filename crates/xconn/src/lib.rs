@@ -510,17 +510,33 @@ impl XConn {
         }
     }
 
-    /// Ask the server to deliver `PropertyNotify` for this window, so we learn
-    /// when e.g. `_NET_WM_WINDOW_OPACITY` changes at runtime. Event masks are
-    /// per-client, so this does not disturb the owning client's own selection.
+    /// Deliver `PropertyNotify` (e.g. `_NET_WM_WINDOW_OPACITY` changes) *and*
+    /// `FocusChange` (for the `x11` dim focus source) for this window. One call
+    /// sets the whole mask — it *replaces* rather than ORs. Event masks are
+    /// per-client, so this doesn't disturb the owning client's own selection.
     /// May fail (async `BadWindow`) if the window vanishes — callers tolerate it.
-    pub fn select_property_changes(&self, win: Window) -> Result<()> {
+    pub fn select_window_events(&self, win: Window) -> Result<()> {
         self.conn
             .change_window_attributes(
                 win,
-                &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE),
+                &ChangeWindowAttributesAux::new()
+                    .event_mask(EventMask::PROPERTY_CHANGE | EventMask::FOCUS_CHANGE),
             )
-            .context("select PropertyChange")?;
+            .context("select window events")?;
         Ok(())
+    }
+
+    /// The window with the X input focus, or `None` when it's `None`/`PointerRoot`
+    /// (no specific window). Used by the `x11` dim focus source to resolve focus
+    /// authoritatively on a `FocusChange` event (sidesteps FocusIn detail parsing).
+    pub fn get_input_focus(&self) -> Result<Option<Window>> {
+        let reply = self
+            .conn
+            .get_input_focus()
+            .context("get_input_focus")?
+            .reply()
+            .context("get_input_focus reply")?;
+        // 0 = None, 1 = PointerRoot → no specific window; real window ids are > 1.
+        Ok((reply.focus > 1).then_some(reply.focus))
     }
 }

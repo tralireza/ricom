@@ -21,7 +21,7 @@ use calloop::timer::{TimeoutAction, Timer};
 use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
-use x11rb::protocol::xproto::{Place, Window};
+use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
 use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Quad, RenderParams, WindowDraw};
 use region::{Rect, Region};
@@ -33,7 +33,7 @@ const MAX_BUFFER_AGE: usize = 4;
 const WOBBLE_PAD: f32 = 8.0;
 /// Default `spin` rotation in degrees when a `Spin` block sets none (a full turn).
 const SPIN_DEFAULT_DEG: f64 = 360.0;
-use config::{Axis, Category, Config, Edge, Primitive, RuleResult, WindowMatch};
+use config::{Axis, Category, Config, Edge, FocusSource, Primitive, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
 
@@ -579,8 +579,10 @@ impl App {
                         self.ensure_frame_timer();
                     }
                 }
-                // Changed [dim]/rules: re-apply inactive-dim to every window.
+                // Changed [dim]/rules: re-seed the active window (the focus source
+                // may have changed) and re-apply inactive-dim to every window.
                 if dim_changed {
+                    self.active_window = self.read_active_window();
                     self.apply_dim(true);
                 }
                 // unredir may have toggled; re-evaluate, then repaint.
@@ -633,7 +635,7 @@ impl App {
             self.windows.add_top(Win::new(
                 w.window, w.x, w.y, w.width, w.height, w.border_width, false, w.mapped,
             ));
-            let _ = self.x.select_property_changes(w.window);
+            let _ = self.x.select_window_events(w.window);
             self.refresh_identity(w.window);
             // Already on screen at startup — show at its opacity with no fade-in.
             let o = self.read_opacity(w.window);
@@ -644,9 +646,10 @@ impl App {
         }
         // A window may already be fullscreen at startup — pick the redirect state now.
         self.update_redirection();
-        // Seed the active window + apply the initial inactive-dim instantly (no-op
-        // unless [dim] is enabled and an EWMH WM sets _NET_ACTIVE_WINDOW).
-        self.active_window = self.x.get_active_window().ok().flatten();
+        // Seed the active window (from the configured focus source) + apply the
+        // initial inactive-dim instantly (no-op unless [dim] is enabled and a focus
+        // signal is available).
+        self.active_window = self.read_active_window();
         self.apply_dim(false);
         self.x.flush()?;
         self.composite();
@@ -784,6 +787,23 @@ impl App {
         }
         if animate {
             self.ensure_frame_timer();
+        }
+    }
+
+    /// The X-input-focused window mapped to a tracked top-level (else `None`) —
+    /// the `x11` dim focus source.
+    fn focused_top_level(&self) -> Option<WindowId> {
+        let f = self.x.get_input_focus().ok().flatten()?;
+        self.windows.get(f).map(|_| f)
+    }
+
+    /// The current active window from the configured focus source — the root
+    /// `_NET_ACTIVE_WINDOW` (`ewmh`) or X input focus (`x11`). Used to (re)seed
+    /// `active_window` at startup and on reload.
+    fn read_active_window(&self) -> Option<WindowId> {
+        match self.config.dim.focus {
+            FocusSource::Ewmh => self.x.get_active_window().ok().flatten(),
+            FocusSource::X11 => self.focused_top_level(),
         }
     }
 
@@ -1482,7 +1502,7 @@ impl App {
                 self.windows.add_top(Win::new(
                     e.window, e.x, e.y, e.width, e.height, e.border_width, e.override_redirect, false,
                 ));
-                let _ = self.x.select_property_changes(e.window);
+                let _ = self.x.select_window_events(e.window);
                 // Not visible yet — record its opacity; the fade-in starts on map.
                 let o = self.read_opacity(e.window);
                 self.windows.set_opacity_settled(e.window, o);
@@ -1626,8 +1646,11 @@ impl App {
                 self.damage_full();
             }
             Event::PropertyNotify(e) if e.window == self.x.root => {
-                // Root _NET_ACTIVE_WINDOW change = focus moved → re-apply inactive-dim.
-                if self.x.atom("_NET_ACTIVE_WINDOW").is_ok_and(|a| a == e.atom) {
+                // Root _NET_ACTIVE_WINDOW change = focus moved → re-apply inactive-dim
+                // (only for the `ewmh` focus source; `x11` uses FocusChange instead).
+                if self.config.dim.focus == FocusSource::Ewmh
+                    && self.x.atom("_NET_ACTIVE_WINDOW").is_ok_and(|a| a == e.atom)
+                {
                     let new = self.x.get_active_window().ok().flatten();
                     if new != self.active_window {
                         self.active_window = new;
@@ -1651,6 +1674,22 @@ impl App {
                     self.windows.retarget_opacity(e.window, o, d);
                     self.ensure_frame_timer();
                     self.damage_full();
+                }
+            }
+            Event::FocusIn(e) | Event::FocusOut(e) if self.config.dim.focus == FocusSource::X11 => {
+                // `x11` dim focus source: X input focus moved → re-apply dim. Skip
+                // pointer-crossing + grab churn; query the authoritative focus rather
+                // than trust the event's window (avoids FocusIn detail ambiguity).
+                let real = (e.mode == NotifyMode::NORMAL || e.mode == NotifyMode::WHILE_GRABBED)
+                    && e.detail != NotifyDetail::POINTER
+                    && e.detail != NotifyDetail::POINTER_ROOT;
+                if real {
+                    let new = self.focused_top_level();
+                    if new != self.active_window {
+                        self.active_window = new;
+                        self.apply_dim(true);
+                        self.damage_full();
+                    }
                 }
             }
             Event::DamageNotify(e) => {

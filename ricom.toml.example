@@ -82,11 +82,13 @@ passes = 3          # dual-Kawase iterations (more = wider/softer)
 radius = 4.0        # sample offset per pass (px)
 
 [dim]
-# Dim unfocused windows so the focused one stands out. NEEDS an EWMH window
-# manager that sets _NET_ACTIVE_WINDOW (ricom is a compositor, not a WM); with
-# none, dimming is inert. Exempt an app with a per-[[rule]]  dim = false.
+# Dim unfocused windows so the focused one stands out. Needs a focus signal (see
+# `focus` below); with none it's inert. Exempt an app with a per-[[rule]] dim = false.
 enabled = false     # opt in
 strength = 0.3      # how much to dim an unfocused window: 0.0 = none, 1.0 = fully transparent
+focus = "ewmh"      # focus source: "ewmh" = root _NET_ACTIVE_WINDOW (needs an EWMH WM);
+                    # "x11" = X FocusChange events (works with a non-EWMH WM / focus-follows-
+                    # mouse / XSetInputFocus — but still needs something to move X focus)
 
 [burn]
 # The `burn` close effect's look. These knobs are live-tunable: edit and reload

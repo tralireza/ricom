@@ -144,10 +144,21 @@ pub struct Blur {
     pub radius: f32,
 }
 
+/// Where inactive-dimming learns which window is focused. `Ewmh` reads the root
+/// `_NET_ACTIVE_WINDOW` property (needs an EWMH window manager). `X11` tracks X
+/// `FocusChange` events — works with a non-EWMH WM, focus-follows-mouse, or any
+/// client calling `XSetInputFocus`, but still needs *something* to move focus.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FocusSource {
+    #[default]
+    Ewmh,
+    X11,
+}
+
 /// Inactive-window dimming: unfocused windows fade toward transparent so the
-/// focused one stands out. Needs an EWMH window manager that sets
-/// `_NET_ACTIVE_WINDOW` (ricom is a compositor, not a WM); with none, it's inert.
-/// A per-`[[rule]]` `dim = false` keeps an app bright (e.g. a video player).
+/// focused one stands out. Needs a focus signal (see [`FocusSource`]); with none,
+/// it's inert. A per-`[[rule]]` `dim = false` keeps an app bright (e.g. a player).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Dim {
@@ -156,6 +167,9 @@ pub struct Dim {
     /// How much to dim an unfocused window: `0.0` = none, `1.0` = fully
     /// transparent. An unfocused window renders at `1 - strength` of its opacity.
     pub strength: f64,
+    /// Where to get the focused window from (`ewmh` root property vs `x11`
+    /// FocusChange events). Default `ewmh`.
+    pub focus: FocusSource,
 }
 
 /// On-demand FPS / frame-time HUD, toggled by a global hotkey. Drawn by the
@@ -500,7 +514,7 @@ impl Default for Blur {
 
 impl Default for Dim {
     fn default() -> Self {
-        Dim { enabled: false, strength: 0.3 }
+        Dim { enabled: false, strength: 0.3, focus: FocusSource::Ewmh }
     }
 }
 
@@ -602,6 +616,7 @@ impl Config {
         chg!("blur.radius", prev.blur.radius, self.blur.radius);
         chg!("dim.enabled", prev.dim.enabled, self.dim.enabled);
         chg!("dim.strength", prev.dim.strength, self.dim.strength);
+        chg!("dim.focus", prev.dim.focus, self.dim.focus);
         chg!("fps.enabled", prev.fps.enabled, self.fps.enabled);
         chg!("fps.hotkey", prev.fps.hotkey, self.fps.hotkey);
         chg!("fps.corner", prev.fps.corner, self.fps.corner);
@@ -753,6 +768,7 @@ mod tests {
         );
         assert_eq!((c.blur.enabled, c.blur.passes, c.blur.radius), (false, 3, 4.0));
         assert_eq!((c.dim.enabled, c.dim.strength), (false, 0.3));
+        assert_eq!(c.dim.focus, FocusSource::Ewmh);
         assert!(!c.fps.enabled);
         assert_eq!(c.fps.hotkey, "Super+Shift+F");
         assert_eq!(c.fps.corner, "top-right");
@@ -930,6 +946,7 @@ opacity = 0.9
 [dim]
 enabled = true
 strength = 0.5
+focus = "x11"
 
 [[rule]]
 match = { class = "mpv" }
@@ -937,6 +954,7 @@ dim = false
 "#;
         let c: Config = toml::from_str(t).unwrap();
         assert_eq!((c.dim.enabled, c.dim.strength), (true, 0.5));
+        assert_eq!(c.dim.focus, FocusSource::X11);
         // mpv rule: never dim
         assert_eq!(c.resolve(&WindowMatch { class: "mpv".into(), ..Default::default() }).dim, Some(false));
         // other window: no per-window override → follows global [dim]
