@@ -211,6 +211,18 @@ pub enum Edge {
     Bottom,
 }
 
+/// Which axis/axes a `scale` block affects (always about the window centre).
+/// `both` = uniform pop; `x`/`y` = a directional stretch (a centre line growing to
+/// full width/height, with content shown squashed into the growing rect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Axis {
+    #[default]
+    Both,
+    X,
+    Y,
+}
+
 /// One animation primitive (building block) with its params. Blocks layer in
 /// order; `burn` owns alpha and suppresses a co-listed `opacity`. Serialised as a
 /// TOML table tagged by `block`, e.g.
@@ -233,11 +245,15 @@ pub enum Primitive {
         #[serde(default)]
         easing: Easing,
     },
-    /// Uniform scale-about-centre. `from` is the start factor on open / end on
-    /// close (default: `[anim] scale_from`).
+    /// Scale-about-centre. `from` is the start factor on open / end on close
+    /// (default: `[anim] scale_from`). `axis` restricts it to one dimension:
+    /// `x`/`y` give a directional stretch (line ↔ full width/height); `both`
+    /// (default) is the uniform pop.
     Scale {
         #[serde(default)]
         from: Option<f64>,
+        #[serde(default)]
+        axis: Axis,
         #[serde(default)]
         easing: Easing,
     },
@@ -306,7 +322,8 @@ pub enum AnimSel {
 }
 
 /// Known preset names, for diagnostics + docs.
-pub const PRESETS: &[&str] = &["none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble"];
+pub const PRESETS: &[&str] =
+    &["none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble", "stretch", "unroll"];
 
 /// Expand a preset name into its block list. `None` if the name is unknown.
 fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
@@ -315,7 +332,7 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
     Some(match name {
         "none" => vec![],
         "fade" => vec![opacity],
-        "pop" => vec![opacity, Scale { from: None, easing: Easing::EaseOut }],
+        "pop" => vec![opacity, Scale { from: None, axis: Axis::Both, easing: Easing::EaseOut }],
         "slide" => {
             vec![opacity, Translate { dx: 0.0, dy: 0.0, edge: Some(Edge::Left), easing: Easing::EaseOut }]
         }
@@ -326,6 +343,10 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
         "boing" => vec![Wobble { spring: None, friction: None }],
         "burn" => vec![Burn],
         "wobble" => vec![Wobble { spring: None, friction: None }],
+        // Directional stretch: a centre line grows to full width (x) / height (y),
+        // content shown squashed throughout. Opaque (no opacity block) by design.
+        "stretch" => vec![Scale { from: Some(0.0), axis: Axis::X, easing: Easing::EaseOut }],
+        "unroll" => vec![Scale { from: Some(0.0), axis: Axis::Y, easing: Easing::EaseOut }],
         _ => return None,
     })
 }
@@ -884,6 +905,31 @@ opacity = 0.9
         assert!(expand_sel(&AnimSel::Preset("none".into())).blocks.is_empty());
         // Unknown preset -> empty spec (validate() reports it separately).
         assert!(expand_sel(&AnimSel::Preset("bogus".into())).blocks.is_empty());
+    }
+
+    #[test]
+    fn stretch_and_unroll_are_directional_scales() {
+        assert_eq!(
+            expand_sel(&AnimSel::Preset("stretch".into())).blocks,
+            [Primitive::Scale { from: Some(0.0), axis: Axis::X, easing: Easing::EaseOut }]
+        );
+        assert_eq!(
+            expand_sel(&AnimSel::Preset("unroll".into())).blocks,
+            [Primitive::Scale { from: Some(0.0), axis: Axis::Y, easing: Easing::EaseOut }]
+        );
+    }
+
+    #[test]
+    fn scale_axis_parses() {
+        let c: Config =
+            toml::from_str("[anim.open]\nblocks = [ { block = \"scale\", from = 0.0, axis = \"x\" } ]\n")
+                .unwrap();
+        let AnimSel::Spec(s) = &c.anim.open else { panic!("expected explicit spec") };
+        assert_eq!(s.blocks, [Primitive::Scale { from: Some(0.0), axis: Axis::X, easing: Easing::EaseOut }]);
+        // axis defaults to Both when omitted.
+        let c: Config = toml::from_str("[anim.open]\nblocks = [ { block = \"scale\" } ]\n").unwrap();
+        let AnimSel::Spec(s) = &c.anim.open else { panic!("expected explicit spec") };
+        assert_eq!(s.blocks, [Primitive::Scale { from: None, axis: Axis::Both, easing: Easing::EaseOut }]);
     }
 
     #[test]

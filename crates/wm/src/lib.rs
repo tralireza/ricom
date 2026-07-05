@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 pub mod anim;
-use anim::{Easing, Fade, Offset, Wobble};
+use anim::{Axis, Easing, Fade, Offset, Wobble};
 
 /// An X window id.
 pub type WindowId = u32;
@@ -47,6 +47,9 @@ pub struct Win {
     /// Animated scale-about-centre for the open/close "pop". `scale.current()` is
     /// the factor to render at now (1.0 = full size); settled at 1.0 when idle.
     pub scale: Fade,
+    /// Which axis/axes [`scale`](Self::scale) applies to. `Both` = uniform pop;
+    /// `X`/`Y` = a directional stretch (centre line → full width/height).
+    pub scale_axis: Axis,
     /// Animated on-screen pixel offset for the `translate` primitive (slide,
     /// drop). `translate.current()` is added to the window's position when
     /// compositing; `[0, 0]` when at rest.
@@ -88,6 +91,7 @@ impl Win {
             map_state: if mapped { MapState::Mapped } else { MapState::Unmapped },
             fade: Fade::settled(1.0),
             scale: Fade::settled(1.0),
+            scale_axis: Axis::Both,
             translate: Offset::settled(),
             wobble: None,
             burn: None,
@@ -219,6 +223,22 @@ impl WindowStack {
         }
     }
 
+    /// Begin a scale-collapse close: mark the window closing (keeping it
+    /// composited via its pixmap) *without* touching opacity — the caller drives
+    /// `scale` to ~0 (a centre line) via [`retarget_scale`](Self::retarget_scale),
+    /// and [`finished_fadeouts`](Self::finished_fadeouts) reaps it once the scale
+    /// settles. Returns `true` if there is something still visible to collapse.
+    pub fn begin_collapse(&mut self, id: WindowId, destroyed: bool) -> bool {
+        match self.wins.get_mut(&id) {
+            Some(w) if w.fade.current() > 0.0 => {
+                w.closing = true;
+                w.destroyed |= destroyed;
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Clear a window's closing flag (its fade-out/burn completed but the window
     /// still exists — merely unmapped, not destroyed).
     pub fn clear_closing(&mut self, id: WindowId) {
@@ -228,9 +248,11 @@ impl WindowStack {
         }
     }
 
-    /// Closing windows whose fade-out has finished (fully transparent), as
-    /// `(id, destroyed)`. The caller releases their resources and either removes
-    /// them (destroyed) or clears their closing flag (still-mapped-able).
+    /// Closing windows whose close has finished (invisible), as `(id, destroyed)`.
+    /// A close completes when the window becomes invisible by any means: burn done,
+    /// opacity faded to 0, or a directional scale collapsed to ~0 (a line). The
+    /// caller releases their resources and either removes them (destroyed) or
+    /// clears their closing flag (still-mapped-able).
     pub fn finished_fadeouts(&self) -> Vec<(WindowId, bool)> {
         self.wins
             .values()
@@ -238,7 +260,13 @@ impl WindowStack {
                 w.closing
                     && match &w.burn {
                         Some(b) => !b.progress.is_animating() && b.progress.current() >= 1.0,
-                        None => !w.fade.is_animating() && w.fade.current() <= 0.0,
+                        None => {
+                            let faded = !w.fade.is_animating() && w.fade.current() <= 0.0;
+                            // A scale-to-0 collapse (stretch close) ends as an
+                            // invisible line — reap it even if opacity never moved.
+                            let collapsed = !w.scale.is_animating() && w.scale.current() <= 1e-3;
+                            faded || collapsed
+                        }
                     }
             })
             .map(|w| (w.id, w.destroyed))
@@ -253,20 +281,23 @@ impl WindowStack {
         }
     }
 
-    /// Start the open "pop": scale-about-centre from `from` (e.g. 0.85) up to 1.0
-    /// over `duration`. Pairs with [`fade_in`](Self::fade_in). No-op if untracked.
-    pub fn scale_in(&mut self, id: WindowId, from: f64, duration: f64) {
+    /// Start the open scale: scale-about-centre from `from` up to 1.0 over
+    /// `duration`, on `axis` (`Both` = uniform pop; `X`/`Y` = directional stretch,
+    /// e.g. `from = 0.0, axis = X` for a centre line growing to full width). Pairs
+    /// with [`fade_in`](Self::fade_in). No-op if untracked.
+    pub fn scale_in(&mut self, id: WindowId, from: f64, duration: f64, axis: Axis) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.scale = Fade::animating(from, 1.0, duration);
+            w.scale_axis = axis;
         }
     }
 
-    /// Ease a window's scale toward `to` from its current value (e.g. down to 0.85
-    /// on close, paired with [`begin_fade_out`](Self::begin_fade_out)). No-op if
-    /// untracked.
-    pub fn retarget_scale(&mut self, id: WindowId, to: f64, duration: f64) {
+    /// Ease a window's scale toward `to` from its current value on `axis` (e.g.
+    /// down to 0.0 on `X` to collapse to a line on close). No-op if untracked.
+    pub fn retarget_scale(&mut self, id: WindowId, to: f64, duration: f64, axis: Axis) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.scale.retarget(to, duration);
+            w.scale_axis = axis;
         }
     }
 
@@ -298,6 +329,7 @@ impl WindowStack {
     pub fn reset_transforms(&mut self, id: WindowId) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.scale = Fade::settled(1.0);
+            w.scale_axis = Axis::Both;
             w.translate = Offset::settled();
             w.burn = None;
         }
@@ -546,6 +578,23 @@ mod tests {
         s.set_opacity_settled(1, 0.0); // already fully transparent
         assert!(!s.begin_fade_out(1, 0.2, false));
         assert!(!s.get(1).unwrap().closing);
+    }
+
+    #[test]
+    fn scale_collapse_close_reaps_without_fade() {
+        let mut s = WindowStack::new();
+        s.add_top(win(1, true));
+        s.set_mapped(1, false); // unmapped (closing out)
+        // Stretch-close: mark closing without a fade, collapse scale on X toward 0.
+        assert!(s.begin_collapse(1, true));
+        s.retarget_scale(1, 0.0, 0.2, anim::Axis::X);
+        assert!(s.get(1).unwrap().closing);
+        assert_eq!(s.get(1).unwrap().fade.current(), 1.0); // opacity untouched
+        assert!(s.advance_anims(0.1)); // scale still collapsing
+        assert!(s.finished_fadeouts().is_empty());
+        assert!(!s.advance_anims(0.2)); // scale settles at 0 (a line)
+        // Completes via the collapse (not a fade) and is marked for removal.
+        assert_eq!(s.finished_fadeouts(), vec![(1, true)]);
     }
 
     #[test]

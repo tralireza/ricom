@@ -30,7 +30,7 @@ const MAX_BUFFER_AGE: usize = 4;
 /// Extra px around a wobble's mesh bbox when damaging/clipping it — headroom for
 /// spring overshoot and the AA fringe, so no jiggling pixel is ever left stale.
 const WOBBLE_PAD: f32 = 8.0;
-use config::{Category, Config, Edge, Primitive, RuleResult, WindowMatch};
+use config::{Axis, Category, Config, Edge, Primitive, RuleResult, WindowMatch};
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
 
@@ -90,6 +90,15 @@ fn map_easing(e: config::Easing) -> wm::anim::Easing {
         config::Easing::EaseOut => wm::anim::Easing::EaseOut,
         config::Easing::EaseIn => wm::anim::Easing::EaseIn,
         config::Easing::Linear => wm::anim::Easing::Linear,
+    }
+}
+
+/// Map a config scale axis to the `wm` animation axis.
+fn map_axis(a: Axis) -> wm::anim::Axis {
+    match a {
+        Axis::Both => wm::anim::Axis::Both,
+        Axis::X => wm::anim::Axis::X,
+        Axis::Y => wm::anim::Axis::Y,
     }
 }
 
@@ -746,8 +755,9 @@ impl App {
                 }
                 for block in &spec.blocks {
                     match block {
-                        Primitive::Scale { from, .. } => {
-                            self.windows.scale_in(id, from.unwrap_or(self.config.anim.scale_from), dur);
+                        Primitive::Scale { from, axis, .. } => {
+                            let from = from.unwrap_or(self.config.anim.scale_from);
+                            self.windows.scale_in(id, from, dur, map_axis(*axis));
                         }
                         Primitive::Translate { dx, dy, edge, easing } => {
                             let off = resolve_offset(*dx, *dy, *edge, self.outer_rect_of(id), self.screen());
@@ -774,11 +784,18 @@ impl App {
                     return false; // "none" -> instant close, nothing to animate
                 }
                 let has_burn = spec.blocks.iter().any(|b| matches!(b, Primitive::Burn));
+                // A scale block targeting ~0 collapses the window to a line — that
+                // drives it invisible on its own, so no opacity fade is needed.
+                let collapses = spec.blocks.iter().any(|b| {
+                    matches!(b, Primitive::Scale { from, .. }
+                        if from.unwrap_or(self.config.anim.scale_from) <= 1e-3)
+                });
                 let mut started = false;
                 for block in &spec.blocks {
                     match block {
-                        Primitive::Scale { from, .. } => {
-                            self.windows.retarget_scale(id, from.unwrap_or(self.config.anim.scale_from), dur);
+                        Primitive::Scale { from, axis, .. } => {
+                            let to = from.unwrap_or(self.config.anim.scale_from);
+                            self.windows.retarget_scale(id, to, dur, map_axis(*axis));
                         }
                         Primitive::Translate { dx, dy, edge, easing } => {
                             let off = resolve_offset(*dx, *dy, *edge, self.outer_rect_of(id), self.screen());
@@ -790,11 +807,15 @@ impl App {
                         Primitive::Opacity { .. } | Primitive::Wobble { .. } => {}
                     }
                 }
-                // A non-burn close always fades to transparent — that's what drives
-                // completion + reaping (see `finished_fadeouts`), so scale/translate
-                // ride along with it. Burn owns alpha, so it fades nothing.
+                // Exactly one completion driver + the closing flag: burn (begun above)
+                // dissolves; a scale-to-0 collapses while staying opaque; otherwise
+                // fade to transparent (which also carries scale/translate ride-alongs).
                 if !has_burn {
-                    started |= self.windows.begin_fade_out(id, dur, destroyed);
+                    if collapses {
+                        started |= self.windows.begin_collapse(id, destroyed);
+                    } else {
+                        started |= self.windows.begin_fade_out(id, dur, destroyed);
+                    }
                 }
                 started
             }
@@ -1043,18 +1064,29 @@ impl App {
                 // Scale-about-centre for the open/close pop. Skipped while wobbling —
                 // the mesh path positions the window from the spring sim instead.
                 let s = w.scale.current();
+                // Per-axis scale factors: `Both` = uniform pop; `X`/`Y` = directional
+                // stretch (one dimension animates, the other stays full).
+                let (fx, fy) = match w.scale_axis {
+                    wm::anim::Axis::Both => (s, s),
+                    wm::anim::Axis::X => (s, 1.0),
+                    wm::anim::Axis::Y => (1.0, s),
+                };
+                let scaling = !wobbling && !burning && (s - 1.0).abs() > f64::EPSILON;
+                // A directional stretch skips corner rounding + shadow while active (a
+                // rounded/shadowed 1-px sliver looks wrong); they return once settled.
+                let directional = scaling && !matches!(w.scale_axis, wm::anim::Axis::Both);
                 // Animated translate (slide/drop) offset, added to the on-screen
                 // position — CPU-side, so the blit needs no shader change.
                 let off = w.translate.current();
                 let (tx, ty) = (off[0].round() as i32, off[1].round() as i32);
-                let (qx, qy, qw, qh) = if !wobbling && !burning && (s - 1.0).abs() > f64::EPSILON {
+                let (qx, qy, qw, qh) = if scaling {
                     let (cx, cy) = (w.x as f64 + ow as f64 / 2.0, w.y as f64 + oh as f64 / 2.0);
-                    let (sw, sh) = (ow as f64 * s, oh as f64 * s);
+                    let (sw, sh) = (ow as f64 * fx, oh as f64 * fy);
                     (
                         (cx - sw / 2.0).round() as i32 + tx,
                         (cy - sh / 2.0).round() as i32 + ty,
-                        sw.round() as i32,
-                        sh.round() as i32,
+                        (sw.round() as i32).max(1), // keep a ≥1px seed line visible
+                        (sh.round() as i32).max(1),
                     )
                 } else {
                     (w.x as i32 + tx, w.y as i32 + ty, ow, oh)
@@ -1086,6 +1118,7 @@ impl App {
                         // disappears on close rather than lingering through the fade)
                         // or while it wobbles. Size test uses the un-scaled rect.
                         shadow: !wobbling
+                            && !directional
                             && rr.shadow.unwrap_or(self.config.shadow.enabled)
                             && ow >= self.config.shadow.min_size
                             && oh >= self.config.shadow.min_size
@@ -1095,7 +1128,7 @@ impl App {
                         blur: !wobbling
                             && rr.blur.unwrap_or(self.config.blur.enabled)
                             && w.fade.current() < 1.0,
-                        corner_radius: if wobbling {
+                        corner_radius: if wobbling || directional {
                             0.0
                         } else {
                             rr.corner_radius.unwrap_or(self.config.corner_radius)

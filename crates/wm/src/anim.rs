@@ -17,6 +17,17 @@ pub enum Easing {
     Linear,
 }
 
+/// Which axes a scale animation affects (always about the window centre). `Both`
+/// is the uniform pop; `X`/`Y` give a directional stretch — a centre line growing
+/// to full width/height (the content is shown squashed into the growing rect).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Axis {
+    #[default]
+    Both,
+    X,
+    Y,
+}
+
 /// Sample easing `kind` at `t`, clamped to `0..=1`.
 fn ease(kind: Easing, t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
