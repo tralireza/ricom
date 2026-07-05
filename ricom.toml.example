@@ -138,11 +138,6 @@ scale = 1.0              # size multiplier on top of automatic screen-height sca
 # close = "burn"
 
 # [[rule]]
-# match = { instance = "Alacritty" }  # terminal: pop open, slide away on close
-# open = "pop"
-# close = "slide"
-
-# [[rule]]
 # match = { instance = "xlogo" }   # a big wobbly toy: springs open (boing), fades on close.
 # open = "boing"                   # `unredir = false` keeps it composited so the spring shows
 # close = "fade"                   # even at fullscreen (otherwise it page-flips past the compositor).

@@ -7,6 +7,14 @@ texture-from-pixmap, tear-free at vsync — then goes well past the basics: a fu
 animation engine** (windows spin, wobble, stretch, dissolve, slide, and dim), region-level
 occlusion culling, and `use-damage` partial repaint so an idle screen costs next to nothing.
 
+![ricom in motion — a ricomctl-driven showreel: boing-open, dissolve, and live spin / stretch / wobble on video windows, each captioned by an OSD toast](screenshots/ricom-demo.gif)
+
+*Scripted through the `ricomctl` control socket: a fullscreen window boings in, the xclock dissolves
+into embers, then ricom spins, stretches, pops, and wobbles two live video windows **in place** —
+every step captioned by a self-drawn OSD toast. (15 s GIF loop above; the full-quality 1080p clip plays below.)*
+
+https://github.com/user-attachments/assets/051b89cc-22a2-4cf1-8b9a-7aa63c9bef39
+
 ## Highlights
 
 - **A real animation engine — not a fixed effect list.** Every window transition (open · close ·
@@ -25,7 +33,7 @@ occlusion culling, and `use-damage` partial repaint so an idle screen costs next
 - **A HUD it draws itself.** On-demand FPS / frame-time / loadavg overlay, rendered by a
   hand-rolled SDF text engine (crisp at any size, no font dependency), hotkey-toggled and movable
   between corners live.
-- **All hand-rolled.** Six small Rust crates, pure-Rust deps only (`x11rb`, `calloop`, `glow`,
+- **All hand-rolled.** Eight small Rust crates, pure-Rust deps only (`x11rb`, `calloop`, `glow`,
   `khronos-egl`) — the Composite / Damage / Render / Present / RandR plumbing is written from
   scratch, no compositing toolkit.
 
@@ -253,8 +261,8 @@ the overlay-over-video case stays tear-free.
 
 ## Architecture
 
-A Cargo workspace whose root package is the `ricom` binary; the library crates live under
-`crates/`:
+A Cargo workspace whose root package is the `ricom` binary; the crates live under `crates/`
+(seven libraries + the `ricomctl` client binary):
 
 ```
 ricom             workspace root + binary (event-loop wiring, CLI)
@@ -264,7 +272,9 @@ ricom             workspace root + binary (event-loop wiring, CLI)
    ├─ wm          window model + bottom-to-top stacking + per-window animation state (fade/scale/translate/spin/wobble)
    ├─ backend-gl  EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/mesh/spin/SDF-text shaders, present
    ├─ config      TOML: settings, window rules, and composable animation/effect specs (parse/resolve/diff for live reload)
-   └─ session     the compositor: owns X + wm + backend + config, runs the calloop event loop
+   ├─ session     the compositor: owns X + wm + backend + config, runs the calloop event loop
+   ├─ proto       control-channel wire types (NDJSON Command/Reply), shared by session + ricomctl
+   └─ ricomctl    thin control client: connects to the per-DISPLAY socket, sends one command, prints the reply
 ```
 
 Dependencies are pure-Rust: [`x11rb`](https://github.com/psychon/x11rb) (XCB protocol),
@@ -365,11 +375,6 @@ blur = true
 [[rule]]
 match = { window_type = "dock" }  # no shadow on panels/bars
 shadow = false
-
-[[rule]]
-match = { instance = "Alacritty" }  # terminal: pop open, slide away on close
-open = "pop"
-close = "slide"
 ```
 
 See [`ricom.toml.example`](ricom.toml.example) for the full schema, every preset, and
