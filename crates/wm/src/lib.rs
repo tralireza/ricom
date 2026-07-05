@@ -359,7 +359,7 @@ impl WindowStack {
     }
 
     /// Reset a window's transient transforms to their resting state (full scale,
-    /// no translate offset, no rotation, no burn). Opacity is left to the caller.
+    /// no translate offset, no rotation, no wobble, no burn). Opacity is left to the caller.
     /// Called at map time before applying an open animation, so blocks *absent*
     /// from the spec leave their property at rest (e.g. a window re-mapped after
     /// fading or sliding out doesn't reappear scaled-down, shifted, or rotated).
@@ -370,6 +370,7 @@ impl WindowStack {
             w.scale_axis = Axis::Both;
             w.translate = Offset::settled();
             w.spin = Fade::settled(0.0);
+            w.wobble = None;
             w.burn = None;
         }
     }

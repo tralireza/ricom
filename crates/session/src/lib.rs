@@ -995,6 +995,7 @@ impl App {
                 }
                 Reply::Text(banner)
             }
+            C::Animate { win, effect } => self.animate_window(win, &effect),
         }
     }
 
@@ -1012,6 +1013,48 @@ impl App {
         });
         self.ensure_frame_timer();
         self.damage_full();
+    }
+
+    /// Play a one-shot animation on `win` (for `ricomctl animate`) — the transform
+    /// effects that have no external X trigger. Each self-settles back to rest
+    /// (spin→0, scale→1, translate→0), so no explicit restore is needed; `reset`
+    /// snaps everything back at once. Unknown window / effect → `Reply::Error`.
+    #[cfg(unix)]
+    fn animate_window(&mut self, win: WindowId, effect: &str) -> proto::Reply {
+        use std::f64::consts::TAU;
+        use wm::anim::{Axis, Easing};
+        const DUR: f64 = 0.6;
+        if self.windows.get(win).is_none() {
+            return proto::Reply::Error(format!("no such window {win:#x}"));
+        }
+        match effect {
+            "spin" => self.windows.spin_in(win, TAU, DUR, Easing::EaseOut),
+            "pop" => self.windows.scale_in(win, 0.4, DUR, Axis::Both, Easing::EaseOut),
+            "stretch" => self.windows.scale_in(win, 0.0, DUR, Axis::X, Easing::EaseOut),
+            "unroll" => self.windows.scale_in(win, 0.0, DUR, Axis::Y, Easing::EaseOut),
+            "slide" => self.windows.translate_in(win, [-160.0, 0.0], DUR, Easing::EaseOut),
+            "wobble" => {
+                if let Some(rest) = self
+                    .windows
+                    .get(win)
+                    .map(|w| [w.x as f32, w.y as f32, w.width as f32, w.height as f32])
+                {
+                    let p = 36.0; // perturb the outer rect outward, then spring back to rest
+                    let old = [rest[0] - p, rest[1] - p, rest[2] + 2.0 * p, rest[3] + 2.0 * p];
+                    let (spring, friction) = (self.config.anim.wobble_spring, self.config.anim.wobble_friction);
+                    self.windows.wobble_to(win, old, rest, spring, friction);
+                }
+            }
+            "reset" => self.windows.reset_transforms(win),
+            other => {
+                return proto::Reply::Error(format!(
+                    "unknown effect '{other}' (spin|pop|stretch|unroll|slide|wobble|reset)"
+                ));
+            }
+        }
+        self.ensure_frame_timer();
+        self.damage_full();
+        proto::Reply::Ok
     }
 
     /// Effective opacity target for a window: an explicit `_NET_WM_WINDOW_OPACITY`

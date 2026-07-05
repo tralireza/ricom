@@ -401,6 +401,7 @@ ricomctl inspect 0x1a00007    # one window's details
 ricomctl fps toggle           # flip the FPS HUD
 ricomctl reload               # re-read the config (same as SIGHUP)
 ricomctl notify "hello" 3     # on-screen toast for 3s (top-center; effect via [osd] open/close)
+ricomctl animate 0x1a00007 spin  # play a transform on one window (spin|pop|stretch|unroll|slide|wobble)
 ricomctl ping                 # liveness + version banner
 ricomctl --json list          # machine-readable reply
 ```

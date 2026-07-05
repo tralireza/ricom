@@ -143,6 +143,12 @@ scale = 1.0              # size multiplier on top of automatic screen-height sca
 # close = "slide"
 
 # [[rule]]
+# match = { instance = "xlogo" }   # a big wobbly toy: springs open (boing), fades on close.
+# open = "boing"                   # `unredir = false` keeps it composited so the spring shows
+# close = "fade"                   # even at fullscreen (otherwise it page-flips past the compositor).
+# unredir = false
+
+# [[rule]]
 # match = {}                        # global default via a catch-all rule:
 # close = "fade"                    # fade every window closed (same as [anim] close)
 

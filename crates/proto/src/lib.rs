@@ -36,6 +36,10 @@ pub enum Command {
     Notify { text: String, timeout_ms: Option<u32> },
     /// Show ricom's version as an OSD toast; the reply also carries the banner text.
     Version,
+    /// Play a one-shot, self-restoring animation on one window — the transform
+    /// effects with no external X trigger (`spin`/`pop`/`stretch`/`unroll`/`slide`/
+    /// `wobble`, or `reset` to snap back). The server validates `effect`.
+    Animate { win: WinId, effect: String },
 }
 
 /// The compositor's reply to a [`Command`].

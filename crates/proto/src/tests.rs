@@ -19,6 +19,7 @@ fn command_roundtrip() {
     roundtrip_cmd(Command::Notify { text: "hello".into(), timeout_ms: Some(3000) });
     roundtrip_cmd(Command::Notify { text: "no timeout".into(), timeout_ms: None });
     roundtrip_cmd(Command::Version);
+    roundtrip_cmd(Command::Animate { win: 0x1a00007, effect: "spin".into() });
 }
 
 #[test]
