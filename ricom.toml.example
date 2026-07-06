@@ -5,7 +5,9 @@
 
 # unredir-if-possible: let a lone fullscreen window bypass the compositor and
 # page-flip straight to the display (compositor cost ~0). Set to false to always
-# composite — even when a single fullscreen window is the only thing on screen.
+# composite — even when a single fullscreen window is the only thing on screen (so
+# animations/effects still show on it). Toggle live (session-only) with:
+#   ricomctl unredir on|off|toggle
 unredir = true
 
 # Composite background colour (RGB, 0.0-1.0), seen where no window covers.

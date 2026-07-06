@@ -418,12 +418,13 @@ socket at `$XDG_RUNTIME_DIR/ricom-<display>.sock` (falling back to
 ricomctl list                 # tracked windows (id, class, opacity, geometry, title)
 ricomctl inspect 0x1a00007    # one window's details
 ricomctl fps toggle           # flip the FPS HUD
+ricomctl unredir off          # force compositing at fullscreen (on|off|toggle; effects show on fullscreen)
 ricomctl reload               # re-read the config (same as SIGHUP)
 ricomctl notify "hello" 3     # on-screen toast for 3s (top-center; effect via [osd] open/close)
 ricomctl animate 0x1a00007 spin  # play a transform on one window (spin|pop|stretch|unroll|slide|wobble|wave|ripple)
 ricomctl animate 0x1a00007 ripple amplitude=0.12 duration=4  # override effect params (key=value; keys mirror [anim])
 ricomctl set close drain turns=3   # live-select a transition's effect + params (session-only; reload reverts)
-ricomctl effects              # list every effect and its params
+ricomctl effects              # schematic (t=0 → ½ → 1) + params for every effect
 ricomctl ping                 # liveness + version banner
 ricomctl --json list          # machine-readable reply
 ```
@@ -446,7 +447,7 @@ wobbly-windows, burn dissolve, directional stretch/unroll, a GPU spin (rotate-ab
 wave, a radial ripple (per-pixel refraction), and a whirlpool drain close;
 and **inactive-window dimming** (unfocused windows dim; focus from `_NET_ACTIVE_WINDOW` or X
 FocusChange, per-rule exemptible); and a **Unix-socket control channel** (`ricomctl`) —
-live `list` / `inspect` / `animate` / `set` / `effects` / `fps toggle` / `reload` over a per-`$DISPLAY` socket.
+live `list` / `inspect` / `animate` / `set` / `effects` / `fps toggle` / `unredir` / `reload` over a per-`$DISPLAY` socket.
 
 Next:
 

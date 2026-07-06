@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Wire-protocol version. Bump on any incompatible `Command`/`Reply` change.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Raw X window id (mirrors `wm::WindowId`).
 pub type WinId = u32;
@@ -62,6 +62,14 @@ pub enum Command {
         #[serde(default)]
         params: Vec<(String, String)>,
     },
+    /// Toggle unredir-if-possible at runtime (session-only; a `Reload`/SIGHUP reverts
+    /// to the config). `enable = Some(true)` allows a lone fullscreen window to bypass
+    /// the compositor (the perf default); `Some(false)` forces compositing even at
+    /// fullscreen (so effects still show); `None` flips the current state.
+    Unredir {
+        #[serde(default)]
+        enable: Option<bool>,
+    },
 }
 
 /// Every effect/preset name `animate` and `set` accept — for help + validation.
@@ -109,6 +117,52 @@ pub fn effect_params(effect: &str) -> Option<&'static [(&'static str, &'static s
             ("duration", "close seconds"),
         ],
         "reset" => &[],
+        _ => return None,
+    })
+}
+
+/// A one-line gloss + a 3-row ASCII filmstrip (`t=0 → ½ → 1`) for each motion effect —
+/// the same visual language as the README "Effects & animations" gallery, shown by
+/// `ricomctl effects`. Art rows are `\n`-separated with no leading indent (the client
+/// indents them). `None` for effects with nothing to animate (`reset`).
+pub fn effect_schematic(effect: &str) -> Option<(&'static str, &'static str)> {
+    Some(match effect {
+        "spin" => (
+            "rotate about the centre + fade (GPU)",
+            "┌────┐      ╱╲        ◇\n│    │  →   ╲╱   →  (gone)\n└────┘",
+        ),
+        "pop" => (
+            "scale up about the centre, fading in",
+            "┌┐        ┌──┐       ┌────┐\n││   →    │  │   →   │    │\n└┘        └──┘       └────┘",
+        ),
+        "stretch" => (
+            "a centre line grows to full WIDTH (content squashed)",
+            " │         ┌──┐       ┌────┐\n─│─   →   ─┤  ├─  →   │    │\n │         └──┘       └────┘",
+        ),
+        "unroll" => (
+            "a centre line grows to full HEIGHT",
+            "──        ┌────┐      ┌────┐\n     →    └────┘  →   │    │\n                      └────┘",
+        ),
+        "slide" => (
+            "slides in/out past a screen edge (translate + fade)",
+            "»»»┌────┐        ┌────┐\n »»│    │   →    │    │\n»»»└────┘        └────┘",
+        ),
+        "wobble" => (
+            "springy jelly — lags, jiggles, then settles",
+            "┌────┐     ┌────┐~     ~┌────┐\n│    │ →→  │    │ ~~ →  │    │\n└────┘     └────┘~     ~└────┘",
+        ),
+        "wave" => (
+            "a sine crest sweeps across the surface (per-pixel), ringing flat",
+            "┌────┐     ┌╮───┐     ┌──╮─┐\n│    │  →  │╰╮  │  →  │  ╰╮│\n└────┘     └─╯──┘     └───╯┘",
+        ),
+        "ripple" => (
+            "a \"drop in a lake\" — rings spread from the centre, dying at the rim",
+            "┌────┐     ┌────┐     ┌────┐\n│ ·  │  →  │(())│  →  │(  )│\n└────┘     └────┘     └────┘",
+        ),
+        "drain" => (
+            "content whirlpools into a vanishing point, then fades",
+            "┌────┐     ┌╮  ╭┐        ·\n│    │  →  │ ╲╱ │  →      ◌\n└────┘     └╯  ╰┘",
+        ),
         _ => return None,
     })
 }

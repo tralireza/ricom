@@ -995,6 +995,13 @@ impl App {
                 Reply::Ok
             }
             C::List => {
+                // Heal any startup-adopted blanks before reporting (their first read
+                // may have raced); collect ids first — can't borrow `windows` + mutate
+                // `identities` at once.
+                let ids: Vec<WindowId> = self.windows.iter_bottom_to_top().map(|w| w.id).collect();
+                for id in ids {
+                    self.ensure_identity(id);
+                }
                 let list: Vec<proto::WinInfo> = self
                     .windows
                     .iter_bottom_to_top()
@@ -1018,12 +1025,14 @@ impl App {
                 Reply::Windows(list)
             }
             C::Inspect { win } => {
-                let Some(w) = self.windows.get(win) else {
+                if self.windows.get(win).is_none() {
                     if self.config.osd.enabled {
                         self.show_osd(">> no such window.".into(), self.config.osd.duration.min(1.2), OSD_ERR);
                     }
                     return Reply::Error(format!("no such window {win:#x}"));
-                };
+                }
+                self.ensure_identity(win); // heal a startup-adopted blank before reporting
+                let w = self.windows.get(win).expect("existence checked above");
                 let info = win_info(w, self.identities.get(&win));
                 if self.config.osd.enabled {
                     let cls: String = info.class.chars().take(16).collect();
@@ -1058,7 +1067,27 @@ impl App {
             }
             C::Animate { win, effect, params } => self.animate_window(win, &effect, &params),
             C::SetAnim { category, effect, params } => self.set_anim(&category, &effect, &params),
+            C::Unredir { enable } => self.set_unredir(enable),
         }
+    }
+
+    /// Toggle unredir-if-possible live (session-only; a `Reload`/SIGHUP reverts to the
+    /// config file). `enable = Some(v)` sets it, `None` flips the current state. We
+    /// re-run the redirect decision straight away, so a lone fullscreen window starts
+    /// compositing (`off`) or is allowed to page-flip past us (`on`) immediately.
+    fn set_unredir(&mut self, enable: Option<bool>) -> proto::Reply {
+        let on = enable.unwrap_or(!self.config.unredir);
+        self.config.unredir = on;
+        self.update_redirection();
+        if self.config.osd.enabled && self.config.osd.ack {
+            let s = if on { "on" } else { "off" };
+            self.show_osd(format!(">> unredir {s}."), self.config.osd.duration.min(1.2), OSD_ACK);
+        }
+        proto::Reply::Text(format!(
+            "unredir {} — {}",
+            if on { "on (fullscreen may bypass)" } else { "off (always compositing)" },
+            if self.redirected { "compositing now" } else { "fullscreen bypass now" },
+        ))
     }
 
     /// Start (or replace) the OSD toast with `text` in `color`, held for `hold` seconds.
@@ -1285,6 +1314,22 @@ impl App {
         self.identities.insert(win, WinIdentity { instance, class, window_type, title });
     }
 
+    /// Re-read a window's identity only when we have nothing cached yet — either no
+    /// entry, or a fully-blank one. That blank case is the startup-adoption gap: a
+    /// window already open when ricom starts is read once at `run()` time, and if that
+    /// first `WM_CLASS`/title read comes back empty it never fires a `PropertyNotify`
+    /// (the props don't change again), so the blank sticks. Healing it lazily — on the
+    /// paths that actually consume identity (`list`/`inspect`, rule resolution at
+    /// open/close/move) — costs 3 GetProperty round-trips once, then nothing.
+    fn ensure_identity(&mut self, win: WindowId) {
+        let blank = self.identities.get(&win).is_none_or(|i| {
+            i.class.is_empty() && i.instance.is_empty() && i.title.is_empty() && i.window_type.is_empty()
+        });
+        if blank {
+            self.refresh_identity(win);
+        }
+    }
+
     /// Build a window's [`WindowMatch`] (cached identity + live fullscreen state)
     /// for rule matching / animation resolution.
     fn window_match(&self, win: WindowId) -> WindowMatch {
@@ -1373,6 +1418,7 @@ impl App {
     /// gate. Move is driven separately by `ConfigureNotify` (it needs old+new
     /// rects), so this handles `Open`/`Close`.
     fn start_anim(&mut self, id: WindowId, cat: Category, destroyed: bool) -> bool {
+        self.ensure_identity(id); // heal a startup-adopted blank so class/title rules match
         let spec = self.config.spec_for(&self.window_match(id), cat);
         let dur = spec.duration.unwrap_or(self.config.anim.duration);
         match cat {

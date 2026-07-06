@@ -31,6 +31,9 @@ fn command_roundtrip() {
         effect: "drain".into(),
         params: vec![("turns".into(), "3".into())],
     });
+    roundtrip_cmd(Command::Unredir { enable: Some(true) });
+    roundtrip_cmd(Command::Unredir { enable: Some(false) });
+    roundtrip_cmd(Command::Unredir { enable: None });
 }
 
 #[test]
@@ -39,6 +42,23 @@ fn effect_params_schema() {
     assert!(effect_params("reset").unwrap().is_empty());
     assert!(effect_params("bogus").is_none());
     assert!(EFFECTS.contains(&"drain"));
+}
+
+#[test]
+fn effect_schematic_covers_effects() {
+    // Every animate/set effect has a 3-row schematic + gloss, except `reset`
+    // (a snap-to-rest with nothing to draw). Guards future EFFECTS additions.
+    for &fx in EFFECTS {
+        match effect_schematic(fx) {
+            Some((gloss, art)) => {
+                assert_ne!(fx, "reset", "reset has no motion to draw");
+                assert!(!gloss.is_empty(), "{fx} gloss");
+                assert_eq!(art.lines().count(), 3, "{fx} art should be 3 rows");
+            }
+            None => assert_eq!(fx, "reset", "{fx} is missing a schematic"),
+        }
+    }
+    assert!(effect_schematic("bogus").is_none());
 }
 
 #[test]

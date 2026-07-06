@@ -15,6 +15,9 @@ fn commands_map() {
     assert_eq!(cmd(&["reload"]), Command::Reload);
     assert_eq!(cmd(&["list"]), Command::List);
     assert_eq!(cmd(&["fps", "toggle"]), Command::FpsToggle);
+    assert_eq!(cmd(&["unredir", "on"]), Command::Unredir { enable: Some(true) });
+    assert_eq!(cmd(&["unredir", "off"]), Command::Unredir { enable: Some(false) });
+    assert_eq!(cmd(&["unredir", "toggle"]), Command::Unredir { enable: None });
     assert_eq!(cmd(&["inspect", "0x1a00007"]), Command::Inspect { win: 0x1a00007 });
     assert_eq!(cmd(&["inspect", "42"]), Command::Inspect { win: 42 });
     assert_eq!(cmd(&["notify", "hi"]), Command::Notify { text: "hi".into(), timeout_ms: None });
@@ -73,6 +76,9 @@ fn errors_are_usage() {
     assert!(matches!(parse(&["bogus"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["fps"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["fps", "nope"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["unredir"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["unredir", "nope"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["unredir", "on", "extra"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["inspect"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["inspect", "zz"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["list", "extra"]), Err(Exit::Usage(_))));

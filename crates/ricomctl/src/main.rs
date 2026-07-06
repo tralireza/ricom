@@ -27,6 +27,8 @@ COMMANDS:
     ping              Check the compositor is alive
     reload            Re-read + apply the config file (same as SIGHUP)
     fps toggle        Toggle the FPS HUD
+    unredir <state>   Fullscreen compositor bypass: on (allow, perf default) |
+                      off (always composite, so effects show) | toggle
     list              List tracked windows
     inspect <win>     Show one window (id: decimal or 0x hex)
     notify <text> [s] Show an on-screen message for [s] seconds (default: config)
@@ -46,6 +48,7 @@ EXAMPLES:
     ricomctl animate 0x1a00007 ripple amplitude=0.12 duration=4
     ricomctl set close drain turns=3
     ricomctl effects
+    ricomctl unredir off
     ricomctl reload
 ";
 
@@ -118,6 +121,15 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
             }
             None => return Err(Exit::Usage("fps needs a subcommand (toggle)\n".into())),
         },
+        "unredir" => match a.next() {
+            Some("on") => Command::Unredir { enable: Some(true) },
+            Some("off") => Command::Unredir { enable: Some(false) },
+            Some("toggle") => Command::Unredir { enable: None },
+            Some(other) => {
+                return Err(Exit::Usage(format!("unknown unredir state '{other}' (want: on|off|toggle)\n")));
+            }
+            None => return Err(Exit::Usage("unredir needs a state (on|off|toggle)\n".into())),
+        },
         "inspect" => {
             let w = a.next().ok_or_else(|| Exit::Usage("inspect needs a <win> id\n".into()))?;
             Command::Inspect { win: parse_win(w)? }
@@ -185,21 +197,34 @@ fn parse_win(s: &str) -> Result<proto::WinId, Exit> {
     parsed.map_err(|_| Exit::Usage(format!("invalid window id '{s}' (want decimal or 0x hex)\n")))
 }
 
-/// Render the effect → params reference (from the shared `proto` schema) for `effects`.
+/// Render the effect reference (schematic + params, from the shared `proto` schema)
+/// for `effects` — each effect as a `t=0 → ½ → 1` filmstrip, gloss, and its params.
 fn format_effects() -> String {
     use std::fmt::Write;
-    let mut s =
-        String::from("EFFECTS — params for `animate <win> <fx> k=v…` and `set <cat> <fx> k=v…`:\n");
+    let mut s = String::from(
+        "EFFECTS — schematic (t=0 → ½ → 1) + params for `animate <win> <fx> k=v…` and `set <cat> <fx> k=v…`:\n",
+    );
     for &fx in proto::EFFECTS {
+        s.push('\n');
+        match proto::effect_schematic(fx) {
+            Some((gloss, art)) => {
+                let _ = writeln!(s, "  {fx} — {gloss}");
+                for line in art.lines() {
+                    let _ = writeln!(s, "      {line}");
+                }
+            }
+            None => {
+                let _ = writeln!(s, "  {fx} — snaps every transform back to rest");
+            }
+        }
         match proto::effect_params(fx) {
             Some(ps) if !ps.is_empty() => {
-                let _ = writeln!(s, "  {fx}:");
                 for (k, desc) in ps {
                     let _ = writeln!(s, "      {k:<11} {desc}");
                 }
             }
             _ => {
-                let _ = writeln!(s, "  {fx:<11} (no params)");
+                let _ = writeln!(s, "      (no params)");
             }
         }
     }
