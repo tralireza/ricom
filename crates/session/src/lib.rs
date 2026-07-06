@@ -23,7 +23,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
-use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, RippleParams, WaveParams, WindowDraw};
+use backend_gl::{Burn, DrainParams, GlBackend, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, RippleParams, WaveParams, WindowDraw};
 use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
@@ -191,7 +191,7 @@ fn squash_rect(rect: [f32; 4], factor: f32) -> [f32; 4] {
 /// optional burn, always-on-top flag (from the `above` rule), and optional spin
 /// angle (radians).
 type CompositeItem =
-    (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>, Option<RippleParams>, Option<WaveParams>);
+    (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>, Option<RippleParams>, Option<WaveParams>, Option<DrainParams>);
 
 /// Axis-aligned bounding box of a rect rotated `angle` radians about its centre —
 /// the footprint/damage a spinning window covers. `rect` is `[x, y, w, h]`.
@@ -1366,7 +1366,7 @@ impl App {
                                 duration.unwrap_or(self.config.anim.ripple_duration),
                             );
                         }
-                        Primitive::Opacity { .. } | Primitive::Burn => {}
+                        Primitive::Opacity { .. } | Primitive::Burn | Primitive::Drain { .. } => {}
                     }
                 }
                 true
@@ -1376,6 +1376,7 @@ impl App {
                     return false; // "none" -> instant close, nothing to animate
                 }
                 let has_burn = spec.blocks.iter().any(|b| matches!(b, Primitive::Burn));
+                let has_drain = spec.blocks.iter().any(|b| matches!(b, Primitive::Drain { .. }));
                 // A scale block targeting ~0 collapses the window to a line — that
                 // drives it invisible on its own, so no opacity fade is needed.
                 let collapses = spec.blocks.iter().any(|b| {
@@ -1395,6 +1396,15 @@ impl App {
                         }
                         Primitive::Burn => {
                             started |= self.windows.begin_burn(id, dur, burn_seed(id), destroyed);
+                        }
+                        Primitive::Drain { turns, duration } => {
+                            started |= self.windows.begin_drain(
+                                id,
+                                duration.map(f64::from).unwrap_or(f64::from(self.config.anim.drain_duration)),
+                                turns.unwrap_or(self.config.anim.drain_turns),
+                                burn_seed(id),
+                                destroyed,
+                            );
                         }
                         Primitive::Spin { degrees, easing } => {
                             let rad = degrees.unwrap_or(SPIN_DEFAULT_DEG as f32) as f64 * PI / 180.0;
@@ -1431,7 +1441,7 @@ impl App {
                 // Exactly one completion driver + the closing flag: burn (begun above)
                 // dissolves; a scale-to-0 collapses while staying opaque; otherwise
                 // fade to transparent (which also carries scale/translate ride-alongs).
-                if !has_burn {
+                if !has_burn && !has_drain {
                     if collapses {
                         started |= self.windows.begin_collapse(id, destroyed);
                     } else {
@@ -1505,6 +1515,7 @@ impl App {
                         || w.wave.is_some()
                         || w.ripple.is_some()
                         || w.burn.as_ref().is_some_and(|b| b.progress.is_animating())
+                        || w.drain.as_ref().is_some_and(|d| d.progress.is_animating())
                 })
                 .map(|w| {
                     let bw = w.border_width as i32;
@@ -1739,7 +1750,7 @@ impl App {
                 let wobbling = w.wobble.is_some();
                 // Per-pixel refraction (RIPPLE_FS / WAVE_FS): draws the quad but, like
                 // spin, skips shadow / frost / corner rounding. Not a mesh.
-                let per_pixel = w.ripple.is_some() || w.wave.is_some();
+                let per_pixel = w.ripple.is_some() || w.wave.is_some() || w.drain.is_some();
                 let burning = w.burn.is_some();
                 let burn = w.burn.as_ref().map(|b| Burn { progress: b.progress.current() as f32, seed: b.seed });
                 // Scale-about-centre for the open/close pop. Skipped while wobbling —
@@ -1798,6 +1809,13 @@ impl App {
                     let (amp, wavelength, phase, axis) = wv.params();
                     WaveParams { amp, wavelength, phase, axis: matches!(axis, wm::anim::Axis::Y) as u32 }
                 });
+                // Drain params for the shader: centre + progress (0→1) + swirl turns.
+                let drain = w.drain.as_ref().map(|d| DrainParams {
+                    center: [0.5, 0.5],
+                    progress: d.progress.current() as f32,
+                    turns: d.turns,
+                    seed: d.seed,
+                });
                 items.push((
                     Quad {
                         pixmap: pm,
@@ -1838,6 +1856,7 @@ impl App {
                     spin,
                     ripple,
                     wave,
+                    drain,
                 ));
             }
         }
@@ -1871,7 +1890,7 @@ impl App {
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
-        for (q, mesh, burn, _above, spin, ripple, wave) in items.iter().rev() {
+        for (q, mesh, burn, _above, spin, ripple, wave, drain) in items.iter().rev() {
             let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
             // Footprint = the area the window might touch this frame. A spinner
             // sweeps its rotated bounding box; a wobbler can deform outside its rect
@@ -1898,13 +1917,14 @@ impl App {
                     spin: *spin,
                     ripple: *ripple,
                     wave: *wave,
+                    drain: *drain,
                 });
             }
             // Opaque windows occlude what's below: a square one covers its whole
             // rect; a rounded one covers all but its (transparent) corner squares.
             // A wobbling window is *deforming*, so it never occludes (its rect is
             // unreliable) — draw everything beneath it.
-            if mesh.is_none() && burn.is_none() && spin.is_none() && ripple.is_none() && wave.is_none() && q.opacity >= 1.0 {
+            if mesh.is_none() && burn.is_none() && spin.is_none() && ripple.is_none() && wave.is_none() && drain.is_none() && q.opacity >= 1.0 {
                 let cr = q.corner_radius as i32;
                 if cr <= 0 {
                     covered.add_rect(rect);

@@ -146,6 +146,53 @@ void main() {
 }
 "#;
 
+/// Drain / whirlpool close (reuses [`BLIT_VS`]: `u_rect`/`u_screen`/`v_tex`). The
+/// window's content spirals into a vanishing point at `u_center` and fades: per pixel,
+/// rotate the sampled UV about the centre by an angle that is **strong near the sink and
+/// tapers to the rim** (a `1/(1+k·r)` falloff — a real vortex shears, it doesn't spin as
+/// a rigid disc), scaled by `u_turns · u_progress`, then sample from a disk that shrinks
+/// as `1 − u_progress`, so content compresses to a point; pixels whose source lands
+/// outside the window read as transparent (drained away). `u_progress` runs 0 → 1.
+/// Premultiplied output.
+const DRAIN_FS: &str = r#"#version 330 core
+in vec2 v_tex;
+uniform sampler2D u_tex;
+uniform float u_opacity;
+uniform vec4  u_rect;       // x,y,w,h (px) — aspect only
+uniform vec2  u_center;     // drain centre in UV (0..1)
+uniform float u_progress;   // 0 intact .. 1 fully drained
+uniform float u_turns;      // swirl rotations at full progress
+uniform float u_seed;       // per-window seed → each drain's turbulence differs
+out vec4 frag;
+// Smooth value noise (hash + bilinear) for turbulent, per-region rotation rates.
+float dhash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float dnoise(vec2 p) {
+    vec2 i = floor(p), f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(dhash(i), dhash(i + vec2(1.0, 0.0)), u.x),
+               mix(dhash(i + vec2(0.0, 1.0)), dhash(i + vec2(1.0, 1.0)), u.x), u.y);
+}
+void main() {
+    float aspect = u_rect.z / max(u_rect.w, 1.0);
+    vec2  rel = v_tex - u_center; rel.x *= aspect;      // aspect-correct for a round swirl
+    float r = length(rel);                              // distance from the sink (centre)
+    // Vortex shear: angular speed is high near the sink and tapers outward, so the
+    // content spirals rather than spinning as a rigid disc. 1/(1 + k·r) falloff.
+    float swirl = 1.0 / (1.0 + 6.0 * r);
+    // Turbulence: a smooth seeded noise field varies the rotation RATE across the
+    // vortex (uneven arms), while swirl(r) keeps the slower-outer/faster-inner curve.
+    float n = dnoise(rel * 6.0 + vec2(u_seed * 3.1, u_seed * 1.7)) * 2.0 - 1.0; // ~[-1,1]
+    float theta = 6.2831853 * u_turns * u_progress * swirl * (1.0 + 0.45 * n);
+    float c = cos(theta), s = sin(theta);
+    vec2  rot = vec2(rel.x * c - rel.y * s, rel.x * s + rel.y * c);
+    float scale = max(1.0 - u_progress, 1e-3);          // visible disk shrinks to a point
+    vec2  src = u_center + vec2(rot.x / aspect, rot.y) / scale;
+    float inb = step(0.0, src.x) * step(src.x, 1.0) * step(0.0, src.y) * step(src.y, 1.0);
+    float a = u_opacity * (1.0 - u_progress) * inb;     // fade out as it shrinks away
+    frag = vec4(texture(u_tex, clamp(src, 0.0, 1.0)).rgb * a, a);
+}
+"#;
+
 /// Burn / dissolve close animation (reuses [`BLIT_VS`], so it has `u_rect`/
 /// `u_screen`/`v_tex`). The window erodes away on animated value-noise with a
 /// glowing ember band at the dissolving front — "uniform segments": chunky
@@ -468,6 +515,22 @@ pub struct WaveParams {
     pub axis: u32,
 }
 
+/// Drain / whirlpool close parameters for [`DRAIN_FS`]. When a [`WindowDraw`] carries
+/// `Some`, the backend draws it through the drain program (per-pixel; no shadow / frost
+/// / corner). A close driver like burn: `progress` 0→1 spirals the content into a
+/// vanishing point at `center` and fades it out; the window is reaped at `1`.
+#[derive(Debug, Clone, Copy)]
+pub struct DrainParams {
+    /// Drain centre in UV (`[0.5, 0.5]` = window centre).
+    pub center: [f32; 2],
+    /// Progress `0.0` (intact) → `1.0` (fully drained / gone).
+    pub progress: f32,
+    /// Swirl rotations at full progress.
+    pub turns: f32,
+    /// Per-window seed so each drain's rate-turbulence differs.
+    pub seed: f32,
+}
+
 /// A window to composite plus the screen-space rectangles it's actually visible
 /// in (region-level occlusion): [`GlBackend::present_windows`] scissors each of
 /// the quad's draws to `clip`, so pixels covered by an opaque window on top are
@@ -494,6 +557,9 @@ pub struct WindowDraw {
     /// Traveling wave (content refraction). `Some` → draw via [`WAVE_FS`] (per-pixel UV
     /// warp; no shadow / frost / corner), mutually exclusive with `mesh`/`burn`/`spin`/`ripple`.
     pub wave: Option<WaveParams>,
+    /// Drain / whirlpool close. `Some` → draw via [`DRAIN_FS`] (per-pixel; no shadow /
+    /// frost / corner), mutually exclusive with `mesh`/`burn`/`spin`/`ripple`/`wave`.
+    pub drain: Option<DrainParams>,
 }
 
 impl WindowDraw {
@@ -509,6 +575,7 @@ impl WindowDraw {
             spin: None,
             ripple: None,
             wave: None,
+            drain: None,
         }
     }
 }
@@ -817,6 +884,16 @@ pub struct GlBackend {
     wv_wavelength: Option<glow::NativeUniformLocation>,
     wv_phase: Option<glow::NativeUniformLocation>,
     wv_axis: Option<glow::NativeUniformLocation>,
+    // Drain (whirlpool close) program: BLIT_VS + DRAIN_FS, reuses the blit VAO.
+    drain_program: glow::NativeProgram,
+    dr_rect: Option<glow::NativeUniformLocation>,
+    dr_screen: Option<glow::NativeUniformLocation>,
+    dr_tex: Option<glow::NativeUniformLocation>,
+    dr_opacity: Option<glow::NativeUniformLocation>,
+    dr_center: Option<glow::NativeUniformLocation>,
+    dr_progress: Option<glow::NativeUniformLocation>,
+    dr_turns: Option<glow::NativeUniformLocation>,
+    dr_seed: Option<glow::NativeUniformLocation>,
     blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
@@ -994,6 +1071,23 @@ impl GlBackend {
             )
         };
 
+        // Drain program: BLIT_VS + DRAIN_FS, reuses the blit unit-quad VAO. Selected
+        // per-window while a whirlpool close is in progress (per-pixel; close driver).
+        let (drain_program, dr_rect, dr_screen, dr_tex, dr_opacity, dr_center, dr_progress, dr_turns, dr_seed) = unsafe {
+            let program = make_program(&gl, BLIT_VS, DRAIN_FS)?;
+            (
+                program,
+                gl.get_uniform_location(program, "u_rect"),
+                gl.get_uniform_location(program, "u_screen"),
+                gl.get_uniform_location(program, "u_tex"),
+                gl.get_uniform_location(program, "u_opacity"),
+                gl.get_uniform_location(program, "u_center"),
+                gl.get_uniform_location(program, "u_progress"),
+                gl.get_uniform_location(program, "u_turns"),
+                gl.get_uniform_location(program, "u_seed"),
+            )
+        };
+
         // Wobble mesh program + its VAO: a dynamic vertex VBO ([x,y,u,v] per
         // control point, re-uploaded per frame) and a static triangle-index EBO
         // (two triangles per grid cell). The EBO binding is captured in the VAO.
@@ -1134,6 +1228,7 @@ impl GlBackend {
             spin_program, spin_vao, sp_rect, sp_screen, sp_tex, sp_opacity, sp_corner, sp_angle,
             ripple_program, rp_rect, rp_screen, rp_tex, rp_opacity, rp_center, rp_amp, rp_wavelength, rp_phase, rp_r0,
             wave_program, wv_rect, wv_screen, wv_tex, wv_opacity, wv_amp, wv_wavelength, wv_phase, wv_axis,
+            drain_program, dr_rect, dr_screen, dr_tex, dr_opacity, dr_center, dr_progress, dr_turns, dr_seed,
             blur: RefCell::new(None),
             image_target, render, text,
             solid_program, sol_rect, sol_screen, sol_color, sol_radius,
@@ -1648,7 +1743,7 @@ impl GlBackend {
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
         }
-        for WindowDraw { quad, clip, mesh, burn, spin, ripple, wave } in items {
+        for WindowDraw { quad, clip, mesh, burn, spin, ripple, wave, drain } in items {
             if clip.is_empty() {
                 continue; // fully occluded — nothing visible to draw
             }
@@ -1829,6 +1924,33 @@ impl GlBackend {
                     self.gl.uniform_1_f32(self.wv_wavelength.as_ref(), wv.wavelength);
                     self.gl.uniform_1_f32(self.wv_phase.as_ref(), wv.phase);
                     self.gl.uniform_1_i32(self.wv_axis.as_ref(), wv.axis as i32);
+                    self.gl.enable(glow::SCISSOR_TEST);
+                    for r in clip {
+                        self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+                    self.gl.disable(glow::SCISSOR_TEST);
+                    self.gl.use_program(Some(self.program)); // restore blit for the next item
+                    self.gl.delete_texture(tex);
+                    let _ = self.egl.destroy_image(self.display, image);
+                    continue;
+                }
+                // Draining window: per-pixel whirlpool close via the drain program (no
+                // shadow / frost; corners suppressed), scissored to each clip rect —
+                // LINEAR filtering so the shrink sampling stays smooth.
+                if let Some(dr) = drain {
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                    self.gl.use_program(Some(self.drain_program));
+                    self.gl.bind_vertex_array(Some(self.vao));
+                    self.gl.uniform_2_f32(self.dr_screen.as_ref(), screen_w as f32, screen_h as f32);
+                    self.gl.uniform_1_i32(self.dr_tex.as_ref(), 0);
+                    self.gl.uniform_4_f32(self.dr_rect.as_ref(), fx, fy, fw, fh);
+                    self.gl.uniform_1_f32(self.dr_opacity.as_ref(), opacity);
+                    self.gl.uniform_2_f32(self.dr_center.as_ref(), dr.center[0], dr.center[1]);
+                    self.gl.uniform_1_f32(self.dr_progress.as_ref(), dr.progress);
+                    self.gl.uniform_1_f32(self.dr_turns.as_ref(), dr.turns);
+                    self.gl.uniform_1_f32(self.dr_seed.as_ref(), dr.seed);
                     self.gl.enable(glow::SCISSOR_TEST);
                     for r in clip {
                         self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());

@@ -42,6 +42,7 @@ default_opacity = 1.0
 #   spin     rotate about the centre (full turn) + fade  (GPU)
 #   wave     traveling sinusoidal crest (per-pixel refraction); rings down + settles flat
 #   ripple   radial "drop in a lake" — per-pixel refraction from the centre out (GPU)
+#   drain    whirlpool close — content spirals into a vanishing point + fades (GPU)
 [anim]
 open  = "pop"           # window mapped
 close = "fade"          # window unmapped/destroyed
@@ -61,6 +62,8 @@ ripple_wavelength = 0.18 # `ripple` ring spacing (fraction of the radius; smalle
 ripple_speed = 1.2       # default `ripple` ring expansion speed (cycles/second)
 ripple_r0 = 0.12         # `ripple` spread — big rings at the centre, dying toward the rim
 ripple_duration = 2.5    # default `ripple` settle time (seconds; how long it lasts, <=0 loops)
+drain_turns = 1.5        # default `drain` swirl rotations at full progress (whirlpool close)
+drain_duration = 0.6     # default `drain` close duration (seconds; content spirals to a point)
 
 # Explicit block composition (overrides the preset for that category). Each block
 # is a table tagged by `block`; a spec may set its own `duration`. `easing` is
@@ -83,6 +86,7 @@ ripple_duration = 2.5    # default `ripple` settle time (seconds; how long it la
 #   wobble    { spring, friction }
 #   wave      { amplitude, wavelength, speed, axis = "x"|"y", duration } # sinusoidal (per-pixel)
 #   ripple    { amplitude, wavelength, speed, r0, duration }           # radial refraction (GPU)
+#   drain     { turns, duration }                                      # whirlpool close (GPU)
 #   burn      # no params here — the dissolve look comes from [burn] below
 
 [shadow]

@@ -30,6 +30,17 @@ pub struct BurnState {
     pub seed: f32,
 }
 
+/// Active drain/whirlpool close state. A close driver like [`BurnState`]: `progress`
+/// 0→1 spirals the window's content into a vanishing point + fades it, reaped at 1.
+#[derive(Debug, Clone, Copy)]
+pub struct Drain {
+    pub progress: Fade,
+    /// Swirl rotations at full progress (captured from config/rule when the drain begins).
+    pub turns: f32,
+    /// Per-window seed so each drain's rate-turbulence differs (see the renderer's DRAIN_FS).
+    pub seed: f32,
+}
+
 /// A tracked top-level window.
 #[derive(Debug, Clone)]
 pub struct Win {
@@ -74,6 +85,9 @@ pub struct Win {
     /// Active burn/dissolve close, or `None`. When `Some`, the window is dissolving
     /// (progress 0→1) instead of fading; reaped when progress reaches 1.
     pub burn: Option<BurnState>,
+    /// Active drain/whirlpool close, or `None`. A close driver like `burn`: spirals the
+    /// content into a vanishing point (progress 0→1), reaped when progress reaches 1.
+    pub drain: Option<Drain>,
     /// Fading out (unmapped/destroyed) — kept in the composite set until the fade
     /// reaches 0, then reaped. See [`WindowStack::begin_fade_out`].
     pub closing: bool,
@@ -113,6 +127,7 @@ impl Win {
             wave: None,
             ripple: None,
             burn: None,
+            drain: None,
             closing: false,
             destroyed: false,
         }
@@ -241,6 +256,27 @@ impl WindowStack {
         }
     }
 
+    /// Begin a drain/whirlpool close: run `progress` 0→1 over `duration` (keeping the
+    /// window composited via its pixmap), swirling `turns` rotations as the content
+    /// spirals into a vanishing point. `destroyed` marks it for removal (vs merely
+    /// unmapped) on completion. Returns `true` if there is something still visible to
+    /// drain, `false` if it can be dropped immediately.
+    pub fn begin_drain(&mut self, id: WindowId, duration: f64, turns: f32, seed: f32, destroyed: bool) -> bool {
+        match self.wins.get_mut(&id) {
+            Some(w) if w.fade.current() > 0.0 => {
+                w.closing = true;
+                w.destroyed |= destroyed;
+                w.drain = Some(Drain {
+                    progress: Fade::animating_eased(0.0, 1.0, duration, Easing::Linear),
+                    turns,
+                    seed,
+                });
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Begin a scale-collapse close: mark the window closing (keeping it
     /// composited via its pixmap) *without* touching opacity — the caller drives
     /// `scale` to ~0 (a centre line) via [`retarget_scale`](Self::retarget_scale),
@@ -263,6 +299,7 @@ impl WindowStack {
         if let Some(w) = self.wins.get_mut(&id) {
             w.closing = false;
             w.burn = None;
+            w.drain = None;
         }
     }
 
@@ -276,9 +313,11 @@ impl WindowStack {
             .values()
             .filter(|w| {
                 w.closing
-                    && match &w.burn {
-                        Some(b) => !b.progress.is_animating() && b.progress.current() >= 1.0,
-                        None => {
+                    && match (&w.burn, &w.drain) {
+                        // Burn / drain are progress-driven completion drivers: done at 1.0.
+                        (Some(b), _) => !b.progress.is_animating() && b.progress.current() >= 1.0,
+                        (_, Some(d)) => !d.progress.is_animating() && d.progress.current() >= 1.0,
+                        (None, None) => {
                             let faded = !w.fade.is_animating() && w.fade.current() <= 0.0;
                             // A scale-to-0 collapse (stretch close) ends as an
                             // invisible line — reap it even if opacity never moved.
@@ -383,6 +422,7 @@ impl WindowStack {
             w.wave = None;
             w.ripple = None;
             w.burn = None;
+            w.drain = None;
         }
     }
 
@@ -480,6 +520,11 @@ impl WindowStack {
             }
             if let Some(b) = &mut w.burn
                 && b.progress.advance(dt)
+            {
+                animating = true;
+            }
+            if let Some(d) = &mut w.drain
+                && d.progress.advance(dt)
             {
                 animating = true;
             }

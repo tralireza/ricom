@@ -403,6 +403,14 @@ pub enum Primitive {
     },
     /// Noise dissolve with ember front (close). Shader params from `[burn]`.
     Burn,
+    /// Whirlpool drain (close): content spirals into a vanishing point at the centre
+    /// and fades. Params fall back to the `[anim] drain_*` defaults.
+    Drain {
+        #[serde(default)]
+        turns: Option<f32>,
+        #[serde(default)]
+        duration: Option<f32>,
+    },
 }
 
 impl Primitive {
@@ -417,6 +425,7 @@ impl Primitive {
             Primitive::Ripple { .. } => "ripple",
             Primitive::Spin { .. } => "spin",
             Primitive::Burn => "burn",
+            Primitive::Drain { .. } => "drain",
         }
     }
 
@@ -451,7 +460,7 @@ pub enum AnimSel {
 
 /// Known preset names, for diagnostics + docs.
 pub const PRESETS: &[&str] = &[
-    "none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble", "stretch", "unroll", "minimize",
+    "none", "fade", "pop", "slide", "drop", "boing", "burn", "drain", "wobble", "stretch", "unroll", "minimize",
     "spin", "wave", "ripple",
 ];
 
@@ -478,6 +487,7 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
         }
         "boing" => vec![Wobble { spring: None, friction: None }],
         "burn" => vec![Burn],
+        "drain" => vec![Drain { turns: None, duration: None }],
         "wobble" => vec![Wobble { spring: None, friction: None }],
         // Directional stretch: a centre line grows to full width (x) / height (y),
         // content shown squashed throughout. Opaque (no opacity block) by design.
@@ -541,6 +551,10 @@ pub struct Anim {
     pub ripple_r0: f32,
     /// Default `ripple` settle time in seconds (how long it lasts; `<= 0` loops).
     pub ripple_duration: f32,
+    /// Default `drain` swirl rotations at full progress (whirlpool close).
+    pub drain_turns: f32,
+    /// Default `drain` close duration in seconds (progress 0→1, then reaped).
+    pub drain_duration: f32,
     /// Open animation (window mapped). Default preset `"pop"`.
     pub open: AnimSel,
     /// Close animation (window unmapped/destroyed). Default preset `"fade"`.
@@ -627,6 +641,8 @@ impl Default for Anim {
             ripple_speed: 1.2,
             ripple_r0: 0.12,
             ripple_duration: 2.5,
+            drain_turns: 1.5,
+            drain_duration: 0.6,
             open: AnimSel::Preset("pop".into()),
             close: AnimSel::Preset("fade".into()),
             r#move: AnimSel::Preset("wobble".into()),
@@ -759,6 +775,8 @@ impl Config {
         chg!("anim.ripple_speed", prev.anim.ripple_speed, self.anim.ripple_speed);
         chg!("anim.ripple_r0", prev.anim.ripple_r0, self.anim.ripple_r0);
         chg!("anim.ripple_duration", prev.anim.ripple_duration, self.anim.ripple_duration);
+        chg!("anim.drain_turns", prev.anim.drain_turns, self.anim.drain_turns);
+        chg!("anim.drain_duration", prev.anim.drain_duration, self.anim.drain_duration);
         chg!("anim.open", prev.anim.open, self.anim.open);
         chg!("anim.close", prev.anim.close, self.anim.close);
         chg!("anim.move", prev.anim.r#move, self.anim.r#move);
