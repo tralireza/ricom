@@ -420,6 +420,26 @@ fn drain_block_params_parse() {
 }
 
 #[test]
+fn anim_spec_from_maps_and_routes() {
+    // per-pixel effect: name = block tag; duration stays on the block.
+    let s = anim_spec_from("drain", &[("turns".into(), "3".into())]).unwrap();
+    assert_eq!(s.duration, None);
+    assert_eq!(s.blocks, [Primitive::Drain { turns: Some(3.0), duration: None }]);
+    let s = anim_spec_from("ripple", &[("amplitude".into(), "0.1".into()), ("duration".into(), "3".into())]).unwrap();
+    assert_eq!(s.duration, None);
+    assert!(matches!(&s.blocks[0], Primitive::Ripple { amplitude: Some(_), duration: Some(_), .. }));
+    // pop → scale(both); duration routes to the spec (Scale has no duration field).
+    let s = anim_spec_from("pop", &[("from".into(), "0.4".into()), ("duration".into(), "0.5".into())]).unwrap();
+    assert_eq!(s.duration, Some(0.5));
+    assert!(matches!(&s.blocks[0], Primitive::Scale { from: Some(_), axis: Axis::Both, .. }));
+    // stretch → scale(x); slide → translate.
+    assert!(matches!(&anim_spec_from("stretch", &[]).unwrap().blocks[0], Primitive::Scale { axis: Axis::X, .. }));
+    assert!(matches!(&anim_spec_from("slide", &[("dx".into(), "40".into())]).unwrap().blocks[0], Primitive::Translate { .. }));
+    // bad value type → Err.
+    assert!(anim_spec_from("ripple", &[("amplitude".into(), "abc".into())]).is_err());
+}
+
+#[test]
 fn explicit_blocks_parse() {
     let t = r#"
 [anim.open]

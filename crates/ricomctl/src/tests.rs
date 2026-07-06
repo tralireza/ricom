@@ -37,6 +37,19 @@ fn commands_map() {
             params: vec![("amplitude".into(), "0.1".into()), ("duration".into(), "3".into())],
         }
     );
+    // set: category + effect + optional k=v params.
+    assert_eq!(
+        cmd(&["set", "open", "pop"]),
+        Command::SetAnim { category: "open".into(), effect: "pop".into(), params: vec![] }
+    );
+    assert_eq!(
+        cmd(&["set", "close", "drain", "turns=3"]),
+        Command::SetAnim {
+            category: "close".into(),
+            effect: "drain".into(),
+            params: vec![("turns".into(), "3".into())],
+        }
+    );
 }
 
 #[test]
@@ -51,6 +64,7 @@ fn globals_before_command() {
 fn help_and_version_go_to_stdout() {
     assert!(matches!(parse(&["-h"]), Err(Exit::Stdout(_))));
     assert!(matches!(parse(&["--version"]), Err(Exit::Stdout(_))));
+    assert!(matches!(parse(&["effects"]), Err(Exit::Stdout(_)))); // client-side listing, no server
 }
 
 #[test]
@@ -68,4 +82,7 @@ fn errors_are_usage() {
     assert!(matches!(parse(&["animate", "0x1"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["animate", "zz", "spin"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["animate", "0x1", "spin", "extra"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["set"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["set", "close"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["set", "close", "drain", "notakv"]), Err(Exit::Usage(_))));
 }

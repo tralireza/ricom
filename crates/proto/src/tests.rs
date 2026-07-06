@@ -25,6 +25,20 @@ fn command_roundtrip() {
         effect: "ripple".into(),
         params: vec![("amplitude".into(), "0.12".into()), ("duration".into(), "4".into())],
     });
+    roundtrip_cmd(Command::SetAnim { category: "close".into(), effect: "drain".into(), params: vec![] });
+    roundtrip_cmd(Command::SetAnim {
+        category: "close".into(),
+        effect: "drain".into(),
+        params: vec![("turns".into(), "3".into())],
+    });
+}
+
+#[test]
+fn effect_params_schema() {
+    assert!(effect_params("ripple").unwrap().iter().any(|(k, _)| *k == "amplitude"));
+    assert!(effect_params("reset").unwrap().is_empty());
+    assert!(effect_params("bogus").is_none());
+    assert!(EFFECTS.contains(&"drain"));
 }
 
 #[test]

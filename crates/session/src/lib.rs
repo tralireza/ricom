@@ -148,12 +148,18 @@ fn param_easing(params: &[(String, String)]) -> Result<Option<wm::anim::Easing>,
     }
 }
 
-/// Reject any provided key not valid for `effect` (strict), so a typo like
-/// `amplitud=` is flagged instead of silently ignored.
-fn check_keys(effect: &str, params: &[(String, String)], valid: &[&str]) -> Result<(), String> {
+/// Reject any provided key not valid for `effect` (strict), so a typo like `amplitud=`
+/// is flagged instead of silently ignored. Valid keys come from the shared
+/// [`proto::effect_params`] schema — the one source used by `animate`, `set`, and help.
+fn check_keys(effect: &str, params: &[(String, String)]) -> Result<(), String> {
+    let valid = proto::effect_params(effect).unwrap_or(&[]);
     for (k, _) in params {
-        if !valid.contains(&k.as_str()) {
-            let list = if valid.is_empty() { "none".to_string() } else { valid.join(", ") };
+        if !valid.iter().any(|(vk, _)| vk == k) {
+            let list = if valid.is_empty() {
+                "none".to_string()
+            } else {
+                valid.iter().map(|(vk, _)| *vk).collect::<Vec<_>>().join(", ")
+            };
             return Err(format!("effect '{effect}' has no param '{k}' (valid: {list})"));
         }
     }
@@ -1051,6 +1057,7 @@ impl App {
                 Reply::Text(banner)
             }
             C::Animate { win, effect, params } => self.animate_window(win, &effect, &params),
+            C::SetAnim { category, effect, params } => self.set_anim(&category, &effect, &params),
         }
     }
 
@@ -1084,14 +1091,14 @@ impl App {
         const DUR: f64 = 0.6;
         match effect {
             "spin" => {
-                check_keys(effect, params, &["degrees", "duration", "easing"])?;
+                check_keys(effect, params)?;
                 let rad = param_f32(params, "degrees")?.map(|d| f64::from(d) * PI / 180.0).unwrap_or(TAU);
                 let dur = param_f32(params, "duration")?.map(f64::from).unwrap_or(DUR);
                 let ease = param_easing(params)?.unwrap_or(Easing::EaseOut);
                 self.windows.spin_in(win, rad, dur, ease);
             }
             "pop" | "stretch" | "unroll" => {
-                check_keys(effect, params, &["from", "duration", "easing"])?;
+                check_keys(effect, params)?;
                 let (default_from, axis) = match effect {
                     "pop" => (0.4, Axis::Both),
                     "stretch" => (0.0, Axis::X),
@@ -1103,7 +1110,7 @@ impl App {
                 self.windows.scale_in(win, from, dur, axis, ease);
             }
             "slide" => {
-                check_keys(effect, params, &["dx", "dy", "duration", "easing"])?;
+                check_keys(effect, params)?;
                 let dx = param_f32(params, "dx")?.unwrap_or(-160.0);
                 let dy = param_f32(params, "dy")?.unwrap_or(0.0);
                 let dur = param_f32(params, "duration")?.map(f64::from).unwrap_or(DUR);
@@ -1111,7 +1118,7 @@ impl App {
                 self.windows.translate_in(win, [dx, dy], dur, ease);
             }
             "wobble" => {
-                check_keys(effect, params, &["spring", "friction"])?;
+                check_keys(effect, params)?;
                 let spring = param_f32(params, "spring")?.unwrap_or(self.config.anim.wobble_spring);
                 let friction = param_f32(params, "friction")?.unwrap_or(self.config.anim.wobble_friction);
                 if let Some(rest) = self
@@ -1125,7 +1132,7 @@ impl App {
                 }
             }
             "wave" => {
-                check_keys(effect, params, &["amplitude", "wavelength", "speed", "axis", "duration"])?;
+                check_keys(effect, params)?;
                 let amp = param_f32(params, "amplitude")?.unwrap_or(self.config.anim.wave_amplitude);
                 let wl = param_f32(params, "wavelength")?.unwrap_or(self.config.anim.wave_wavelength);
                 let speed = param_f32(params, "speed")?.unwrap_or(self.config.anim.wave_speed);
@@ -1134,7 +1141,7 @@ impl App {
                 self.windows.wave_to(win, amp, wl, speed, axis, duration);
             }
             "ripple" => {
-                check_keys(effect, params, &["amplitude", "wavelength", "speed", "r0", "duration"])?;
+                check_keys(effect, params)?;
                 let amp = param_f32(params, "amplitude")?.unwrap_or(self.config.anim.ripple_amplitude);
                 let wl = param_f32(params, "wavelength")?.unwrap_or(self.config.anim.ripple_wavelength);
                 let speed = param_f32(params, "speed")?.unwrap_or(self.config.anim.ripple_speed);
@@ -1143,7 +1150,7 @@ impl App {
                 self.windows.ripple_to(win, [0.5, 0.5], amp, wl, speed, r0, duration);
             }
             "reset" => {
-                check_keys(effect, params, &[])?;
+                check_keys(effect, params)?;
                 self.windows.reset_transforms(win);
             }
             _ => {
@@ -1169,6 +1176,67 @@ impl App {
             Ok(()) => proto::Reply::Ok,
             Err(e) => proto::Reply::Error(e),
         }
+    }
+
+    /// `ricomctl set <category> <effect> [k=v…]` — live-select a transition's effect
+    /// (+ optional params), session-only: mutates `self.config.anim.<category>`, so a
+    /// `reload`/SIGHUP reverts. Takes effect on the next open/close/move (resolved
+    /// per-window). `focus` is a bare effect name (no params in the current model).
+    #[cfg(unix)]
+    fn set_anim(&mut self, category: &str, effect: &str, params: &[(String, String)]) -> proto::Reply {
+        use config::{AnimSel, Category};
+        if category == "focus" {
+            if !params.is_empty() {
+                return proto::Reply::Error("focus takes no params".into());
+            }
+            if !config::FOCUS_EFFECTS.contains(&effect) {
+                return proto::Reply::Error(format!(
+                    "unknown focus effect '{effect}' (valid: {})",
+                    config::FOCUS_EFFECTS.join(", ")
+                ));
+            }
+            self.config.anim.focus = effect.to_string();
+        } else {
+            let cat = match category {
+                "open" => Category::Open,
+                "close" => Category::Close,
+                "move" => Category::Move,
+                _ => {
+                    return proto::Reply::Error(format!(
+                        "unknown category '{category}' (open|close|move|focus)"
+                    ));
+                }
+            };
+            let sel = if params.is_empty() {
+                if !config::PRESETS.contains(&effect) {
+                    return proto::Reply::Error(format!("unknown effect '{effect}' (see `ricomctl effects`)"));
+                }
+                AnimSel::Preset(effect.to_string())
+            } else {
+                // With params: validate keys via the shared schema (serde won't reject
+                // unknown keys), then build the one-block spec.
+                if proto::effect_params(effect).is_none() {
+                    return proto::Reply::Error(format!("effect '{effect}' takes no params"));
+                }
+                if let Err(e) = check_keys(effect, params) {
+                    return proto::Reply::Error(e);
+                }
+                match config::anim_spec_from(effect, params) {
+                    Ok(spec) => AnimSel::Spec(spec),
+                    Err(e) => return proto::Reply::Error(e),
+                }
+            };
+            match cat {
+                Category::Open => self.config.anim.open = sel,
+                Category::Close => self.config.anim.close = sel,
+                Category::Move => self.config.anim.r#move = sel,
+            }
+        }
+        tracing::info!(category, effect, params = params.len(), "set anim (session-only)");
+        if self.config.osd.enabled && self.config.osd.ack {
+            self.show_osd(format!(">> {category} = {effect}"), self.config.osd.duration.min(1.2), OSD_ACK);
+        }
+        proto::Reply::Ok
     }
 
     /// The focus-triggered effect for `id`: a matching rule's `focus`, else the

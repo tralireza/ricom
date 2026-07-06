@@ -28,12 +28,12 @@ fn param_axis_and_easing() {
 
 #[test]
 fn check_keys_strict() {
-    let ripple = &["amplitude", "wavelength", "speed", "r0", "duration"];
-    assert!(check_keys("ripple", &p(&[("amplitude", "0.1"), ("duration", "3")]), ripple).is_ok());
+    // valid keys come from the shared proto::effect_params schema (single source).
+    assert!(check_keys("ripple", &p(&[("amplitude", "0.1"), ("duration", "3")])).is_ok());
     // an unknown key is rejected, and the message names it + lists the valid set
-    let err = check_keys("ripple", &p(&[("amplitud", "0.1")]), ripple).unwrap_err();
+    let err = check_keys("ripple", &p(&[("amplitud", "0.1")])).unwrap_err();
     assert!(err.contains("amplitud") && err.contains("amplitude"));
     // reset takes no params
-    assert!(check_keys("reset", &p(&[("x", "1")]), &[]).is_err());
-    assert!(check_keys("reset", &p(&[]), &[]).is_ok());
+    assert!(check_keys("reset", &p(&[("x", "1")])).is_err());
+    assert!(check_keys("reset", &p(&[])).is_ok());
 }

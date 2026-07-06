@@ -44,6 +44,8 @@ default_opacity = 1.0
 #   ripple   radial "drop in a lake" — per-pixel refraction from the centre out (GPU)
 #   drain    whirlpool close — content spirals into a vanishing point + fades (GPU)
 [anim]
+# Tip: set any of these live with `ricomctl set <open|close|move|focus> <effect> [k=v…]`
+# (session-only — a `ricomctl reload`/SIGHUP reverts to this file). `ricomctl effects` lists params.
 open  = "pop"           # window mapped
 close = "fade"          # window unmapped/destroyed
 move  = "wobble"        # window moved/resized

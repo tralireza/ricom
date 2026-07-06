@@ -519,6 +519,50 @@ pub fn expand_sel(sel: &AnimSel) -> AnimSpec {
     }
 }
 
+/// Build a one-block [`AnimSpec`] from an effect name + `(key, value)` params — the
+/// live-`set`-with-params path. Maps the high-level names to their `Primitive` block
+/// (`pop`/`stretch`/`unroll` → `scale` with an implicit `axis`; `slide` → `translate`;
+/// others = the block of the same name), routes a `duration` param onto the block for the
+/// per-pixel effects that own one (wave/ripple/drain) or onto the spec otherwise, and
+/// deserialises the rest through the `#[serde(tag = "block")]` mapping (so value types are
+/// validated). Unknown *keys* are the caller's job to reject first (via
+/// `proto::effect_params`) — serde on `Primitive` does not `deny_unknown_fields`.
+pub fn anim_spec_from(effect: &str, params: &[(String, String)]) -> Result<AnimSpec, String> {
+    // High-level name → (block tag, implicit axis for the scale-based ones).
+    let (block, axis) = match effect {
+        "pop" => ("scale", Some("both")),
+        "stretch" => ("scale", Some("x")),
+        "unroll" => ("scale", Some("y")),
+        "slide" => ("translate", None),
+        other => (other, None),
+    };
+    // `duration` is a block field only for the per-pixel effects; elsewhere it's the
+    // category-level (AnimSpec) duration.
+    let block_has_duration = matches!(effect, "wave" | "ripple" | "drain");
+    let mut table = toml::value::Table::new();
+    table.insert("block".into(), toml::Value::String(block.to_string()));
+    if let Some(a) = axis {
+        table.insert("axis".into(), toml::Value::String(a.to_string()));
+    }
+    let mut duration = None;
+    for (k, v) in params {
+        if k == "duration" && !block_has_duration {
+            duration = Some(
+                v.parse::<f64>().map_err(|_| format!("param 'duration' wants a number, got '{v}'"))?,
+            );
+            continue;
+        }
+        // Numeric-looking values become TOML floats (the f32 fields); the rest stay
+        // strings (the `axis` / `easing` enums).
+        let val = v.parse::<f64>().map(toml::Value::Float).unwrap_or_else(|_| toml::Value::String(v.clone()));
+        table.insert(k.clone(), val);
+    }
+    let block: Primitive = toml::Value::Table(table)
+        .try_into()
+        .map_err(|e| format!("bad params for '{effect}': {e}"))?;
+    Ok(AnimSpec { duration, blocks: vec![block] })
+}
+
 /// Open / close / move animation selection + shared primitive param defaults.
 /// Replaces the old `[fade]` and `[animation]` blocks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

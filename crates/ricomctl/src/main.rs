@@ -34,6 +34,9 @@ COMMANDS:
     animate <win> <fx> [k=v …]  Play a transform on one window
                       (fx: spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset;
                        params override [anim] defaults, e.g. amplitude=0.1 duration=3)
+    set <cat> <fx> [k=v …]  Live-select a transition's effect (session-only; a
+                      reload/SIGHUP reverts). cat: open|close|move|focus
+    effects           List effects and their params
 
 EXAMPLES:
     ricomctl list
@@ -41,6 +44,8 @@ EXAMPLES:
     ricomctl notify \"hello ricom\" 3
     ricomctl animate 0x1a00007 spin
     ricomctl animate 0x1a00007 ripple amplitude=0.12 duration=4
+    ricomctl set close drain turns=3
+    ricomctl effects
     ricomctl reload
 ";
 
@@ -146,6 +151,23 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
             }
             Command::Animate { win: parse_win(w)?, effect: fx.to_string(), params }
         }
+        "set" => {
+            let cat = a.next().ok_or_else(|| {
+                Exit::Usage("set needs a <category> (open|close|move|focus) and an <effect>\n".into())
+            })?;
+            let fx = a.next().ok_or_else(|| Exit::Usage("set needs an <effect> (see `ricomctl effects`)\n".into()))?;
+            // Trailing key=value params (drained like the animate arm).
+            let mut params = Vec::new();
+            for tok in a.by_ref() {
+                let (k, v) = tok
+                    .split_once('=')
+                    .ok_or_else(|| Exit::Usage(format!("set params must be key=value, got '{tok}'\n")))?;
+                params.push((k.to_string(), v.to_string()));
+            }
+            Command::SetAnim { category: cat.to_string(), effect: fx.to_string(), params }
+        }
+        // Client-side: print the shared effect→params reference and exit (no server).
+        "effects" => return Err(Exit::Stdout(format_effects())),
         other => return Err(Exit::Usage(format!("unknown command '{other}'\n\n{HELP}"))),
     };
     if let Some(extra) = a.next() {
@@ -161,6 +183,27 @@ fn parse_win(s: &str) -> Result<proto::WinId, Exit> {
         None => s.parse::<u32>(),
     };
     parsed.map_err(|_| Exit::Usage(format!("invalid window id '{s}' (want decimal or 0x hex)\n")))
+}
+
+/// Render the effect → params reference (from the shared `proto` schema) for `effects`.
+fn format_effects() -> String {
+    use std::fmt::Write;
+    let mut s =
+        String::from("EFFECTS — params for `animate <win> <fx> k=v…` and `set <cat> <fx> k=v…`:\n");
+    for &fx in proto::EFFECTS {
+        match proto::effect_params(fx) {
+            Some(ps) if !ps.is_empty() => {
+                let _ = writeln!(s, "  {fx}:");
+                for (k, desc) in ps {
+                    let _ = writeln!(s, "      {k:<11} {desc}");
+                }
+            }
+            _ => {
+                let _ = writeln!(s, "  {fx:<11} (no params)");
+            }
+        }
+    }
+    s
 }
 
 fn main() -> ExitCode {

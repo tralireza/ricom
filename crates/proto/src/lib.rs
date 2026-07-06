@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Wire-protocol version. Bump on any incompatible `Command`/`Reply` change.
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// Raw X window id (mirrors `wm::WindowId`).
 pub type WinId = u32;
@@ -50,6 +50,67 @@ pub enum Command {
         #[serde(default)]
         params: Vec<(String, String)>,
     },
+    /// Live-select the effect (preset name + optional params) for a transition category
+    /// (`open`/`close`/`move`/`focus`) — session-only (a `Reload`/SIGHUP reverts). The
+    /// server validates the category, effect, and each param.
+    SetAnim {
+        /// `"open"` | `"close"` | `"move"` | `"focus"`.
+        category: String,
+        /// Preset / effect name (e.g. `pop`, `drain`, `wave`).
+        effect: String,
+        /// Optional `(key, value)` param overrides (empty ⇒ a bare preset).
+        #[serde(default)]
+        params: Vec<(String, String)>,
+    },
+}
+
+/// Every effect/preset name `animate` and `set` accept — for help + validation.
+pub const EFFECTS: &[&str] =
+    &["spin", "pop", "stretch", "unroll", "slide", "wobble", "wave", "ripple", "drain", "reset"];
+
+/// Per-effect parameter keys + one-line descriptions, shared by `ricomctl` (help) and
+/// the compositor (param validation) so the two can't drift. Keys mirror the config
+/// `[anim]` / block fields. `Some(&[])` = the effect takes no params; `None` = unknown.
+pub fn effect_params(effect: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    Some(match effect {
+        "spin" => &[
+            ("degrees", "rotation in degrees (default 360)"),
+            ("duration", "seconds"),
+            ("easing", "ease-out | ease-in | linear"),
+        ],
+        "pop" | "stretch" | "unroll" => &[
+            ("from", "start scale 0..1 (0 = a line)"),
+            ("duration", "seconds"),
+            ("easing", "ease-out | ease-in | linear"),
+        ],
+        "slide" => &[
+            ("dx", "x offset in px"),
+            ("dy", "y offset in px"),
+            ("duration", "seconds"),
+            ("easing", "ease-out | ease-in | linear"),
+        ],
+        "wobble" => &[("spring", "spring stiffness"), ("friction", "velocity damping")],
+        "wave" => &[
+            ("amplitude", "peak UV displacement"),
+            ("wavelength", "fraction of the travel axis"),
+            ("speed", "crest travel, cycles/s"),
+            ("axis", "x | y (travel direction)"),
+            ("duration", "settle seconds (<=0 loops)"),
+        ],
+        "ripple" => &[
+            ("amplitude", "peak UV refraction"),
+            ("wavelength", "ring spacing"),
+            ("speed", "ring expansion, cycles/s"),
+            ("r0", "spread (big centre, faint rim)"),
+            ("duration", "settle seconds (<=0 loops)"),
+        ],
+        "drain" => &[
+            ("turns", "swirl rotations at full progress"),
+            ("duration", "close seconds"),
+        ],
+        "reset" => &[],
+        _ => return None,
+    })
 }
 
 /// The compositor's reply to a [`Command`].
