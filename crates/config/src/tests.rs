@@ -51,6 +51,7 @@ fn defaults_match_compiled_behaviour() {
     assert_eq!(c.anim.open, AnimSel::Preset("pop".into()));
     assert_eq!(c.anim.close, AnimSel::Preset("fade".into()));
     assert_eq!(c.anim.r#move, AnimSel::Preset("wobble".into()));
+    assert_eq!(c.anim.focus, "none");
     assert_eq!((c.burn.seg_scale, c.burn.ember_width), (36.0, 0.07));
     assert_eq!(c.burn.ember_cool, [0.28, 0.02, 0.0]);
     assert_eq!(c.burn.ember_hot, [0.75, 0.22, 0.04]);
@@ -320,6 +321,25 @@ fn scale_axis_parses() {
     let c: Config = toml::from_str("[anim.open]\nblocks = [ { block = \"scale\" } ]\n").unwrap();
     let AnimSel::Spec(s) = &c.anim.open else { panic!("expected explicit spec") };
     assert_eq!(s.blocks, [Primitive::Scale { from: None, axis: Axis::Both, easing: Easing::EaseOut }]);
+}
+
+#[test]
+fn focus_effect_resolves_global_and_per_rule() {
+    let t = r#"
+[anim]
+focus = "spin"
+
+[[rule]]
+match = { class = "mpv" }
+focus = "wave"
+"#;
+    let c: Config = toml::from_str(t).unwrap();
+    assert_eq!(c.anim.focus, "spin"); // global focus effect
+    // mpv rule overrides the resolved per-window focus.
+    let mpv = WindowMatch { class: "mpv".into(), ..Default::default() };
+    assert_eq!(c.resolve(&mpv).focus, Some("wave".into()));
+    // Non-matching window: no per-rule focus (session falls back to [anim] focus).
+    assert_eq!(c.resolve(&WindowMatch { class: "x".into(), ..Default::default() }).focus, None);
 }
 
 #[test]

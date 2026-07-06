@@ -45,6 +45,8 @@ default_opacity = 1.0
 open  = "pop"           # window mapped
 close = "fade"          # window unmapped/destroyed
 move  = "wobble"        # window moved/resized
+focus = "none"          # in-place effect when a window gains focus: wave | wobble | spin |
+                        # pop | stretch | unroll | slide | none. Per-window: [[rule]] focus = …
 duration = 0.2          # default seconds for opacity / scale / translate
 scale_from = 0.85       # default `scale` start factor (open) / end factor (close)
 wobble_spring = 350.0   # default wobble spring stiffness k (higher = snappier)

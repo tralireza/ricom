@@ -1015,18 +1015,15 @@ impl App {
         self.damage_full();
     }
 
-    /// Play a one-shot animation on `win` (for `ricomctl animate`) — the transform
-    /// effects that have no external X trigger. Each self-settles back to rest
-    /// (spin→0, scale→1, translate→0), so no explicit restore is needed; `reset`
-    /// snaps everything back at once. Unknown window / effect → `Reply::Error`.
-    #[cfg(unix)]
-    fn animate_window(&mut self, win: WindowId, effect: &str) -> proto::Reply {
+    /// Play a one-shot, self-restoring in-place effect on `win` — the transform
+    /// vocabulary shared by `ricomctl animate` and the focus trigger. Each self-
+    /// settles back to rest (spin→0, scale→1, translate→0); `reset` snaps back at
+    /// once. Returns `false` for an unknown effect name (`"none"` included); a
+    /// no-op if `win` is untracked.
+    fn apply_effect(&mut self, win: WindowId, effect: &str) -> bool {
         use std::f64::consts::TAU;
         use wm::anim::{Axis, Easing};
         const DUR: f64 = 0.6;
-        if self.windows.get(win).is_none() {
-            return proto::Reply::Error(format!("no such window {win:#x}"));
-        }
         match effect {
             "spin" => self.windows.spin_in(win, TAU, DUR, Easing::EaseOut),
             "pop" => self.windows.scale_in(win, 0.4, DUR, Axis::Both, Easing::EaseOut),
@@ -1058,15 +1055,52 @@ impl App {
                 );
             }
             "reset" => self.windows.reset_transforms(win),
-            other => {
-                return proto::Reply::Error(format!(
-                    "unknown effect '{other}' (spin|pop|stretch|unroll|slide|wobble|wave|reset)"
-                ));
-            }
+            _ => return false,
         }
         self.ensure_frame_timer();
         self.damage_full();
-        proto::Reply::Ok
+        true
+    }
+
+    /// `ricomctl animate <win> <effect>` — apply an in-place effect, mapping the
+    /// outcome to a reply. Unknown window / effect → `Reply::Error`.
+    #[cfg(unix)]
+    fn animate_window(&mut self, win: WindowId, effect: &str) -> proto::Reply {
+        if self.windows.get(win).is_none() {
+            return proto::Reply::Error(format!("no such window {win:#x}"));
+        }
+        if self.apply_effect(win, effect) {
+            proto::Reply::Ok
+        } else {
+            proto::Reply::Error(format!(
+                "unknown effect '{effect}' (spin|pop|stretch|unroll|slide|wobble|wave|reset)"
+            ))
+        }
+    }
+
+    /// The focus-triggered effect for `id`: a matching rule's `focus`, else the
+    /// global `[anim] focus`. `"none"` = no focus effect.
+    fn focus_effect(&self, id: WindowId) -> String {
+        self.resolve_rules(id).focus.unwrap_or_else(|| self.config.anim.focus.clone())
+    }
+
+    /// Update the active (focused) window: re-apply inactive-dim and fire the
+    /// per-window focus effect on the newly-focused window. No-op if unchanged.
+    fn set_active_window(&mut self, new: Option<WindowId>) {
+        if new == self.active_window {
+            return;
+        }
+        self.active_window = new;
+        self.apply_dim(true);
+        if let Some(id) = new
+            && self.windows.get(id).is_some()
+        {
+            let fx = self.focus_effect(id);
+            if fx != "none" {
+                self.apply_effect(id, &fx);
+            }
+        }
+        self.damage_full();
     }
 
     /// Effective opacity target for a window: an explicit `_NET_WM_WINDOW_OPACITY`
@@ -1264,10 +1298,22 @@ impl App {
                             let rad = degrees.unwrap_or(SPIN_DEFAULT_DEG as f32) as f64 * PI / 180.0;
                             self.windows.spin_out(id, rad, dur, map_easing(*easing));
                         }
-                        // Wave (like wobble) is a live/open mesh effect — the mesh path
-                        // isn't drawn for a closing window, so on close it's a no-op and
-                        // the window just fades out.
-                        Primitive::Opacity { .. } | Primitive::Wobble { .. } | Primitive::Wave { .. } => {}
+                        Primitive::Wave { amplitude, wavelength, speed, axis, decay } => {
+                            // Ripple while the opacity fade (below) carries the window out
+                            // — the mesh renders textured × the fading alpha, reaped at 0.
+                            let rect = self.outer_rect_of(id);
+                            self.windows.wave_to(
+                                id,
+                                rect,
+                                amplitude.unwrap_or(self.config.anim.wave_amplitude),
+                                wavelength.unwrap_or(self.config.anim.wave_wavelength),
+                                speed.unwrap_or(self.config.anim.wave_speed),
+                                map_axis(*axis),
+                                decay.unwrap_or(self.config.anim.wave_decay),
+                            );
+                        }
+                        // Wobble on close is ignored — a closing window uses the fade path.
+                        Primitive::Opacity { .. } | Primitive::Wobble { .. } => {}
                     }
                 }
                 // Exactly one completion driver + the closing flag: burn (begun above)
@@ -2089,11 +2135,7 @@ impl App {
                     && self.x.atom("_NET_ACTIVE_WINDOW").is_ok_and(|a| a == e.atom)
                 {
                     let new = self.x.get_active_window().ok().flatten();
-                    if new != self.active_window {
-                        self.active_window = new;
-                        self.apply_dim(true);
-                        self.damage_full();
-                    }
+                    self.set_active_window(new);
                 }
             }
             Event::PropertyNotify(e) => {
@@ -2122,11 +2164,7 @@ impl App {
                     && e.detail != NotifyDetail::POINTER_ROOT;
                 if real {
                     let new = self.focused_top_level();
-                    if new != self.active_window {
-                        self.active_window = new;
-                        self.apply_dim(true);
-                        self.damage_full();
-                    }
+                    self.set_active_window(new);
                 }
             }
             Event::DamageNotify(e) => {

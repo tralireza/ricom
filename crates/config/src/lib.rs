@@ -92,6 +92,10 @@ pub struct Rule {
     /// Override the move/resize animation. `None` = use the global `[anim] move`.
     #[serde(rename = "move")]
     pub r#move: Option<AnimSel>,
+    /// Override the focus effect for matching windows — an in-place effect name
+    /// (`wave`/`wobble`/`spin`/`pop`/…/`none`) played when the window gains focus.
+    /// `None` = use the global `[anim] focus`.
+    pub focus: Option<String>,
 }
 
 /// A window's identity + state, matched against [`Rule`]s. Built by `session`
@@ -120,6 +124,8 @@ pub struct RuleResult {
     pub open: Option<AnimSpec>,
     pub close: Option<AnimSpec>,
     pub r#move: Option<AnimSpec>,
+    /// Resolved focus effect name (`None` = fall back to `[anim] focus`).
+    pub focus: Option<String>,
 }
 
 impl Match {
@@ -433,6 +439,11 @@ pub const PRESETS: &[&str] = &[
     "spin", "wave",
 ];
 
+/// In-place effect names valid for `[anim] focus` / `[[rule]] focus` (and the
+/// `ricomctl animate` vocabulary), plus `"none"`.
+pub const FOCUS_EFFECTS: &[&str] =
+    &["none", "spin", "pop", "stretch", "unroll", "slide", "wobble", "wave", "reset"];
+
 /// Expand a preset name into its block list. `None` if the name is unknown.
 fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
     use Primitive::*;
@@ -509,6 +520,10 @@ pub struct Anim {
     /// Move/resize animation. Default preset `"wobble"`.
     #[serde(rename = "move")]
     pub r#move: AnimSel,
+    /// Focus effect: an in-place effect name (`wave`/`wobble`/`spin`/`pop`/…) played
+    /// when a window gains focus; `"none"` (default) = off. Per-window override via a
+    /// `[[rule]] focus = …`.
+    pub focus: String,
 }
 
 impl Anim {
@@ -582,6 +597,7 @@ impl Default for Anim {
             open: AnimSel::Preset("pop".into()),
             close: AnimSel::Preset("fade".into()),
             r#move: AnimSel::Preset("wobble".into()),
+            focus: "none".into(),
         }
     }
 }
@@ -708,6 +724,7 @@ impl Config {
         chg!("anim.open", prev.anim.open, self.anim.open);
         chg!("anim.close", prev.anim.close, self.anim.close);
         chg!("anim.move", prev.anim.r#move, self.anim.r#move);
+        chg!("anim.focus", prev.anim.focus, self.anim.focus);
         chg!("shadow.enabled", prev.shadow.enabled, self.shadow.enabled);
         chg!("shadow.radius", prev.shadow.radius, self.shadow.radius);
         chg!("shadow.strength", prev.shadow.strength, self.shadow.strength);
@@ -791,6 +808,7 @@ impl Config {
                 if let Some(s) = &rule.r#move {
                     r.r#move = Some(expand_sel(s));
                 }
+                r.focus = rule.focus.clone().or(r.focus);
             }
         }
         r
@@ -820,6 +838,9 @@ impl Config {
         ] {
             validate_sel(label, sel, cat, &mut warns);
         }
+        if !FOCUS_EFFECTS.contains(&self.anim.focus.as_str()) {
+            warns.push(format!("anim.focus: unknown effect {:?} (no focus animation)", self.anim.focus));
+        }
         for (i, rule) in self.rules.iter().enumerate() {
             if let Some(s) = &rule.open {
                 validate_sel(&format!("rule[{i}].open"), s, Category::Open, &mut warns);
@@ -829,6 +850,11 @@ impl Config {
             }
             if let Some(s) = &rule.r#move {
                 validate_sel(&format!("rule[{i}].move"), s, Category::Move, &mut warns);
+            }
+            if let Some(f) = &rule.focus
+                && !FOCUS_EFFECTS.contains(&f.as_str())
+            {
+                warns.push(format!("rule[{i}].focus: unknown effect {f:?} (no focus animation)"));
             }
         }
         warns
