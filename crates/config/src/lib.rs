@@ -212,6 +212,12 @@ pub struct Osd {
     pub out_dur: f64,
     /// Toast a short confirmation for content-less commands (ping/reload/fps toggle).
     pub ack: bool,
+    /// Banner background colour (RGBA, `0.0..=1.0`). Set alpha to `0.0` for a
+    /// text-only toast (no box); keep `outline` on so the text stays legible.
+    pub background: [f32; 4],
+    /// Draw a dark outline/halo behind the glyphs so text reads over any backdrop
+    /// — essential when `background` is transparent.
+    pub outline: bool,
 }
 
 /// On-demand FPS / frame-time HUD, toggled by a global hotkey. Drawn by the
@@ -572,6 +578,8 @@ impl Default for Osd {
             in_dur: 0.06,
             out_dur: 0.08,
             ack: true,
+            background: [0.05, 0.05, 0.07, 0.88],
+            outline: true,
         }
     }
 }
@@ -688,6 +696,8 @@ impl Config {
         chg!("osd.in_dur", prev.osd.in_dur, self.osd.in_dur);
         chg!("osd.out_dur", prev.osd.out_dur, self.osd.out_dur);
         chg!("osd.ack", prev.osd.ack, self.osd.ack);
+        chg!("osd.background", prev.osd.background, self.osd.background);
+        chg!("osd.outline", prev.osd.outline, self.osd.outline);
         chg!("burn.seg_scale", prev.burn.seg_scale, self.burn.seg_scale);
         chg!("burn.ember_width", prev.burn.ember_width, self.burn.ember_width);
         chg!("burn.ember_cool", prev.burn.ember_cool, self.burn.ember_cool);

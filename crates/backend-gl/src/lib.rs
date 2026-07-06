@@ -482,6 +482,10 @@ pub struct Osd {
     pub effect: OsdEffect,
     /// Text colour (RGB); alpha comes from the fade.
     pub color: [f32; 3],
+    /// Banner background colour (RGBA); alpha `0.0` = text-only (no box drawn).
+    pub background: [f32; 4],
+    /// Draw a dark outline behind the glyphs (legibility without a box).
+    pub outline: bool,
 }
 
 /// Solid-colour fill with optional rounded corners (HUD panel; graph bars/budget
@@ -1266,13 +1270,29 @@ impl GlBackend {
                 self.gl.scissor(rx as i32, sh - (ry + rh) as i32, rw as i32, rh as i32);
             }
         }
-        self.fill_rect(px, py, panel_w, panel_h, radius, [0.05, 0.05, 0.07, 0.88 * alpha], sw, sh);
+        // Background box — skip entirely when transparent (text-only toast).
+        let bg = osd.background;
+        if bg[3] > 0.001 {
+            self.fill_rect(px, py, panel_w, panel_h, radius, [bg[0], bg[1], bg[2], bg[3] * alpha], sw, sh);
+        }
         // Left-shift by the square cell's side padding to centre horizontally; per
         // line, nudge down by the cell's descender excess to centre vertically.
         let tx = px + pad - (line_h - advance) * 0.5;
         let c = osd.color;
+        // An 8-way dark halo behind each line keeps text legible over any backdrop
+        // — the contrast the box used to give, so a transparent box still reads.
+        let o = 1.6 * s;
+        const HALO: [(f32, f32); 8] = [
+            (-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0),
+            (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0),
+        ];
         for (i, line) in lines.iter().enumerate() {
             let ly = py + pad + i as f32 * line_h + (line_h - text_px) * 0.5;
+            if osd.outline {
+                for (dx, dy) in HALO {
+                    self.text.draw(&self.gl, sw, sh, tx + dx * o, ly + dy * o, text_px, [0.0, 0.0, 0.0, alpha], line);
+                }
+            }
             self.text.draw(&self.gl, sw, sh, tx, ly, text_px, [c[0], c[1], c[2], alpha], line);
         }
         if reveal {

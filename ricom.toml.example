@@ -102,6 +102,10 @@ close = "stretch"   # disappear effect (same set). stretch = grow/squeeze width;
 in_dur  = 0.06      # appear-animation length (seconds); lower = snappier
 out_dur = 0.08      # disappear-animation length (seconds)
 ack = true          # toast a short confirmation for ping / reload / fps toggle
+background = [0.05, 0.05, 0.07, 0.88]  # banner box colour (RGBA); set alpha = 0.0 for a
+                    # text-only toast (no box). Keep `outline` on so it stays readable.
+outline = true      # dark halo behind the glyphs — legible over any backdrop (bright windows,
+                    # video) even with no box; harmless (hidden) behind an opaque box
 
 [burn]
 # The `burn` close effect's look. These knobs are live-tunable: edit and reload

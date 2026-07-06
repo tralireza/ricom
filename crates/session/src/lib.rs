@@ -1730,6 +1730,8 @@ impl App {
             scale: self.config.osd.scale,
             effect: osd_effect(if matches!(o.phase, OsdPhase::Out) { o.close } else { o.open }),
             color: o.color,
+            background: self.config.osd.background,
+            outline: self.config.osd.outline,
         });
         tracing::debug!(paint_rects = paint.rects().len(), paint_px = paint.area(), age, "damage");
         if let Err(e) = backend.present_windows(

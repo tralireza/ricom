@@ -10,7 +10,11 @@ fn osd_defaults_and_parse() {
     assert_eq!(c.osd.scale, 1.0);
     assert_eq!(c.osd.open, OsdEffect::Stretch);
     assert_eq!(c.osd.in_dur, 0.06);
-    let c: Config = toml::from_str("[osd]\nenabled = false\nduration = 4.0\nopen = \"pop\"\nclose = \"fade\"\n").unwrap();
+    assert_eq!(c.osd.background, [0.05, 0.05, 0.07, 0.88]);
+    assert!(c.osd.outline);
+    let c: Config = toml::from_str("[osd]\nenabled = false\nduration = 4.0\nopen = \"pop\"\nclose = \"fade\"\nbackground = [0.0, 0.0, 0.0, 0.0]\noutline = false\n").unwrap();
+    assert_eq!(c.osd.background, [0.0, 0.0, 0.0, 0.0]);
+    assert!(!c.osd.outline);
     assert!(!c.osd.enabled);
     assert_eq!(c.osd.duration, 4.0);
     assert_eq!(c.osd.open, OsdEffect::Pop);
