@@ -31,14 +31,16 @@ COMMANDS:
     inspect <win>     Show one window (id: decimal or 0x hex)
     notify <text> [s] Show an on-screen message for [s] seconds (default: config)
     version           Show ricom's version (on-screen toast + stdout)
-    animate <win> <fx> Play a transform on one window
-                      (fx: spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)
+    animate <win> <fx> [k=v …]  Play a transform on one window
+                      (fx: spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset;
+                       params override [anim] defaults, e.g. amplitude=0.1 duration=3)
 
 EXAMPLES:
     ricomctl list
     ricomctl inspect 0x1a00007
     ricomctl notify \"hello ricom\" 3
     ricomctl animate 0x1a00007 spin
+    ricomctl animate 0x1a00007 ripple amplitude=0.12 duration=4
     ricomctl reload
 ";
 
@@ -132,7 +134,17 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
             let fx = a
                 .next()
                 .ok_or_else(|| Exit::Usage("animate needs an <effect> (spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)\n".into()))?;
-            Command::Animate { win: parse_win(w)?, effect: fx.to_string() }
+            // Trailing tokens are per-effect `key=value` overrides. Drain them here
+            // (via `by_ref`) so the generic "unexpected argument" guard below still
+            // sees an exhausted iterator; the server types + validates each pair.
+            let mut params = Vec::new();
+            for tok in a.by_ref() {
+                let (k, v) = tok
+                    .split_once('=')
+                    .ok_or_else(|| Exit::Usage(format!("animate params must be key=value, got '{tok}'\n")))?;
+                params.push((k.to_string(), v.to_string()));
+            }
+            Command::Animate { win: parse_win(w)?, effect: fx.to_string(), params }
         }
         other => return Err(Exit::Usage(format!("unknown command '{other}'\n\n{HELP}"))),
     };

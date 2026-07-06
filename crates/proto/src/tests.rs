@@ -19,7 +19,12 @@ fn command_roundtrip() {
     roundtrip_cmd(Command::Notify { text: "hello".into(), timeout_ms: Some(3000) });
     roundtrip_cmd(Command::Notify { text: "no timeout".into(), timeout_ms: None });
     roundtrip_cmd(Command::Version);
-    roundtrip_cmd(Command::Animate { win: 0x1a00007, effect: "spin".into() });
+    roundtrip_cmd(Command::Animate { win: 0x1a00007, effect: "spin".into(), params: vec![] });
+    roundtrip_cmd(Command::Animate {
+        win: 0x1a00007,
+        effect: "ripple".into(),
+        params: vec![("amplitude".into(), "0.12".into()), ("duration".into(), "4".into())],
+    });
 }
 
 #[test]

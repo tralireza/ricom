@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Wire-protocol version. Bump on any incompatible `Command`/`Reply` change.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Raw X window id (mirrors `wm::WindowId`).
 pub type WinId = u32;
@@ -38,8 +38,18 @@ pub enum Command {
     Version,
     /// Play a one-shot, self-restoring animation on one window — the transform
     /// effects with no external X trigger (`spin`/`pop`/`stretch`/`unroll`/`slide`/
-    /// `wobble`, or `reset` to snap back). The server validates `effect`.
-    Animate { win: WinId, effect: String },
+    /// `wobble`/`wave`/`ripple`, or `reset` to snap back). The server validates
+    /// `effect` and each param.
+    Animate {
+        win: WinId,
+        effect: String,
+        /// Per-effect parameter overrides as `(key, value)` pairs (e.g.
+        /// `("amplitude", "0.12")`); the server types + validates them per effect.
+        /// Empty ⇒ use the configured defaults (`#[serde(default)]`, so older
+        /// clients that omit the field still decode).
+        #[serde(default)]
+        params: Vec<(String, String)>,
+    },
 }
 
 /// The compositor's reply to a [`Command`].

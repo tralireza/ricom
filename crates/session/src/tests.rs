@@ -1,0 +1,39 @@
+//! Pure-helper tests for `session` — the `ricomctl animate` param parsing +
+//! validation. No X / GL / socket, so these run on the Mac (unlike the rest of the
+//! crate, which only *runs* on Linux).
+
+use super::*;
+
+/// Build a `Vec<(String, String)>` param list from `&str` pairs.
+fn p(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+    pairs.iter().map(|(k, v)| ((*k).to_string(), (*v).to_string())).collect()
+}
+
+#[test]
+fn param_f32_absent_present_bad() {
+    let ps = p(&[("amplitude", "0.12"), ("duration", "abc")]);
+    assert_eq!(param_f32(&ps, "amplitude").unwrap(), Some(0.12));
+    assert_eq!(param_f32(&ps, "missing").unwrap(), None); // absent → None, not an error
+    assert!(param_f32(&ps, "duration").is_err()); // "abc" isn't a number
+}
+
+#[test]
+fn param_axis_and_easing() {
+    assert!(matches!(param_axis(&p(&[("axis", "y")])).unwrap(), Some(wm::anim::Axis::Y)));
+    assert!(param_axis(&p(&[])).unwrap().is_none());
+    assert!(param_axis(&p(&[("axis", "diagonal")])).is_err());
+    assert!(matches!(param_easing(&p(&[("easing", "linear")])).unwrap(), Some(wm::anim::Easing::Linear)));
+    assert!(param_easing(&p(&[("easing", "bouncy")])).is_err());
+}
+
+#[test]
+fn check_keys_strict() {
+    let ripple = &["amplitude", "wavelength", "speed", "r0", "duration"];
+    assert!(check_keys("ripple", &p(&[("amplitude", "0.1"), ("duration", "3")]), ripple).is_ok());
+    // an unknown key is rejected, and the message names it + lists the valid set
+    let err = check_keys("ripple", &p(&[("amplitud", "0.1")]), ripple).unwrap_err();
+    assert!(err.contains("amplitud") && err.contains("amplitude"));
+    // reset takes no params
+    assert!(check_keys("reset", &p(&[("x", "1")]), &[]).is_err());
+    assert!(check_keys("reset", &p(&[]), &[]).is_ok());
+}

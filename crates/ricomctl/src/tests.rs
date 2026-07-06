@@ -20,8 +20,23 @@ fn commands_map() {
     assert_eq!(cmd(&["notify", "hi"]), Command::Notify { text: "hi".into(), timeout_ms: None });
     assert_eq!(cmd(&["notify", "hi", "3"]), Command::Notify { text: "hi".into(), timeout_ms: Some(3000) });
     assert_eq!(cmd(&["version"]), Command::Version);
-    assert_eq!(cmd(&["animate", "0x1a00007", "spin"]), Command::Animate { win: 0x1a00007, effect: "spin".into() });
-    assert_eq!(cmd(&["animate", "42", "wobble"]), Command::Animate { win: 42, effect: "wobble".into() });
+    assert_eq!(
+        cmd(&["animate", "0x1a00007", "spin"]),
+        Command::Animate { win: 0x1a00007, effect: "spin".into(), params: vec![] }
+    );
+    assert_eq!(
+        cmd(&["animate", "42", "wobble"]),
+        Command::Animate { win: 42, effect: "wobble".into(), params: vec![] }
+    );
+    // Trailing key=value tokens become ordered params (server types + validates them).
+    assert_eq!(
+        cmd(&["animate", "0x1", "ripple", "amplitude=0.1", "duration=3"]),
+        Command::Animate {
+            win: 1,
+            effect: "ripple".into(),
+            params: vec![("amplitude".into(), "0.1".into()), ("duration".into(), "3".into())],
+        }
+    );
 }
 
 #[test]

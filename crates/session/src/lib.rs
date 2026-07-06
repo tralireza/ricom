@@ -106,6 +106,60 @@ fn map_axis(a: Axis) -> wm::anim::Axis {
     }
 }
 
+// ── `ricomctl animate` param overrides ────────────────────────────────────────
+// Effects take optional `key=value` overrides on the CLI (empty ⇒ configured
+// defaults). These free fns type + validate them; [`App::apply_effect`] applies.
+
+/// A `key=value` override parsed as `f32`. `Ok(None)` if the key is absent; `Err`
+/// if present but not a number.
+fn param_f32(params: &[(String, String)], key: &str) -> Result<Option<f32>, String> {
+    match params.iter().find(|(k, _)| k == key) {
+        None => Ok(None),
+        Some((_, v)) => v
+            .parse::<f32>()
+            .map(Some)
+            .map_err(|_| format!("param '{key}' wants a number, got '{v}'")),
+    }
+}
+
+/// An `axis=` override (`x`/`y`/`both`). `Ok(None)` if absent; `Err` if unrecognised.
+fn param_axis(params: &[(String, String)]) -> Result<Option<wm::anim::Axis>, String> {
+    match params.iter().find(|(k, _)| k == "axis") {
+        None => Ok(None),
+        Some((_, v)) => match v.as_str() {
+            "both" => Ok(Some(wm::anim::Axis::Both)),
+            "x" => Ok(Some(wm::anim::Axis::X)),
+            "y" => Ok(Some(wm::anim::Axis::Y)),
+            _ => Err(format!("param 'axis' wants x|y|both, got '{v}'")),
+        },
+    }
+}
+
+/// An `easing=` override (`ease-out`/`ease-in`/`linear`). `Ok(None)` if absent.
+fn param_easing(params: &[(String, String)]) -> Result<Option<wm::anim::Easing>, String> {
+    match params.iter().find(|(k, _)| k == "easing") {
+        None => Ok(None),
+        Some((_, v)) => match v.as_str() {
+            "ease-out" => Ok(Some(wm::anim::Easing::EaseOut)),
+            "ease-in" => Ok(Some(wm::anim::Easing::EaseIn)),
+            "linear" => Ok(Some(wm::anim::Easing::Linear)),
+            _ => Err(format!("param 'easing' wants ease-out|ease-in|linear, got '{v}'")),
+        },
+    }
+}
+
+/// Reject any provided key not valid for `effect` (strict), so a typo like
+/// `amplitud=` is flagged instead of silently ignored.
+fn check_keys(effect: &str, params: &[(String, String)], valid: &[&str]) -> Result<(), String> {
+    for (k, _) in params {
+        if !valid.contains(&k.as_str()) {
+            let list = if valid.is_empty() { "none".to_string() } else { valid.join(", ") };
+            return Err(format!("effect '{effect}' has no param '{k}' (valid: {list})"));
+        }
+    }
+    Ok(())
+}
+
 /// The pixel offset for a `translate` block: explicit `dx`/`dy`, or — if an
 /// `edge` is given — the offset that moves the window's outer `rect`
 /// (`[x, y, w, h]`) fully off that screen edge (`screen` = root w×h). This is the
@@ -996,7 +1050,7 @@ impl App {
                 }
                 Reply::Text(banner)
             }
-            C::Animate { win, effect } => self.animate_window(win, &effect),
+            C::Animate { win, effect, params } => self.animate_window(win, &effect, &params),
         }
     }
 
@@ -1021,17 +1075,45 @@ impl App {
     /// settles back to rest (spin→0, scale→1, translate→0); `reset` snaps back at
     /// once. Returns `false` for an unknown effect name (`"none"` included); a
     /// no-op if `win` is untracked.
-    fn apply_effect(&mut self, win: WindowId, effect: &str) -> bool {
-        use std::f64::consts::TAU;
+    /// Apply an in-place effect to `win` with optional `key=value` param overrides
+    /// (empty ⇒ the configured `[anim]` defaults). Strictly validates the effect name
+    /// and every param key/value; `Ok(())` = applied, `Err(msg)` = a user-facing reason.
+    fn apply_effect(&mut self, win: WindowId, effect: &str, params: &[(String, String)]) -> Result<(), String> {
+        use std::f64::consts::{PI, TAU};
         use wm::anim::{Axis, Easing};
         const DUR: f64 = 0.6;
         match effect {
-            "spin" => self.windows.spin_in(win, TAU, DUR, Easing::EaseOut),
-            "pop" => self.windows.scale_in(win, 0.4, DUR, Axis::Both, Easing::EaseOut),
-            "stretch" => self.windows.scale_in(win, 0.0, DUR, Axis::X, Easing::EaseOut),
-            "unroll" => self.windows.scale_in(win, 0.0, DUR, Axis::Y, Easing::EaseOut),
-            "slide" => self.windows.translate_in(win, [-160.0, 0.0], DUR, Easing::EaseOut),
+            "spin" => {
+                check_keys(effect, params, &["degrees", "duration", "easing"])?;
+                let rad = param_f32(params, "degrees")?.map(|d| f64::from(d) * PI / 180.0).unwrap_or(TAU);
+                let dur = param_f32(params, "duration")?.map(f64::from).unwrap_or(DUR);
+                let ease = param_easing(params)?.unwrap_or(Easing::EaseOut);
+                self.windows.spin_in(win, rad, dur, ease);
+            }
+            "pop" | "stretch" | "unroll" => {
+                check_keys(effect, params, &["from", "duration", "easing"])?;
+                let (default_from, axis) = match effect {
+                    "pop" => (0.4, Axis::Both),
+                    "stretch" => (0.0, Axis::X),
+                    _ => (0.0, Axis::Y), // unroll
+                };
+                let from = f64::from(param_f32(params, "from")?.unwrap_or(default_from));
+                let dur = param_f32(params, "duration")?.map(f64::from).unwrap_or(DUR);
+                let ease = param_easing(params)?.unwrap_or(Easing::EaseOut);
+                self.windows.scale_in(win, from, dur, axis, ease);
+            }
+            "slide" => {
+                check_keys(effect, params, &["dx", "dy", "duration", "easing"])?;
+                let dx = param_f32(params, "dx")?.unwrap_or(-160.0);
+                let dy = param_f32(params, "dy")?.unwrap_or(0.0);
+                let dur = param_f32(params, "duration")?.map(f64::from).unwrap_or(DUR);
+                let ease = param_easing(params)?.unwrap_or(Easing::EaseOut);
+                self.windows.translate_in(win, [dx, dy], dur, ease);
+            }
             "wobble" => {
+                check_keys(effect, params, &["spring", "friction"])?;
+                let spring = param_f32(params, "spring")?.unwrap_or(self.config.anim.wobble_spring);
+                let friction = param_f32(params, "friction")?.unwrap_or(self.config.anim.wobble_friction);
                 if let Some(rest) = self
                     .windows
                     .get(win)
@@ -1039,52 +1121,54 @@ impl App {
                 {
                     let p = 36.0; // perturb the outer rect outward, then spring back to rest
                     let old = [rest[0] - p, rest[1] - p, rest[2] + 2.0 * p, rest[3] + 2.0 * p];
-                    let (spring, friction) = (self.config.anim.wobble_spring, self.config.anim.wobble_friction);
                     self.windows.wobble_to(win, old, rest, spring, friction);
                 }
             }
             "wave" => {
+                check_keys(effect, params, &["amplitude", "wavelength", "speed", "axis", "decay"])?;
+                let amp = param_f32(params, "amplitude")?.unwrap_or(self.config.anim.wave_amplitude);
+                let wl = param_f32(params, "wavelength")?.unwrap_or(self.config.anim.wave_wavelength);
+                let speed = param_f32(params, "speed")?.unwrap_or(self.config.anim.wave_speed);
+                let axis = param_axis(params)?.unwrap_or(Axis::X);
+                let decay = param_f32(params, "decay")?.unwrap_or(self.config.anim.wave_decay);
                 let rect = self.outer_rect_of(win);
-                self.windows.wave_to(
-                    win,
-                    rect,
-                    self.config.anim.wave_amplitude,
-                    self.config.anim.wave_wavelength,
-                    self.config.anim.wave_speed,
-                    Axis::X,
-                    self.config.anim.wave_decay,
-                );
+                self.windows.wave_to(win, rect, amp, wl, speed, axis, decay);
             }
-            "ripple" => self.windows.ripple_to(
-                win,
-                [0.5, 0.5],
-                self.config.anim.ripple_amplitude,
-                self.config.anim.ripple_wavelength,
-                self.config.anim.ripple_speed,
-                self.config.anim.ripple_r0,
-                self.config.anim.ripple_duration,
-            ),
-            "reset" => self.windows.reset_transforms(win),
-            _ => return false,
+            "ripple" => {
+                check_keys(effect, params, &["amplitude", "wavelength", "speed", "r0", "duration"])?;
+                let amp = param_f32(params, "amplitude")?.unwrap_or(self.config.anim.ripple_amplitude);
+                let wl = param_f32(params, "wavelength")?.unwrap_or(self.config.anim.ripple_wavelength);
+                let speed = param_f32(params, "speed")?.unwrap_or(self.config.anim.ripple_speed);
+                let r0 = param_f32(params, "r0")?.unwrap_or(self.config.anim.ripple_r0);
+                let duration = param_f32(params, "duration")?.unwrap_or(self.config.anim.ripple_duration);
+                self.windows.ripple_to(win, [0.5, 0.5], amp, wl, speed, r0, duration);
+            }
+            "reset" => {
+                check_keys(effect, params, &[])?;
+                self.windows.reset_transforms(win);
+            }
+            _ => {
+                return Err(format!(
+                    "unknown effect '{effect}' (spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)"
+                ));
+            }
         }
         self.ensure_frame_timer();
         self.damage_full();
-        true
+        Ok(())
     }
 
-    /// `ricomctl animate <win> <effect>` — apply an in-place effect, mapping the
-    /// outcome to a reply. Unknown window / effect → `Reply::Error`.
+    /// `ricomctl animate <win> <effect> [k=v …]` — apply an in-place effect with
+    /// optional param overrides, mapping the outcome to a reply. Unknown window →
+    /// `Reply::Error`; an unknown effect or bad param → `apply_effect`'s message.
     #[cfg(unix)]
-    fn animate_window(&mut self, win: WindowId, effect: &str) -> proto::Reply {
+    fn animate_window(&mut self, win: WindowId, effect: &str, params: &[(String, String)]) -> proto::Reply {
         if self.windows.get(win).is_none() {
             return proto::Reply::Error(format!("no such window {win:#x}"));
         }
-        if self.apply_effect(win, effect) {
-            proto::Reply::Ok
-        } else {
-            proto::Reply::Error(format!(
-                "unknown effect '{effect}' (spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)"
-            ))
+        match self.apply_effect(win, effect, params) {
+            Ok(()) => proto::Reply::Ok,
+            Err(e) => proto::Reply::Error(e),
         }
     }
 
@@ -1107,7 +1191,7 @@ impl App {
         {
             let fx = self.focus_effect(id);
             if fx != "none" {
-                self.apply_effect(id, &fx);
+                let _ = self.apply_effect(id, &fx, &[]); // focus effect: configured defaults, no params
             }
         }
         self.damage_full();
@@ -2258,3 +2342,6 @@ impl App {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
