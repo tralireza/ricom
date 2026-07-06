@@ -431,7 +431,8 @@ ricomctl --json list          # machine-readable reply
 
 `ricomctl` is a thin client (std + a shared `proto` crate — no GL); the wire format is
 newline-delimited JSON. `notify` renders a native OSD banner via the SDF text engine (styled under
-`[osd]`). More commands — live per-window opacity / dim / animation overrides — are planned.
+`[osd]`). `animate` / `set` drive animation overrides live (one-shot per-window + per-category);
+live per-window opacity / dim overrides are still planned.
 
 ## Roadmap
 
@@ -441,18 +442,23 @@ built on a general SDF text engine, per-window rules (match on class/type/title/
 loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), region-level occlusion
 culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial repaint
 (EGL buffer-age; repaint only the changed region), and a composable transition-animation system —
-layered primitives (opacity / scale / translate / wobble / wave / ripple / burn) selected per transition (open /
-close / move) by a named preset or explicit block spec, globally or per-rule: pop, slide/drop,
-wobbly-windows, burn dissolve, directional stretch/unroll, a GPU spin (rotate-about-centre), a traveling
-wave, a radial ripple (per-pixel refraction), and a whirlpool drain close;
+layered primitives (opacity / scale / translate / wobble / wave / ripple / spin / drain / burn) selected per
+transition (open / close / move) by a named preset or explicit block spec, globally or per-rule: pop,
+slide/drop, boing (spring-mesh spawn), wobbly-windows, burn dissolve, directional stretch/unroll,
+minimize (shrink-to-point genie), a GPU spin (rotate-about-centre), a traveling wave, a radial ripple
+(per-pixel refraction), and a whirlpool drain close;
 and **inactive-window dimming** (unfocused windows dim; focus from `_NET_ACTIVE_WINDOW` or X
 FocusChange, per-rule exemptible); and a **Unix-socket control channel** (`ricomctl`) —
 live `list` / `inspect` / `animate` / `set` / `effects` / `fps toggle` / `unredir` / `reload` over a per-`$DISPLAY` socket.
+Plus **unredir-if-possible** — a lone fullscreen window bypasses the compositor and page-flips straight to
+the display (live-toggled via `ricomctl unredir`) — and an **`above`** rule that keeps matching windows
+composited on top regardless of X stacking.
 
 Next:
 
-1. Alternative render backends (xrender / glx); richer `ricomctl` commands (live per-window
-   opacity / dim / animation overrides).
+1. Alternative render backends (xrender / glx).
+2. Live per-window opacity / dim overrides over `ricomctl` (animation overrides already ship via
+   `animate` / `set`).
 
 ## License
 
