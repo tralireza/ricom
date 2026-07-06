@@ -378,6 +378,21 @@ pub enum Primitive {
         #[serde(default)]
         decay: Option<f32>,
     },
+    /// Radial water-refraction ripple (per-pixel; open/close/animate/focus). Rings
+    /// expand from the window centre, spreading + ringing down. Params fall back to
+    /// the `[anim] ripple_*` defaults.
+    Ripple {
+        #[serde(default)]
+        amplitude: Option<f32>,
+        #[serde(default)]
+        wavelength: Option<f32>,
+        #[serde(default)]
+        speed: Option<f32>,
+        #[serde(default)]
+        r0: Option<f32>,
+        #[serde(default)]
+        decay: Option<f32>,
+    },
     /// Rotate about the window centre by `degrees` (default 360, a full turn):
     /// spin in on open (rotated → 0) / spin out on close (0 → rotated). GPU primitive.
     Spin {
@@ -399,6 +414,7 @@ impl Primitive {
             Primitive::Translate { .. } => "translate",
             Primitive::Wobble { .. } => "wobble",
             Primitive::Wave { .. } => "wave",
+            Primitive::Ripple { .. } => "ripple",
             Primitive::Spin { .. } => "spin",
             Primitive::Burn => "burn",
         }
@@ -436,13 +452,13 @@ pub enum AnimSel {
 /// Known preset names, for diagnostics + docs.
 pub const PRESETS: &[&str] = &[
     "none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble", "stretch", "unroll", "minimize",
-    "spin", "wave",
+    "spin", "wave", "ripple",
 ];
 
 /// In-place effect names valid for `[anim] focus` / `[[rule]] focus` (and the
 /// `ricomctl animate` vocabulary), plus `"none"`.
 pub const FOCUS_EFFECTS: &[&str] =
-    &["none", "spin", "pop", "stretch", "unroll", "slide", "wobble", "wave", "reset"];
+    &["none", "spin", "pop", "stretch", "unroll", "slide", "wobble", "wave", "ripple", "reset"];
 
 /// Expand a preset name into its block list. `None` if the name is unknown.
 fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
@@ -478,6 +494,8 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
         "spin" => vec![opacity, Spin { degrees: None, easing: Easing::EaseOut }],
         // Traveling ripple: one-shot that rings down (see `[anim] wave_*`).
         "wave" => vec![Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::X, decay: None }],
+        // Radial water-refraction ripple (per-pixel; see `[anim] ripple_*`).
+        "ripple" => vec![Ripple { amplitude: None, wavelength: None, speed: None, r0: None, decay: None }],
         _ => return None,
     })
 }
@@ -513,6 +531,16 @@ pub struct Anim {
     pub wave_speed: f32,
     /// Default `wave` per-second amplitude decay (`<1` rings down; `1.0` loops).
     pub wave_decay: f32,
+    /// Default `ripple` peak radial UV displacement (aspect-corrected units).
+    pub ripple_amplitude: f32,
+    /// Default `ripple` ring spacing (fraction of the aspect-corrected radius).
+    pub ripple_wavelength: f32,
+    /// Default `ripple` phase speed (cycles/second; rings expand outward).
+    pub ripple_speed: f32,
+    /// Default `ripple` spread constant (large centre, faint rim).
+    pub ripple_r0: f32,
+    /// Default `ripple` per-second amplitude decay (`<1` rings down; `1.0` loops).
+    pub ripple_decay: f32,
     /// Open animation (window mapped). Default preset `"pop"`.
     pub open: AnimSel,
     /// Close animation (window unmapped/destroyed). Default preset `"fade"`.
@@ -594,6 +622,11 @@ impl Default for Anim {
             wave_wavelength: 0.5,
             wave_speed: 1.5,
             wave_decay: 0.05,
+            ripple_amplitude: 0.03,
+            ripple_wavelength: 0.18,
+            ripple_speed: 1.2,
+            ripple_r0: 0.12,
+            ripple_decay: 0.12,
             open: AnimSel::Preset("pop".into()),
             close: AnimSel::Preset("fade".into()),
             r#move: AnimSel::Preset("wobble".into()),
@@ -721,6 +754,11 @@ impl Config {
         chg!("anim.wave_wavelength", prev.anim.wave_wavelength, self.anim.wave_wavelength);
         chg!("anim.wave_speed", prev.anim.wave_speed, self.anim.wave_speed);
         chg!("anim.wave_decay", prev.anim.wave_decay, self.anim.wave_decay);
+        chg!("anim.ripple_amplitude", prev.anim.ripple_amplitude, self.anim.ripple_amplitude);
+        chg!("anim.ripple_wavelength", prev.anim.ripple_wavelength, self.anim.ripple_wavelength);
+        chg!("anim.ripple_speed", prev.anim.ripple_speed, self.anim.ripple_speed);
+        chg!("anim.ripple_r0", prev.anim.ripple_r0, self.anim.ripple_r0);
+        chg!("anim.ripple_decay", prev.anim.ripple_decay, self.anim.ripple_decay);
         chg!("anim.open", prev.anim.open, self.anim.open);
         chg!("anim.close", prev.anim.close, self.anim.close);
         chg!("anim.move", prev.anim.r#move, self.anim.r#move);

@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 pub mod anim;
-use anim::{Axis, Easing, Fade, Offset, Wave, Wobble};
+use anim::{Axis, Easing, Fade, Offset, Ripple, Wave, Wobble};
 
 /// An X window id.
 pub type WindowId = u32;
@@ -68,6 +68,9 @@ pub struct Win {
     /// [`wobble`](Self::wobble) — both drive the single per-window mesh. Dropped by
     /// [`WindowStack::advance_anims`] once it settles.
     pub wave: Option<Wave>,
+    /// Active radial ripple (per-pixel refraction), or `None`. Mutually exclusive with
+    /// wobble/wave (one effect slot). Dropped by [`WindowStack::advance_anims`] on settle.
+    pub ripple: Option<Ripple>,
     /// Active burn/dissolve close, or `None`. When `Some`, the window is dissolving
     /// (progress 0→1) instead of fading; reaped when progress reaches 1.
     pub burn: Option<BurnState>,
@@ -108,6 +111,7 @@ impl Win {
             spin: Fade::settled(0.0),
             wobble: None,
             wave: None,
+            ripple: None,
             burn: None,
             closing: false,
             destroyed: false,
@@ -377,6 +381,7 @@ impl WindowStack {
             w.spin = Fade::settled(0.0);
             w.wobble = None;
             w.wave = None;
+            w.ripple = None;
             w.burn = None;
         }
     }
@@ -393,7 +398,8 @@ impl WindowStack {
         friction: f32,
     ) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.wave = None; // wave ⟂ wobble: one mesh per window
+            w.wave = None; // one effect slot: wobble ⟂ wave / ripple
+            w.ripple = None;
             match &mut w.wobble {
                 Some(wob) => wob.retarget(new),
                 None => {
@@ -412,8 +418,22 @@ impl WindowStack {
     #[allow(clippy::too_many_arguments)]
     pub fn wave_to(&mut self, id: WindowId, rect: [f32; 4], amp: f32, wavelength: f32, speed: f32, axis: Axis, decay: f32) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.wobble = None; // wave ⟂ wobble: one mesh per window
+            w.wobble = None; // one effect slot: wave ⟂ wobble / ripple
+            w.ripple = None;
             w.wave = Some(Wave::new(rect, amp, wavelength, speed, axis, decay));
+        }
+    }
+
+    /// Start a radial ripple centred at `center` (UV; `[0.5, 0.5]` = window centre):
+    /// `amp` (UV displacement), `wavelength`, `speed` (cycles/s), spread `r0`, ringing
+    /// down by `decay`. Rendered per-pixel (no mesh). Clears any wobble/wave (one
+    /// effect slot). No-op if untracked.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ripple_to(&mut self, id: WindowId, center: [f32; 2], amp: f32, wavelength: f32, speed: f32, r0: f32, decay: f32) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.wobble = None;
+            w.wave = None;
+            w.ripple = Some(Ripple::new(center, amp, wavelength, speed, r0, decay));
         }
     }
 
@@ -450,6 +470,13 @@ impl WindowStack {
                     animating = true;
                 } else {
                     w.wave = None;
+                }
+            }
+            if let Some(rp) = &mut w.ripple {
+                if rp.advance(dt as f32) {
+                    animating = true;
+                } else {
+                    w.ripple = None;
                 }
             }
             if let Some(b) = &mut w.burn

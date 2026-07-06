@@ -19,7 +19,7 @@ https://github.com/user-attachments/assets/051b89cc-22a2-4cf1-8b9a-7aa63c9bef39
 
 - **A real animation engine — not a fixed effect list.** Every window transition (open · close ·
   move) is a recipe over composable primitives — opacity, scale, translate, spring-wobble, GPU
-  spin, noise-dissolve — chosen by a preset or hand-composed, applied globally or per-app, and
+  spin, radial ripple, noise-dissolve — chosen by a preset or hand-composed, applied globally or per-app, and
   live-reloaded from TOML on `SIGHUP`. Windows *boing* in, *spin* out, *stretch* open from a centre
   line, *dissolve* into embers, or slide off-screen — your call.
 - **Wobbly windows.** The Compiz spring-mesh jelly: windows lag and jiggle as they settle after a
@@ -54,7 +54,7 @@ OPEN ─────────────────────────
             └┘        └─────┘    └────┘     springs back to size
 
   slide    »»»┌────┐        ┌────┐          slides in from a
-            »»│    │   →     │    │          screen edge
+            »»│    │   →    │    │          screen edge
            »»»└────┘        └────┘          (translate + fade)
 
   stretch    │         ┌──┐       ┌────┐    a centre line grows
@@ -93,9 +93,13 @@ MOVE ─────────────────────────
             │    │ →→  │    │ ~~ →  │    │  jiggles, then settles
             └────┘     └────┘~     ~└────┘
 
-  wave      ┌────┐     ┌╮───┐     ┌──╮─┐   a sine crest sweeps across
-            │    │  →  │╰╮  │  →  │  ╰╮│   the surface (mesh), ringing
-            └────┘     └─╯──┘     └───╯┘   down flat  (open · animate)
+  wave      ┌────┐     ┌╮───┐     ┌──╮─┐    a sine crest sweeps across
+            │    │  →  │╰╮  │  →  │  ╰╮│    the surface (mesh), ringing
+            └────┘     └─╯──┘     └───╯┘    down flat  (open · animate)
+
+  ripple    ┌────┐     ┌────┐     ┌────┐    a "drop in a lake" — rings
+            │ ·  │  →  │(())│  →  │(  )│    spread from the centre out,
+            └────┘     └────┘     └────┘    dying at the rim (open · close · focus)
 
 EFFECTS ───────────────────────────────────────────────────────────
 
@@ -169,12 +173,13 @@ Working today:
   faded), soft **left+bottom drop shadows**, **rounded corners** (shadow follows the corner), and
   **background blur** — dual-Kawase frost behind translucent windows.
 - **Transition animations** — a composable **animation-block** system: each transition (open / close
-  / move) plays a set of layered primitives — **opacity, scale, translate, wobble, burn** — chosen by a
-  named preset (`fade`, `pop`, `slide`, `drop`, `boing`, `burn`, `wobble`, `stretch`, `unroll`, `minimize`, `spin`) or an
+  / move) plays a set of layered primitives — **opacity, scale, translate, wobble, wave, ripple, burn** — chosen by a
+  named preset (`fade`, `pop`, `slide`, `drop`, `boing`, `burn`, `wobble`, `stretch`, `unroll`, `minimize`, `spin`, `wave`, `ripple`) or an
   explicit block spec, set globally (`[anim]`) or per-window (`[[rule]]`). Includes the scale-about-centre
   **open/close "pop"**, **wobbly-windows** (a spring-mesh move/resize jelly on a dedicated GL mesh path),
   **slide/drop** (an eased translate), **directional stretch/unroll** (a centre line growing to full
-  width/height), and **spin** (a GPU rotate-about-centre). All ride `use-damage`, so an animating window
+  width/height), **spin** (a GPU rotate-about-centre), a **traveling wave** (sinusoidal mesh ripple), and a
+  **radial ripple** (per-pixel water-refraction — a "drop in a lake"). All ride `use-damage`, so an animating window
   repaints only its moving path, not the whole screen.
 - **On-demand FPS HUD** — a global hotkey (`Super+Shift+F` by default) toggles an overlay showing
   FPS, frame-time, and a rolling frame-time graph, drawn with a general **SDF text engine**
@@ -410,7 +415,7 @@ ricomctl inspect 0x1a00007    # one window's details
 ricomctl fps toggle           # flip the FPS HUD
 ricomctl reload               # re-read the config (same as SIGHUP)
 ricomctl notify "hello" 3     # on-screen toast for 3s (top-center; effect via [osd] open/close)
-ricomctl animate 0x1a00007 spin  # play a transform on one window (spin|pop|stretch|unroll|slide|wobble|wave)
+ricomctl animate 0x1a00007 spin  # play a transform on one window (spin|pop|stretch|unroll|slide|wobble|wave|ripple)
 ricomctl ping                 # liveness + version banner
 ricomctl --json list          # machine-readable reply
 ```
@@ -427,9 +432,10 @@ built on a general SDF text engine, per-window rules (match on class/type/title/
 loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), region-level occlusion
 culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial repaint
 (EGL buffer-age; repaint only the changed region), and a composable transition-animation system —
-layered primitives (opacity / scale / translate / wobble / burn) selected per transition (open /
+layered primitives (opacity / scale / translate / wobble / wave / ripple / burn) selected per transition (open /
 close / move) by a named preset or explicit block spec, globally or per-rule: pop, slide/drop,
-wobbly-windows, burn dissolve, directional stretch/unroll, and a GPU spin (rotate-about-centre);
+wobbly-windows, burn dissolve, directional stretch/unroll, a GPU spin (rotate-about-centre), a traveling
+wave, and a radial ripple (per-pixel refraction);
 and **inactive-window dimming** (unfocused windows dim; focus from `_NET_ACTIVE_WINDOW` or X
 FocusChange, per-rule exemptible); and a **Unix-socket control channel** (`ricomctl`) —
 live `list` / `inspect` / `fps toggle` / `reload` over a per-`$DISPLAY` socket.

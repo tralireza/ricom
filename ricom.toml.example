@@ -25,7 +25,7 @@ default_opacity = 1.0
 # on a [[rule]] (open/close/move keys), so an empty `match = {}` rule is a global
 # default and a specific rule tunes one app.
 #
-# Primitives:  opacity · scale · translate · wobble · wave · burn   (burn owns alpha)
+# Primitives:  opacity · scale · translate · wobble · wave · ripple · burn  (burn owns alpha)
 #
 # Presets:
 #   none     instant — no animation
@@ -41,12 +41,13 @@ default_opacity = 1.0
 #   minimize shrink to a point + slide off the bottom edge (simplified genie)
 #   spin     rotate about the centre (full turn) + fade  (GPU)
 #   wave     traveling sinusoidal ripple (mesh deform); rings down + settles flat
+#   ripple   radial "drop in a lake" — per-pixel refraction from the centre out (GPU)
 [anim]
 open  = "pop"           # window mapped
 close = "fade"          # window unmapped/destroyed
 move  = "wobble"        # window moved/resized
-focus = "none"          # in-place effect when a window gains focus: wave | wobble | spin |
-                        # pop | stretch | unroll | slide | none. Per-window: [[rule]] focus = …
+focus = "none"          # in-place effect when a window gains focus: wave | ripple | wobble |
+                        # spin | pop | stretch | unroll | slide | none. Per-window: [[rule]] focus = …
 duration = 0.2          # default seconds for opacity / scale / translate
 scale_from = 0.85       # default `scale` start factor (open) / end factor (close)
 wobble_spring = 350.0   # default wobble spring stiffness k (higher = snappier)
@@ -55,6 +56,11 @@ wave_amplitude = 24.0   # default `wave` ripple height (px)
 wave_wavelength = 0.5   # `wave` wavelength as a fraction of the axis (1.0 = one cycle across; 0.5 = two)
 wave_speed = 1.5        # default `wave` crest travel speed (cycles/second)
 wave_decay = 0.05       # default `wave` per-second amplitude decay (<1 rings down; 1.0 loops)
+ripple_amplitude = 0.03  # default `ripple` peak refraction (UV units; ~3% of the window)
+ripple_wavelength = 0.18 # `ripple` ring spacing (fraction of the radius; smaller = more rings)
+ripple_speed = 1.2       # default `ripple` ring expansion speed (cycles/second)
+ripple_r0 = 0.12         # `ripple` spread — big rings at the centre, dying toward the rim
+ripple_decay = 0.12      # default `ripple` per-second amplitude decay (<1 rings down; 1.0 loops)
 
 # Explicit block composition (overrides the preset for that category). Each block
 # is a table tagged by `block`; a spec may set its own `duration`. `easing` is
@@ -76,6 +82,7 @@ wave_decay = 0.05       # default `wave` per-second amplitude decay (<1 rings do
 #             #   edge = slide fully off that screen edge; else use dx/dy (px)
 #   wobble    { spring, friction }
 #   wave      { amplitude, wavelength, speed, axis = "x"|"y", decay }  # sinusoidal ripple
+#   ripple    { amplitude, wavelength, speed, r0, decay }              # radial refraction (GPU)
 #   burn      # no params here — the dissolve look comes from [burn] below
 
 [shadow]

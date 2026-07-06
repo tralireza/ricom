@@ -48,6 +48,10 @@ fn defaults_match_compiled_behaviour() {
         (c.anim.wave_amplitude, c.anim.wave_wavelength, c.anim.wave_speed, c.anim.wave_decay),
         (24.0, 0.5, 1.5, 0.05)
     );
+    assert_eq!(
+        (c.anim.ripple_amplitude, c.anim.ripple_wavelength, c.anim.ripple_speed, c.anim.ripple_r0, c.anim.ripple_decay),
+        (0.03, 0.18, 1.2, 0.12, 0.12)
+    );
     assert_eq!(c.anim.open, AnimSel::Preset("pop".into()));
     assert_eq!(c.anim.close, AnimSel::Preset("fade".into()));
     assert_eq!(c.anim.r#move, AnimSel::Preset("wobble".into()));
@@ -365,6 +369,32 @@ fn wave_block_params_parse() {
     assert_eq!(
         s.blocks,
         [Primitive::Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::Both, decay: None }]
+    );
+}
+
+#[test]
+fn ripple_preset_expands_to_a_ripple_block() {
+    assert_eq!(
+        expand_sel(&AnimSel::Preset("ripple".into())).blocks,
+        [Primitive::Ripple { amplitude: None, wavelength: None, speed: None, r0: None, decay: None }]
+    );
+}
+
+#[test]
+fn ripple_block_params_parse() {
+    let t = "[anim.close]\nblocks = [ { block = \"ripple\", amplitude = 0.05, wavelength = 0.2, speed = 1.5, r0 = 0.1, decay = 0.2 } ]\n";
+    let c: Config = toml::from_str(t).unwrap();
+    let AnimSel::Spec(s) = &c.anim.close else { panic!("expected explicit spec") };
+    assert_eq!(
+        s.blocks,
+        [Primitive::Ripple { amplitude: Some(0.05), wavelength: Some(0.2), speed: Some(1.5), r0: Some(0.1), decay: Some(0.2) }]
+    );
+    // Omitted params → None (fall back to [anim] ripple_*).
+    let c: Config = toml::from_str("[anim.close]\nblocks = [ { block = \"ripple\" } ]\n").unwrap();
+    let AnimSel::Spec(s) = &c.anim.close else { panic!("expected spec") };
+    assert_eq!(
+        s.blocks,
+        [Primitive::Ripple { amplitude: None, wavelength: None, speed: None, r0: None, decay: None }]
     );
 }
 

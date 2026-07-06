@@ -23,7 +23,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
-use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, WindowDraw};
+use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, RippleParams, WindowDraw};
 use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
@@ -136,7 +136,8 @@ fn squash_rect(rect: [f32; 4], factor: f32) -> [f32; 4] {
 /// One compositable window for [`App::composite`]: quad, optional wobble mesh,
 /// optional burn, always-on-top flag (from the `above` rule), and optional spin
 /// angle (radians).
-type CompositeItem = (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>);
+type CompositeItem =
+    (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>, Option<RippleParams>);
 
 /// Axis-aligned bounding box of a rect rotated `angle` radians about its centre —
 /// the footprint/damage a spinning window covers. `rect` is `[x, y, w, h]`.
@@ -1054,6 +1055,15 @@ impl App {
                     self.config.anim.wave_decay,
                 );
             }
+            "ripple" => self.windows.ripple_to(
+                win,
+                [0.5, 0.5],
+                self.config.anim.ripple_amplitude,
+                self.config.anim.ripple_wavelength,
+                self.config.anim.ripple_speed,
+                self.config.anim.ripple_r0,
+                self.config.anim.ripple_decay,
+            ),
             "reset" => self.windows.reset_transforms(win),
             _ => return false,
         }
@@ -1073,7 +1083,7 @@ impl App {
             proto::Reply::Ok
         } else {
             proto::Reply::Error(format!(
-                "unknown effect '{effect}' (spin|pop|stretch|unroll|slide|wobble|wave|reset)"
+                "unknown effect '{effect}' (spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)"
             ))
         }
     }
@@ -1264,6 +1274,17 @@ impl App {
                                 decay.unwrap_or(self.config.anim.wave_decay),
                             );
                         }
+                        Primitive::Ripple { amplitude, wavelength, speed, r0, decay } => {
+                            self.windows.ripple_to(
+                                id,
+                                [0.5, 0.5],
+                                amplitude.unwrap_or(self.config.anim.ripple_amplitude),
+                                wavelength.unwrap_or(self.config.anim.ripple_wavelength),
+                                speed.unwrap_or(self.config.anim.ripple_speed),
+                                r0.unwrap_or(self.config.anim.ripple_r0),
+                                decay.unwrap_or(self.config.anim.ripple_decay),
+                            );
+                        }
                         Primitive::Opacity { .. } | Primitive::Burn => {}
                     }
                 }
@@ -1310,6 +1331,18 @@ impl App {
                                 speed.unwrap_or(self.config.anim.wave_speed),
                                 map_axis(*axis),
                                 decay.unwrap_or(self.config.anim.wave_decay),
+                            );
+                        }
+                        Primitive::Ripple { amplitude, wavelength, speed, r0, decay } => {
+                            // Ripple while the opacity fade (below) carries the window out.
+                            self.windows.ripple_to(
+                                id,
+                                [0.5, 0.5],
+                                amplitude.unwrap_or(self.config.anim.ripple_amplitude),
+                                wavelength.unwrap_or(self.config.anim.ripple_wavelength),
+                                speed.unwrap_or(self.config.anim.ripple_speed),
+                                r0.unwrap_or(self.config.anim.ripple_r0),
+                                decay.unwrap_or(self.config.anim.ripple_decay),
                             );
                         }
                         // Wobble on close is ignored — a closing window uses the fade path.
@@ -1391,6 +1424,7 @@ impl App {
                         || w.spin.is_animating()
                         || w.wobble.is_some()
                         || w.wave.is_some()
+                        || w.ripple.is_some()
                         || w.burn.as_ref().is_some_and(|b| b.progress.is_animating())
                 })
                 .map(|w| {
@@ -1630,6 +1664,9 @@ impl App {
                 // "wobbling" = using the deformed-mesh path (spring wobble OR wave ripple);
                 // both skip scale/shadow/blur/corners and draw the textured grid.
                 let wobbling = w.wobble.is_some() || w.wave.is_some();
+                // Rippling = the per-pixel refraction path (RIPPLE_FS). Not a mesh; it
+                // draws the quad but, like spin, skips shadow / frost / corner rounding.
+                let rippling = w.ripple.is_some();
                 let burning = w.burn.is_some();
                 let burn = w.burn.as_ref().map(|b| Burn { progress: b.progress.current() as f32, seed: b.seed });
                 // Scale-about-centre for the open/close pop. Skipped while wobbling —
@@ -1685,6 +1722,11 @@ impl App {
                         }
                         v
                     });
+                // Ripple params for the shader: centre + current amp/wavelength/phase/r0.
+                let ripple = w.ripple.as_ref().map(|r| {
+                    let (center, amp, wavelength, phase, r0) = r.params();
+                    RippleParams { center, amp, wavelength, phase, r0 }
+                });
                 items.push((
                     Quad {
                         pixmap: pm,
@@ -1702,6 +1744,7 @@ impl App {
                         shadow: !wobbling
                             && !directional
                             && spin.is_none()
+                            && !rippling
                             && rr.shadow.unwrap_or(self.config.shadow.enabled)
                             && ow >= self.config.shadow.min_size
                             && oh >= self.config.shadow.min_size
@@ -1709,9 +1752,10 @@ impl App {
                         // Frost the backdrop only for translucent windows (opaque
                         // ones hide their backdrop); never while wobbling.
                         blur: !wobbling
+                            && !rippling
                             && rr.blur.unwrap_or(self.config.blur.enabled)
                             && w.fade.current() < 1.0,
-                        corner_radius: if wobbling || directional || spin.is_some() {
+                        corner_radius: if wobbling || directional || spin.is_some() || rippling {
                             0.0
                         } else {
                             rr.corner_radius.unwrap_or(self.config.corner_radius)
@@ -1721,6 +1765,7 @@ impl App {
                     burn,
                     rr.above.unwrap_or(false),
                     spin,
+                    ripple,
                 ));
             }
         }
@@ -1754,7 +1799,7 @@ impl App {
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
-        for (q, mesh, burn, _above, spin) in items.iter().rev() {
+        for (q, mesh, burn, _above, spin, ripple) in items.iter().rev() {
             let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
             // Footprint = the area the window might touch this frame. A spinner
             // sweeps its rotated bounding box; a wobbler can deform outside its rect
@@ -1779,13 +1824,14 @@ impl App {
                     mesh: mesh.clone(),
                     burn: *burn,
                     spin: *spin,
+                    ripple: *ripple,
                 });
             }
             // Opaque windows occlude what's below: a square one covers its whole
             // rect; a rounded one covers all but its (transparent) corner squares.
             // A wobbling window is *deforming*, so it never occludes (its rect is
             // unreliable) — draw everything beneath it.
-            if mesh.is_none() && burn.is_none() && spin.is_none() && q.opacity >= 1.0 {
+            if mesh.is_none() && burn.is_none() && spin.is_none() && ripple.is_none() && q.opacity >= 1.0 {
                 let cr = q.corner_radius as i32;
                 if cr <= 0 {
                     covered.add_rect(rect);

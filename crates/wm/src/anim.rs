@@ -491,5 +491,63 @@ impl Wave {
     }
 }
 
+/// Settle threshold for [`Ripple`]: once the amplitude (UV units) drops below this
+/// the ripple is done and the window returns to a plain blit.
+const RIPPLE_AMP_EPS: f32 = 1.5e-3;
+
+/// A radial "drop in a lake" ripple. Unlike [`Wave`]/[`Wobble`] it does **not**
+/// deform geometry — it just carries animated parameters for the renderer's per-pixel
+/// refraction shader (concentric rings expand from `center`, spreading + ringing
+/// down). Rect-agnostic (works in UV; the shader applies aspect). Pure and
+/// clock-agnostic like the rest of this module.
+#[derive(Debug, Clone, Copy)]
+pub struct Ripple {
+    /// Centre in UV (`[0.5, 0.5]` = window centre).
+    center: [f32; 2],
+    /// Current peak radial UV displacement; rings down via `decay`.
+    amp: f32,
+    /// Ring spacing as a fraction of the aspect-corrected radius.
+    wavelength: f32,
+    /// Phase advance in cycles per second (rings expand outward).
+    speed: f32,
+    /// Current phase (cycles).
+    phase: f32,
+    /// Spread constant — amplitude falls with radius (large centre, faint rim).
+    r0: f32,
+    /// Per-second amplitude factor in `0.0..=1.0` (`1.0` = never decays → loop).
+    decay: f32,
+}
+
+impl Ripple {
+    /// A ripple centred at `center` (UV): `amp` (UV displacement), `wavelength`,
+    /// `speed` (cycles/s), spread `r0`, ringing down by `decay`.
+    pub fn new(center: [f32; 2], amp: f32, wavelength: f32, speed: f32, r0: f32, decay: f32) -> Self {
+        Ripple {
+            center,
+            amp: amp.max(0.0),
+            wavelength: wavelength.max(1e-3),
+            speed,
+            phase: 0.0,
+            r0: r0.max(1e-3),
+            decay: decay.clamp(0.0, 1.0),
+        }
+    }
+
+    /// Advance by `dt`: expand the rings (`phase`) and ring the amplitude down.
+    /// Returns whether the ripple is still visible (amplitude above the threshold).
+    pub fn advance(&mut self, dt: f32) -> bool {
+        if dt > 0.0 {
+            self.phase += self.speed * dt;
+            self.amp *= self.decay.powf(dt);
+        }
+        self.amp > RIPPLE_AMP_EPS
+    }
+
+    /// Current shader parameters: `(center, amp, wavelength, phase, r0)`.
+    pub fn params(&self) -> ([f32; 2], f32, f32, f32, f32) {
+        (self.center, self.amp, self.wavelength, self.phase, self.r0)
+    }
+}
+
 #[cfg(test)]
 mod tests;

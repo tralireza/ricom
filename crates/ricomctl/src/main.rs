@@ -32,7 +32,7 @@ COMMANDS:
     notify <text> [s] Show an on-screen message for [s] seconds (default: config)
     version           Show ricom's version (on-screen toast + stdout)
     animate <win> <fx> Play a transform on one window
-                      (fx: spin|pop|stretch|unroll|slide|wobble|wave|reset)
+                      (fx: spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)
 
 EXAMPLES:
     ricomctl list
@@ -131,7 +131,7 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
             let w = a.next().ok_or_else(|| Exit::Usage("animate needs a <win> id and an <effect>\n".into()))?;
             let fx = a
                 .next()
-                .ok_or_else(|| Exit::Usage("animate needs an <effect> (spin|pop|stretch|unroll|slide|wobble|reset)\n".into()))?;
+                .ok_or_else(|| Exit::Usage("animate needs an <effect> (spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)\n".into()))?;
             Command::Animate { win: parse_win(w)?, effect: fx.to_string() }
         }
         other => return Err(Exit::Usage(format!("unknown command '{other}'\n\n{HELP}"))),

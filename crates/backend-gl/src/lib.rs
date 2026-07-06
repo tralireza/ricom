@@ -93,6 +93,35 @@ void main() {
 }
 "#;
 
+/// Radial water-refraction ripple (reuses [`BLIT_VS`]: `u_rect`/`u_screen`/`v_tex`).
+/// Per-pixel it offsets the sampled UV radially from `u_center` by `sin` of the
+/// distance `r`; amplitude spreads down with radius (`u_r0`) so the rings are large
+/// at the centre and die toward the rim, and `u_phase` advances to expand them out.
+/// Aspect-corrected via `u_rect` so rings stay circular. Premultiplied output.
+const RIPPLE_FS: &str = r#"#version 330 core
+in vec2 v_tex;
+uniform sampler2D u_tex;
+uniform float u_opacity;
+uniform vec4  u_rect;        // x,y,w,h (px) — aspect only
+uniform vec2  u_center;      // ripple centre in UV (0..1)
+uniform float u_amp;         // peak radial UV displacement (aspect-corrected)
+uniform float u_wavelength;  // ring spacing (aspect-corrected radius)
+uniform float u_phase;       // advances -> rings expand outward
+uniform float u_r0;          // spread constant (big centre, faint rim)
+out vec4 frag;
+void main() {
+    float aspect = u_rect.z / max(u_rect.w, 1.0);
+    vec2  d = v_tex - u_center; d.x *= aspect;          // circular rings
+    float r = length(d);
+    vec2  dir = r > 1e-4 ? d / r : vec2(0.0);
+    float env  = u_amp * (u_r0 / (u_r0 + r));           // large centre -> dies at rim
+    float disp = env * sin(6.2831853 * (r / max(u_wavelength, 1e-3) - u_phase));
+    vec2  off = dir * disp; off.x /= aspect;            // back into UV space
+    vec2  uv  = clamp(v_tex + off, 0.0, 1.0);
+    frag = vec4(texture(u_tex, uv).rgb * u_opacity, u_opacity);
+}
+"#;
+
 /// Burn / dissolve close animation (reuses [`BLIT_VS`], so it has `u_rect`/
 /// `u_screen`/`v_tex`). The window erodes away on animated value-noise with a
 /// glowing ember band at the dissolving front — "uniform segments": chunky
@@ -382,6 +411,23 @@ pub struct Burn {
     pub seed: f32,
 }
 
+/// Radial-ripple (water refraction) parameters for [`RIPPLE_FS`]. When a
+/// [`WindowDraw`] carries `Some`, the backend draws it through the ripple program
+/// (per-pixel UV warp; no shadow / frost / corner — like the mesh / spin paths).
+#[derive(Debug, Clone, Copy)]
+pub struct RippleParams {
+    /// Ripple centre in UV (`[0.5, 0.5]` = window centre).
+    pub center: [f32; 2],
+    /// Peak radial UV displacement (aspect-corrected units).
+    pub amp: f32,
+    /// Ring spacing as a fraction of the aspect-corrected radius.
+    pub wavelength: f32,
+    /// Phase (cycles); advances so the rings expand outward.
+    pub phase: f32,
+    /// Spread constant — amplitude falls with radius (large centre, faint rim).
+    pub r0: f32,
+}
+
 /// A window to composite plus the screen-space rectangles it's actually visible
 /// in (region-level occlusion): [`GlBackend::present_windows`] scissors each of
 /// the quad's draws to `clip`, so pixels covered by an opaque window on top are
@@ -402,6 +448,9 @@ pub struct WindowDraw {
     /// → draw via [`SPIN_VS`] (no shadow/frost; corners suppressed), mutually
     /// exclusive with `mesh`/`burn`. `None` → the normal quad path.
     pub spin: Option<f32>,
+    /// Radial water-refraction ripple. `Some` → draw via [`RIPPLE_FS`] (per-pixel UV
+    /// warp; no shadow / frost / corner), mutually exclusive with `mesh`/`burn`/`spin`.
+    pub ripple: Option<RippleParams>,
 }
 
 impl WindowDraw {
@@ -415,6 +464,7 @@ impl WindowDraw {
             mesh: None,
             burn: None,
             spin: None,
+            ripple: None,
         }
     }
 }
@@ -702,6 +752,17 @@ pub struct GlBackend {
     sp_opacity: Option<glow::NativeUniformLocation>,
     sp_corner: Option<glow::NativeUniformLocation>,
     sp_angle: Option<glow::NativeUniformLocation>,
+    // Ripple (radial UV refraction) program: BLIT_VS + RIPPLE_FS, reuses the blit VAO.
+    ripple_program: glow::NativeProgram,
+    rp_rect: Option<glow::NativeUniformLocation>,
+    rp_screen: Option<glow::NativeUniformLocation>,
+    rp_tex: Option<glow::NativeUniformLocation>,
+    rp_opacity: Option<glow::NativeUniformLocation>,
+    rp_center: Option<glow::NativeUniformLocation>,
+    rp_amp: Option<glow::NativeUniformLocation>,
+    rp_wavelength: Option<glow::NativeUniformLocation>,
+    rp_phase: Option<glow::NativeUniformLocation>,
+    rp_r0: Option<glow::NativeUniformLocation>,
     blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
@@ -844,6 +905,24 @@ impl GlBackend {
             )
         };
 
+        // Ripple program: BLIT_VS + RIPPLE_FS, reuses the blit unit-quad VAO (same
+        // `a_pos` layout). Selected per-window when a radial ripple is active.
+        let (ripple_program, rp_rect, rp_screen, rp_tex, rp_opacity, rp_center, rp_amp, rp_wavelength, rp_phase, rp_r0) = unsafe {
+            let program = make_program(&gl, BLIT_VS, RIPPLE_FS)?;
+            (
+                program,
+                gl.get_uniform_location(program, "u_rect"),
+                gl.get_uniform_location(program, "u_screen"),
+                gl.get_uniform_location(program, "u_tex"),
+                gl.get_uniform_location(program, "u_opacity"),
+                gl.get_uniform_location(program, "u_center"),
+                gl.get_uniform_location(program, "u_amp"),
+                gl.get_uniform_location(program, "u_wavelength"),
+                gl.get_uniform_location(program, "u_phase"),
+                gl.get_uniform_location(program, "u_r0"),
+            )
+        };
+
         // Wobble mesh program + its VAO: a dynamic vertex VBO ([x,y,u,v] per
         // control point, re-uploaded per frame) and a static triangle-index EBO
         // (two triangles per grid cell). The EBO binding is captured in the VAO.
@@ -982,6 +1061,7 @@ impl GlBackend {
             frost_program, f_tex, f_screen, f_rect, f_corner,
             burn_program, bu_rect, bu_screen, bu_tex, bu_opacity, bu_progress, bu_seed, bu_segscale, bu_ember, bu_ember_cool, bu_ember_hot,
             spin_program, spin_vao, sp_rect, sp_screen, sp_tex, sp_opacity, sp_corner, sp_angle,
+            ripple_program, rp_rect, rp_screen, rp_tex, rp_opacity, rp_center, rp_amp, rp_wavelength, rp_phase, rp_r0,
             blur: RefCell::new(None),
             image_target, render, text,
             solid_program, sol_rect, sol_screen, sol_color, sol_radius,
@@ -1496,7 +1576,7 @@ impl GlBackend {
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
         }
-        for WindowDraw { quad, clip, mesh, burn, spin } in items {
+        for WindowDraw { quad, clip, mesh, burn, spin, ripple } in items {
             if clip.is_empty() {
                 continue; // fully occluded — nothing visible to draw
             }
@@ -1629,6 +1709,34 @@ impl GlBackend {
                             "wobble mesh vertex count mismatch — skipping window"
                         );
                     }
+                    self.gl.delete_texture(tex);
+                    let _ = self.egl.destroy_image(self.display, image);
+                    continue;
+                }
+                // Rippling window: per-pixel radial UV refraction via the ripple
+                // program (no shadow / frost; corners suppressed), scissored to each
+                // clip rect — LINEAR filtering so the offset sampling stays smooth.
+                if let Some(rp) = ripple {
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                    self.gl.use_program(Some(self.ripple_program));
+                    self.gl.bind_vertex_array(Some(self.vao));
+                    self.gl.uniform_2_f32(self.rp_screen.as_ref(), screen_w as f32, screen_h as f32);
+                    self.gl.uniform_1_i32(self.rp_tex.as_ref(), 0);
+                    self.gl.uniform_4_f32(self.rp_rect.as_ref(), fx, fy, fw, fh);
+                    self.gl.uniform_1_f32(self.rp_opacity.as_ref(), opacity);
+                    self.gl.uniform_2_f32(self.rp_center.as_ref(), rp.center[0], rp.center[1]);
+                    self.gl.uniform_1_f32(self.rp_amp.as_ref(), rp.amp);
+                    self.gl.uniform_1_f32(self.rp_wavelength.as_ref(), rp.wavelength);
+                    self.gl.uniform_1_f32(self.rp_phase.as_ref(), rp.phase);
+                    self.gl.uniform_1_f32(self.rp_r0.as_ref(), rp.r0);
+                    self.gl.enable(glow::SCISSOR_TEST);
+                    for r in clip {
+                        self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+                    self.gl.disable(glow::SCISSOR_TEST);
+                    self.gl.use_program(Some(self.program)); // restore blit for the next item
                     self.gl.delete_texture(tex);
                     let _ = self.egl.destroy_image(self.display, image);
                     continue;
