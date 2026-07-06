@@ -140,7 +140,7 @@ void main() {
 /// Wobble mesh grid dimension (`N×N` control points). **Must match**
 /// `wm::anim::WOBBLE_N`: `session` builds the deformed vertex grid there and the
 /// backend builds the matching triangle index buffer here. `(N-1)²·2` triangles.
-const MESH_N: usize = 8;
+const MESH_N: usize = 16;
 
 /// Wobbly-windows mesh vertex shader: positions come straight from the CPU spring
 /// sim (already in screen pixels), so — unlike [`BLIT_VS`] — there's no `u_rect`;

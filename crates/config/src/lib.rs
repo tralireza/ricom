@@ -357,6 +357,21 @@ pub enum Primitive {
         #[serde(default)]
         friction: Option<f32>,
     },
+    /// Traveling sinusoidal ripple (deforms via the mesh, like wobble). Params fall
+    /// back to the `[anim] wave_*` defaults; `axis` is the crest's travel direction
+    /// (`x` displaces Y, `y` displaces X). Rings down by `decay`, then settles flat.
+    Wave {
+        #[serde(default)]
+        amplitude: Option<f32>,
+        #[serde(default)]
+        wavelength: Option<f32>,
+        #[serde(default)]
+        speed: Option<f32>,
+        #[serde(default)]
+        axis: Axis,
+        #[serde(default)]
+        decay: Option<f32>,
+    },
     /// Rotate about the window centre by `degrees` (default 360, a full turn):
     /// spin in on open (rotated → 0) / spin out on close (0 → rotated). GPU primitive.
     Spin {
@@ -377,6 +392,7 @@ impl Primitive {
             Primitive::Scale { .. } => "scale",
             Primitive::Translate { .. } => "translate",
             Primitive::Wobble { .. } => "wobble",
+            Primitive::Wave { .. } => "wave",
             Primitive::Spin { .. } => "spin",
             Primitive::Burn => "burn",
         }
@@ -414,7 +430,7 @@ pub enum AnimSel {
 /// Known preset names, for diagnostics + docs.
 pub const PRESETS: &[&str] = &[
     "none", "fade", "pop", "slide", "drop", "boing", "burn", "wobble", "stretch", "unroll", "minimize",
-    "spin",
+    "spin", "wave",
 ];
 
 /// Expand a preset name into its block list. `None` if the name is unknown.
@@ -449,6 +465,8 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
         ],
         // Rotate in/out about the centre (with a fade); half-turn by default.
         "spin" => vec![opacity, Spin { degrees: None, easing: Easing::EaseOut }],
+        // Traveling ripple: one-shot that rings down (see `[anim] wave_*`).
+        "wave" => vec![Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::X, decay: None }],
         _ => return None,
     })
 }
@@ -475,6 +493,15 @@ pub struct Anim {
     pub wobble_spring: f32,
     /// Default wobble velocity damping.
     pub wobble_friction: f32,
+    /// Default `wave` amplitude (px).
+    pub wave_amplitude: f32,
+    /// Default `wave` wavelength as a fraction of the travel axis (`1.0` = one full
+    /// cycle across; `0.5` = two). Cycles across ≈ `1.0 / wave_wavelength`.
+    pub wave_wavelength: f32,
+    /// Default `wave` travel speed (cycles per second).
+    pub wave_speed: f32,
+    /// Default `wave` per-second amplitude decay (`<1` rings down; `1.0` loops).
+    pub wave_decay: f32,
     /// Open animation (window mapped). Default preset `"pop"`.
     pub open: AnimSel,
     /// Close animation (window unmapped/destroyed). Default preset `"fade"`.
@@ -548,6 +575,10 @@ impl Default for Anim {
             scale_from: 0.85,
             wobble_spring: 350.0,
             wobble_friction: 14.0,
+            wave_amplitude: 24.0,
+            wave_wavelength: 0.5,
+            wave_speed: 1.5,
+            wave_decay: 0.05,
             open: AnimSel::Preset("pop".into()),
             close: AnimSel::Preset("fade".into()),
             r#move: AnimSel::Preset("wobble".into()),
@@ -670,6 +701,10 @@ impl Config {
         chg!("anim.scale_from", prev.anim.scale_from, self.anim.scale_from);
         chg!("anim.wobble_spring", prev.anim.wobble_spring, self.anim.wobble_spring);
         chg!("anim.wobble_friction", prev.anim.wobble_friction, self.anim.wobble_friction);
+        chg!("anim.wave_amplitude", prev.anim.wave_amplitude, self.anim.wave_amplitude);
+        chg!("anim.wave_wavelength", prev.anim.wave_wavelength, self.anim.wave_wavelength);
+        chg!("anim.wave_speed", prev.anim.wave_speed, self.anim.wave_speed);
+        chg!("anim.wave_decay", prev.anim.wave_decay, self.anim.wave_decay);
         chg!("anim.open", prev.anim.open, self.anim.open);
         chg!("anim.close", prev.anim.close, self.anim.close);
         chg!("anim.move", prev.anim.r#move, self.anim.r#move);

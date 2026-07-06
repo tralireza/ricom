@@ -32,7 +32,7 @@ COMMANDS:
     notify <text> [s] Show an on-screen message for [s] seconds (default: config)
     version           Show ricom's version (on-screen toast + stdout)
     animate <win> <fx> Play a transform on one window
-                      (fx: spin|pop|stretch|unroll|slide|wobble|reset)
+                      (fx: spin|pop|stretch|unroll|slide|wobble|wave|reset)
 
 EXAMPLES:
     ricomctl list

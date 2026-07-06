@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 pub mod anim;
-use anim::{Axis, Easing, Fade, Offset, Wobble};
+use anim::{Axis, Easing, Fade, Offset, Wave, Wobble};
 
 /// An X window id.
 pub type WindowId = u32;
@@ -64,6 +64,10 @@ pub struct Win {
     /// Active move/resize wobble (spring-mesh), or `None` when the window is not
     /// wobbling. Dropped by [`WindowStack::advance_anims`] once it settles.
     pub wobble: Option<Wobble>,
+    /// Active traveling-wave ripple, or `None`. Mutually exclusive with
+    /// [`wobble`](Self::wobble) — both drive the single per-window mesh. Dropped by
+    /// [`WindowStack::advance_anims`] once it settles.
+    pub wave: Option<Wave>,
     /// Active burn/dissolve close, or `None`. When `Some`, the window is dissolving
     /// (progress 0→1) instead of fading; reaped when progress reaches 1.
     pub burn: Option<BurnState>,
@@ -103,6 +107,7 @@ impl Win {
             translate: Offset::settled(),
             spin: Fade::settled(0.0),
             wobble: None,
+            wave: None,
             burn: None,
             closing: false,
             destroyed: false,
@@ -371,6 +376,7 @@ impl WindowStack {
             w.translate = Offset::settled();
             w.spin = Fade::settled(0.0);
             w.wobble = None;
+            w.wave = None;
             w.burn = None;
         }
     }
@@ -387,6 +393,7 @@ impl WindowStack {
         friction: f32,
     ) {
         if let Some(w) = self.wins.get_mut(&id) {
+            w.wave = None; // wave ⟂ wobble: one mesh per window
             match &mut w.wobble {
                 Some(wob) => wob.retarget(new),
                 None => {
@@ -395,6 +402,18 @@ impl WindowStack {
                     w.wobble = Some(wob);
                 }
             }
+        }
+    }
+
+    /// Start a traveling-wave ripple over outer rect `rect` (`[x, y, w, h]` px):
+    /// amplitude `amp`, `wavelength` (fraction of the axis), `speed` (cycles/s),
+    /// along `axis`, ringing down by `decay`. Replaces any active wave and clears
+    /// any wobble (they share the single mesh). No-op if untracked.
+    #[allow(clippy::too_many_arguments)]
+    pub fn wave_to(&mut self, id: WindowId, rect: [f32; 4], amp: f32, wavelength: f32, speed: f32, axis: Axis, decay: f32) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.wobble = None; // wave ⟂ wobble: one mesh per window
+            w.wave = Some(Wave::new(rect, amp, wavelength, speed, axis, decay));
         }
     }
 
@@ -424,6 +443,13 @@ impl WindowStack {
                     animating = true;
                 } else {
                     w.wobble = None;
+                }
+            }
+            if let Some(wv) = &mut w.wave {
+                if wv.advance(dt as f32) {
+                    animating = true;
+                } else {
+                    w.wave = None;
                 }
             }
             if let Some(b) = &mut w.burn

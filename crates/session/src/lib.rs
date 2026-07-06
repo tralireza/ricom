@@ -1045,10 +1045,22 @@ impl App {
                     self.windows.wobble_to(win, old, rest, spring, friction);
                 }
             }
+            "wave" => {
+                let rect = self.outer_rect_of(win);
+                self.windows.wave_to(
+                    win,
+                    rect,
+                    self.config.anim.wave_amplitude,
+                    self.config.anim.wave_wavelength,
+                    self.config.anim.wave_speed,
+                    Axis::X,
+                    self.config.anim.wave_decay,
+                );
+            }
             "reset" => self.windows.reset_transforms(win),
             other => {
                 return proto::Reply::Error(format!(
-                    "unknown effect '{other}' (spin|pop|stretch|unroll|slide|wobble|reset)"
+                    "unknown effect '{other}' (spin|pop|stretch|unroll|slide|wobble|wave|reset)"
                 ));
             }
         }
@@ -1206,6 +1218,18 @@ impl App {
                             let rad = degrees.unwrap_or(SPIN_DEFAULT_DEG as f32) as f64 * PI / 180.0;
                             self.windows.spin_in(id, rad, dur, map_easing(*easing));
                         }
+                        Primitive::Wave { amplitude, wavelength, speed, axis, decay } => {
+                            let rect = self.outer_rect_of(id);
+                            self.windows.wave_to(
+                                id,
+                                rect,
+                                amplitude.unwrap_or(self.config.anim.wave_amplitude),
+                                wavelength.unwrap_or(self.config.anim.wave_wavelength),
+                                speed.unwrap_or(self.config.anim.wave_speed),
+                                map_axis(*axis),
+                                decay.unwrap_or(self.config.anim.wave_decay),
+                            );
+                        }
                         Primitive::Opacity { .. } | Primitive::Burn => {}
                     }
                 }
@@ -1240,7 +1264,10 @@ impl App {
                             let rad = degrees.unwrap_or(SPIN_DEFAULT_DEG as f32) as f64 * PI / 180.0;
                             self.windows.spin_out(id, rad, dur, map_easing(*easing));
                         }
-                        Primitive::Opacity { .. } | Primitive::Wobble { .. } => {}
+                        // Wave (like wobble) is a live/open mesh effect — the mesh path
+                        // isn't drawn for a closing window, so on close it's a no-op and
+                        // the window just fades out.
+                        Primitive::Opacity { .. } | Primitive::Wobble { .. } | Primitive::Wave { .. } => {}
                     }
                 }
                 // Exactly one completion driver + the closing flag: burn (begun above)
@@ -1317,6 +1344,7 @@ impl App {
                         || w.translate.is_animating()
                         || w.spin.is_animating()
                         || w.wobble.is_some()
+                        || w.wave.is_some()
                         || w.burn.as_ref().is_some_and(|b| b.progress.is_animating())
                 })
                 .map(|w| {
@@ -1341,6 +1369,14 @@ impl App {
                     }
                     if let Some(wob) = &w.wobble {
                         let b = wob.bounds(WOBBLE_PAD);
+                        let wr = Rect::new(
+                            b[0].floor() as i32, b[1].floor() as i32,
+                            b[2].ceil() as i32, b[3].ceil() as i32,
+                        );
+                        r = Rect::new(r.x1.min(wr.x1), r.y1.min(wr.y1), r.x2.max(wr.x2), r.y2.max(wr.y2));
+                    }
+                    if let Some(wv) = &w.wave {
+                        let b = wv.bounds(WOBBLE_PAD);
                         let wr = Rect::new(
                             b[0].floor() as i32, b[1].floor() as i32,
                             b[2].ceil() as i32, b[3].ceil() as i32,
@@ -1545,7 +1581,9 @@ impl App {
                 let (ow, oh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
                 // Per-window rule overrides, falling back to the global config.
                 let rr = self.resolve_rules(w.id);
-                let wobbling = w.wobble.is_some();
+                // "wobbling" = using the deformed-mesh path (spring wobble OR wave ripple);
+                // both skip scale/shadow/blur/corners and draw the textured grid.
+                let wobbling = w.wobble.is_some() || w.wave.is_some();
                 let burning = w.burn.is_some();
                 let burn = w.burn.as_ref().map(|b| Burn { progress: b.progress.current() as f32, seed: b.seed });
                 // Scale-about-centre for the open/close pop. Skipped while wobbling —
@@ -1585,16 +1623,22 @@ impl App {
                 // A wobbling window draws as a bare textured mesh: no shadow, frost,
                 // or corner rounding (square while it jiggles; they return on settle).
                 // A translate offset shifts the mesh vertices too (both are screen px).
-                let mesh = w.wobble.as_ref().map(|wob| {
-                    let mut v = wob.vertices();
-                    if off != [0.0, 0.0] {
-                        for p in &mut v {
-                            p[0] += off[0];
-                            p[1] += off[1];
+                // Wave takes precedence over wobble (mutually exclusive anyway); both
+                // yield the same [x,y,u,v] grid. A translate offset shifts the vertices.
+                let mesh = w
+                    .wave
+                    .as_ref()
+                    .map(|wv| wv.vertices())
+                    .or_else(|| w.wobble.as_ref().map(|wob| wob.vertices()))
+                    .map(|mut v| {
+                        if off != [0.0, 0.0] {
+                            for p in &mut v {
+                                p[0] += off[0];
+                                p[1] += off[1];
+                            }
                         }
-                    }
-                    v
-                });
+                        v
+                    });
                 items.push((
                     Quad {
                         pixmap: pm,
