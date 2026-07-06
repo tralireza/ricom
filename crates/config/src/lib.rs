@@ -363,9 +363,9 @@ pub enum Primitive {
         #[serde(default)]
         friction: Option<f32>,
     },
-    /// Traveling sinusoidal ripple (deforms via the mesh, like wobble). Params fall
-    /// back to the `[anim] wave_*` defaults; `axis` is the crest's travel direction
-    /// (`x` displaces Y, `y` displaces X). Rings down by `decay`, then settles flat.
+    /// Traveling sinusoidal wave (per-pixel refraction; open/close/animate/focus).
+    /// Params fall back to the `[anim] wave_*` defaults; `axis` is the crest's travel
+    /// direction (`x` displaces V, `y` displaces U). Settles over `duration` seconds.
     Wave {
         #[serde(default)]
         amplitude: Option<f32>,
@@ -376,7 +376,7 @@ pub enum Primitive {
         #[serde(default)]
         axis: Axis,
         #[serde(default)]
-        decay: Option<f32>,
+        duration: Option<f32>,
     },
     /// Radial water-refraction ripple (per-pixel; open/close/animate/focus). Rings
     /// expand from the window centre, spreading + ringing down. Params fall back to
@@ -493,7 +493,7 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
         // Rotate in/out about the centre (with a fade); half-turn by default.
         "spin" => vec![opacity, Spin { degrees: None, easing: Easing::EaseOut }],
         // Traveling ripple: one-shot that rings down (see `[anim] wave_*`).
-        "wave" => vec![Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::X, decay: None }],
+        "wave" => vec![Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::X, duration: None }],
         // Radial water-refraction ripple (per-pixel; see `[anim] ripple_*`).
         "ripple" => vec![Ripple { amplitude: None, wavelength: None, speed: None, r0: None, duration: None }],
         _ => return None,
@@ -522,15 +522,15 @@ pub struct Anim {
     pub wobble_spring: f32,
     /// Default wobble velocity damping.
     pub wobble_friction: f32,
-    /// Default `wave` amplitude (px).
+    /// Default `wave` amplitude (UV — fraction of the perpendicular dimension).
     pub wave_amplitude: f32,
     /// Default `wave` wavelength as a fraction of the travel axis (`1.0` = one full
     /// cycle across; `0.5` = two). Cycles across ≈ `1.0 / wave_wavelength`.
     pub wave_wavelength: f32,
     /// Default `wave` travel speed (cycles per second).
     pub wave_speed: f32,
-    /// Default `wave` per-second amplitude decay (`<1` rings down; `1.0` loops).
-    pub wave_decay: f32,
+    /// Default `wave` settle time in seconds (how long it lasts; `<= 0` loops).
+    pub wave_duration: f32,
     /// Default `ripple` peak radial UV displacement (aspect-corrected units).
     pub ripple_amplitude: f32,
     /// Default `ripple` ring spacing (fraction of the aspect-corrected radius).
@@ -618,10 +618,10 @@ impl Default for Anim {
             scale_from: 0.85,
             wobble_spring: 350.0,
             wobble_friction: 14.0,
-            wave_amplitude: 24.0,
+            wave_amplitude: 0.04,
             wave_wavelength: 0.5,
             wave_speed: 1.5,
-            wave_decay: 0.05,
+            wave_duration: 1.5,
             ripple_amplitude: 0.08,
             ripple_wavelength: 0.18,
             ripple_speed: 1.2,
@@ -753,7 +753,7 @@ impl Config {
         chg!("anim.wave_amplitude", prev.anim.wave_amplitude, self.anim.wave_amplitude);
         chg!("anim.wave_wavelength", prev.anim.wave_wavelength, self.anim.wave_wavelength);
         chg!("anim.wave_speed", prev.anim.wave_speed, self.anim.wave_speed);
-        chg!("anim.wave_decay", prev.anim.wave_decay, self.anim.wave_decay);
+        chg!("anim.wave_duration", prev.anim.wave_duration, self.anim.wave_duration);
         chg!("anim.ripple_amplitude", prev.anim.ripple_amplitude, self.anim.ripple_amplitude);
         chg!("anim.ripple_wavelength", prev.anim.ripple_wavelength, self.anim.ripple_wavelength);
         chg!("anim.ripple_speed", prev.anim.ripple_speed, self.anim.ripple_speed);

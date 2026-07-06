@@ -389,23 +389,20 @@ impl Wobble {
     }
 }
 
-/// Settle threshold for [`Wave`]: once the amplitude falls below this (px) the
-/// ripple is done and the window snaps flat.
-const WAVE_AMP_EPS: f32 = 0.3;
+/// Settle threshold for [`Wave`]: once the amplitude (UV units) drops below this
+/// the wave is done and the window returns to a plain blit.
+const WAVE_AMP_EPS: f32 = 1.5e-3;
 
-/// A traveling sinusoidal ripple that deforms a window via the same `N×N` mesh the
-/// [`Wobble`] uses (so the renderer path is shared). A crest sweeps along `axis`
-/// while the amplitude rings down by `decay` each second, until it settles flat.
-///
-/// Pure and clock-agnostic like the rest of this module: no GL, no X. The caller
-/// feeds `dt` and reads [`vertices`](Wave::vertices) — the deformed grid, same
-/// `[x, y, u, v]` shape as [`Wobble::vertices`]. Wave and wobble are mutually
-/// exclusive on a window: both drive the single per-window mesh.
+/// A traveling sinusoidal wave, driven per-pixel by the renderer's wave shader — it
+/// carries the animated parameters (no mesh; the mesh path is wobble-only now). A
+/// sine crest sweeps along `axis` while the amplitude rings down over the requested
+/// duration, until it settles flat. Rect-agnostic (works in UV; the shader offsets
+/// the sampled UV perpendicular to travel). Pure and clock-agnostic like the rest of
+/// this module.
 #[derive(Debug, Clone, Copy)]
 pub struct Wave {
-    /// Window outer rect `[x, y, w, h]` (px); the ripple deforms points over it.
-    rect: [f32; 4],
-    /// Current amplitude (px). Rings down via `decay`; settles below `WAVE_AMP_EPS`.
+    /// Current amplitude (UV — fraction of the perpendicular dimension). Rings down
+    /// via `decay`; settles below [`WAVE_AMP_EPS`].
     amp: f32,
     /// Wavelength as a fraction of the travel axis (`1.0` = one full cycle across;
     /// `0.5` = two cycles). Cycles across ≈ `1.0 / wavelength`.
@@ -414,38 +411,34 @@ pub struct Wave {
     speed: f32,
     /// Current phase in cycles.
     phase: f32,
-    /// Travel axis: `X` (crest along X, displaces Y) or `Y` (along Y, displaces X);
+    /// Travel axis: `X` (crest along X, displaces V) or `Y` (along Y, displaces U);
     /// `Both` is treated as `X`.
     axis: Axis,
-    /// Per-second amplitude factor in `0.0..=1.0` (`0.12` rings down to ~12 %/s;
-    /// `1.0` never decays → a continuous loop).
+    /// Per-frame amplitude factor in `0.0..=1.0`, derived from the requested duration
+    /// (`1.0` = never settles → loop).
     decay: f32,
 }
 
 impl Wave {
-    /// A ripple over outer rect `rect`: starting amplitude `amp` (px), `wavelength`
-    /// (fraction of the axis), `speed` (cycles/s), traveling along `axis`, ringing
-    /// down by `decay` (per-second factor).
-    pub fn new(rect: [f32; 4], amp: f32, wavelength: f32, speed: f32, axis: Axis, decay: f32) -> Self {
-        Wave {
-            rect,
-            amp: amp.max(0.0),
-            wavelength: wavelength.max(0.05),
-            speed,
-            phase: 0.0,
-            axis,
-            decay: decay.clamp(0.0, 1.0),
-        }
+    /// A traveling wave: starting amplitude `amp` (UV), `wavelength` (fraction of the
+    /// axis), `speed` (cycles/s), traveling along `axis`, settling over `duration`
+    /// seconds. The ring-down `decay` is derived so the amplitude reaches the settle
+    /// threshold exactly at `duration`; `duration <= 0.0` loops forever.
+    pub fn new(amp: f32, wavelength: f32, speed: f32, axis: Axis, duration: f32) -> Self {
+        let amp = amp.max(0.0);
+        // Want amp * decay^duration == WAVE_AMP_EPS, so decay = (eps/amp)^(1/duration).
+        let decay = if duration <= 0.0 {
+            1.0 // loop: never settles
+        } else if amp <= WAVE_AMP_EPS {
+            0.0 // already sub-threshold: settle at once
+        } else {
+            (WAVE_AMP_EPS / amp).powf(1.0 / duration).clamp(0.0, 1.0)
+        };
+        Wave { amp, wavelength: wavelength.max(0.05), speed, phase: 0.0, axis, decay }
     }
 
-    /// Re-anchor to a new outer rect (window moved/resized mid-ripple).
-    pub fn retarget(&mut self, rect: [f32; 4]) {
-        self.rect = rect;
-    }
-
-    /// Advance by `dt` seconds: travel the crest and ring the amplitude down.
-    /// Returns whether the ripple is still visible (amplitude above the settle
-    /// threshold), so the frame clock keeps running.
+    /// Advance by `dt` seconds: travel the crest (`phase`) and ring the amplitude
+    /// down. Returns whether the wave is still visible (amplitude above the threshold).
     pub fn advance(&mut self, dt: f32) -> bool {
         if dt > 0.0 {
             self.phase += self.speed * dt;
@@ -454,40 +447,9 @@ impl Wave {
         self.amp > WAVE_AMP_EPS
     }
 
-    /// Current mesh vertices as `[x_px, y_px, u, v]`, row-major (`j * N + i`) — the
-    /// deformed grid for the renderer, same shape as [`Wobble::vertices`]. UVs are
-    /// the static grid `(i/(N-1), j/(N-1))`; positions are offset by the sine.
-    pub fn vertices(&self) -> Vec<[f32; 4]> {
-        let n = WOBBLE_N;
-        let d = (n - 1) as f32;
-        let [x, y, w, h] = self.rect;
-        let mut v = Vec::with_capacity(n * n);
-        for j in 0..n {
-            for i in 0..n {
-                let (u, vv) = (i as f32 / d, j as f32 / d);
-                // Position along the travel axis (0..1) drives the sine phase.
-                let along = if self.axis == Axis::Y { vv } else { u };
-                let off = self.amp * (std::f32::consts::TAU * (along / self.wavelength - self.phase)).sin();
-                let (mut px, mut py) = (x + u * w, y + vv * h);
-                // Displace perpendicular to travel.
-                if self.axis == Axis::Y {
-                    px += off;
-                } else {
-                    py += off;
-                }
-                v.push([px, py, u, vv]);
-            }
-        }
-        v
-    }
-
-    /// Axis-aligned bounds of the rippled mesh `[min_x, min_y, max_x, max_y]`,
-    /// expanded by `pad` px — max displacement is the amplitude on the perpendicular
-    /// axis. The caller turns this into a damage/clip rect.
-    pub fn bounds(&self, pad: f32) -> [f32; 4] {
-        let [x, y, w, h] = self.rect;
-        let e = self.amp + pad;
-        [x - e, y - e, x + w + e, y + h + e]
+    /// Current shader parameters: `(amp, wavelength, phase, axis)`.
+    pub fn params(&self) -> (f32, f32, f32, Axis) {
+        (self.amp, self.wavelength, self.phase, self.axis)
     }
 }
 

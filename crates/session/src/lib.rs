@@ -23,7 +23,7 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
-use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, RippleParams, WindowDraw};
+use backend_gl::{Burn, GlBackend, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, RippleParams, WaveParams, WindowDraw};
 use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
@@ -191,7 +191,7 @@ fn squash_rect(rect: [f32; 4], factor: f32) -> [f32; 4] {
 /// optional burn, always-on-top flag (from the `above` rule), and optional spin
 /// angle (radians).
 type CompositeItem =
-    (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>, Option<RippleParams>);
+    (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>, Option<RippleParams>, Option<WaveParams>);
 
 /// Axis-aligned bounding box of a rect rotated `angle` radians about its centre —
 /// the footprint/damage a spinning window covers. `rect` is `[x, y, w, h]`.
@@ -1125,14 +1125,13 @@ impl App {
                 }
             }
             "wave" => {
-                check_keys(effect, params, &["amplitude", "wavelength", "speed", "axis", "decay"])?;
+                check_keys(effect, params, &["amplitude", "wavelength", "speed", "axis", "duration"])?;
                 let amp = param_f32(params, "amplitude")?.unwrap_or(self.config.anim.wave_amplitude);
                 let wl = param_f32(params, "wavelength")?.unwrap_or(self.config.anim.wave_wavelength);
                 let speed = param_f32(params, "speed")?.unwrap_or(self.config.anim.wave_speed);
                 let axis = param_axis(params)?.unwrap_or(Axis::X);
-                let decay = param_f32(params, "decay")?.unwrap_or(self.config.anim.wave_decay);
-                let rect = self.outer_rect_of(win);
-                self.windows.wave_to(win, rect, amp, wl, speed, axis, decay);
+                let duration = param_f32(params, "duration")?.unwrap_or(self.config.anim.wave_duration);
+                self.windows.wave_to(win, amp, wl, speed, axis, duration);
             }
             "ripple" => {
                 check_keys(effect, params, &["amplitude", "wavelength", "speed", "r0", "duration"])?;
@@ -1346,16 +1345,14 @@ impl App {
                             let rad = degrees.unwrap_or(SPIN_DEFAULT_DEG as f32) as f64 * PI / 180.0;
                             self.windows.spin_in(id, rad, dur, map_easing(*easing));
                         }
-                        Primitive::Wave { amplitude, wavelength, speed, axis, decay } => {
-                            let rect = self.outer_rect_of(id);
+                        Primitive::Wave { amplitude, wavelength, speed, axis, duration } => {
                             self.windows.wave_to(
                                 id,
-                                rect,
                                 amplitude.unwrap_or(self.config.anim.wave_amplitude),
                                 wavelength.unwrap_or(self.config.anim.wave_wavelength),
                                 speed.unwrap_or(self.config.anim.wave_speed),
                                 map_axis(*axis),
-                                decay.unwrap_or(self.config.anim.wave_decay),
+                                duration.unwrap_or(self.config.anim.wave_duration),
                             );
                         }
                         Primitive::Ripple { amplitude, wavelength, speed, r0, duration } => {
@@ -1403,18 +1400,16 @@ impl App {
                             let rad = degrees.unwrap_or(SPIN_DEFAULT_DEG as f32) as f64 * PI / 180.0;
                             self.windows.spin_out(id, rad, dur, map_easing(*easing));
                         }
-                        Primitive::Wave { amplitude, wavelength, speed, axis, decay } => {
-                            // Ripple while the opacity fade (below) carries the window out
-                            // — the mesh renders textured × the fading alpha, reaped at 0.
-                            let rect = self.outer_rect_of(id);
+                        Primitive::Wave { amplitude, wavelength, speed, axis, duration } => {
+                            // Wave while the opacity fade (below) carries the window out —
+                            // the per-pixel warp renders textured × the fading alpha, reaped at 0.
                             self.windows.wave_to(
                                 id,
-                                rect,
                                 amplitude.unwrap_or(self.config.anim.wave_amplitude),
                                 wavelength.unwrap_or(self.config.anim.wave_wavelength),
                                 speed.unwrap_or(self.config.anim.wave_speed),
                                 map_axis(*axis),
-                                decay.unwrap_or(self.config.anim.wave_decay),
+                                duration.unwrap_or(self.config.anim.wave_duration),
                             );
                         }
                         Primitive::Ripple { amplitude, wavelength, speed, r0, duration } => {
@@ -1539,14 +1534,8 @@ impl App {
                         );
                         r = Rect::new(r.x1.min(wr.x1), r.y1.min(wr.y1), r.x2.max(wr.x2), r.y2.max(wr.y2));
                     }
-                    if let Some(wv) = &w.wave {
-                        let b = wv.bounds(WOBBLE_PAD);
-                        let wr = Rect::new(
-                            b[0].floor() as i32, b[1].floor() as i32,
-                            b[2].ceil() as i32, b[3].ceil() as i32,
-                        );
-                        r = Rect::new(r.x1.min(wr.x1), r.y1.min(wr.y1), r.x2.max(wr.x2), r.y2.max(wr.y2));
-                    }
+                    // Wave/ripple are per-pixel (content warps within the fixed rect),
+                    // so the outer rect above already covers them — no extra bbox.
                     // Spin: the rotated bounding box exceeds the rect at ~45°.
                     if w.spin.current() != 0.0 {
                         let sa = rotated_aabb(
@@ -1745,12 +1734,12 @@ impl App {
                 let (ow, oh) = (w.width as i32 + 2 * bw, w.height as i32 + 2 * bw);
                 // Per-window rule overrides, falling back to the global config.
                 let rr = self.resolve_rules(w.id);
-                // "wobbling" = using the deformed-mesh path (spring wobble OR wave ripple);
-                // both skip scale/shadow/blur/corners and draw the textured grid.
-                let wobbling = w.wobble.is_some() || w.wave.is_some();
-                // Rippling = the per-pixel refraction path (RIPPLE_FS). Not a mesh; it
-                // draws the quad but, like spin, skips shadow / frost / corner rounding.
-                let rippling = w.ripple.is_some();
+                // "wobbling" = the deformed-mesh path (spring wobble). Skips scale /
+                // shadow / blur / corners and draws the textured grid.
+                let wobbling = w.wobble.is_some();
+                // Per-pixel refraction (RIPPLE_FS / WAVE_FS): draws the quad but, like
+                // spin, skips shadow / frost / corner rounding. Not a mesh.
+                let per_pixel = w.ripple.is_some() || w.wave.is_some();
                 let burning = w.burn.is_some();
                 let burn = w.burn.as_ref().map(|b| Burn { progress: b.progress.current() as f32, seed: b.seed });
                 // Scale-about-centre for the open/close pop. Skipped while wobbling —
@@ -1790,26 +1779,24 @@ impl App {
                 // A wobbling window draws as a bare textured mesh: no shadow, frost,
                 // or corner rounding (square while it jiggles; they return on settle).
                 // A translate offset shifts the mesh vertices too (both are screen px).
-                // Wave takes precedence over wobble (mutually exclusive anyway); both
-                // yield the same [x,y,u,v] grid. A translate offset shifts the vertices.
-                let mesh = w
-                    .wave
-                    .as_ref()
-                    .map(|wv| wv.vertices())
-                    .or_else(|| w.wobble.as_ref().map(|wob| wob.vertices()))
-                    .map(|mut v| {
-                        if off != [0.0, 0.0] {
-                            for p in &mut v {
-                                p[0] += off[0];
-                                p[1] += off[1];
-                            }
+                let mesh = w.wobble.as_ref().map(|wob| wob.vertices()).map(|mut v| {
+                    if off != [0.0, 0.0] {
+                        for p in &mut v {
+                            p[0] += off[0];
+                            p[1] += off[1];
                         }
-                        v
-                    });
+                    }
+                    v
+                });
                 // Ripple params for the shader: centre + current amp/wavelength/phase/r0.
                 let ripple = w.ripple.as_ref().map(|r| {
                     let (center, amp, wavelength, phase, r0) = r.params();
                     RippleParams { center, amp, wavelength, phase, r0 }
+                });
+                // Wave params for the shader: amp/wavelength/phase + travel axis (0=X, 1=Y).
+                let wave = w.wave.as_ref().map(|wv| {
+                    let (amp, wavelength, phase, axis) = wv.params();
+                    WaveParams { amp, wavelength, phase, axis: matches!(axis, wm::anim::Axis::Y) as u32 }
                 });
                 items.push((
                     Quad {
@@ -1828,7 +1815,7 @@ impl App {
                         shadow: !wobbling
                             && !directional
                             && spin.is_none()
-                            && !rippling
+                            && !per_pixel
                             && rr.shadow.unwrap_or(self.config.shadow.enabled)
                             && ow >= self.config.shadow.min_size
                             && oh >= self.config.shadow.min_size
@@ -1836,10 +1823,10 @@ impl App {
                         // Frost the backdrop only for translucent windows (opaque
                         // ones hide their backdrop); never while wobbling.
                         blur: !wobbling
-                            && !rippling
+                            && !per_pixel
                             && rr.blur.unwrap_or(self.config.blur.enabled)
                             && w.fade.current() < 1.0,
-                        corner_radius: if wobbling || directional || spin.is_some() || rippling {
+                        corner_radius: if wobbling || directional || spin.is_some() || per_pixel {
                             0.0
                         } else {
                             rr.corner_radius.unwrap_or(self.config.corner_radius)
@@ -1850,6 +1837,7 @@ impl App {
                     rr.above.unwrap_or(false),
                     spin,
                     ripple,
+                    wave,
                 ));
             }
         }
@@ -1883,7 +1871,7 @@ impl App {
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
-        for (q, mesh, burn, _above, spin, ripple) in items.iter().rev() {
+        for (q, mesh, burn, _above, spin, ripple, wave) in items.iter().rev() {
             let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
             // Footprint = the area the window might touch this frame. A spinner
             // sweeps its rotated bounding box; a wobbler can deform outside its rect
@@ -1909,13 +1897,14 @@ impl App {
                     burn: *burn,
                     spin: *spin,
                     ripple: *ripple,
+                    wave: *wave,
                 });
             }
             // Opaque windows occlude what's below: a square one covers its whole
             // rect; a rounded one covers all but its (transparent) corner squares.
             // A wobbling window is *deforming*, so it never occludes (its rect is
             // unreliable) — draw everything beneath it.
-            if mesh.is_none() && burn.is_none() && spin.is_none() && ripple.is_none() && q.opacity >= 1.0 {
+            if mesh.is_none() && burn.is_none() && spin.is_none() && ripple.is_none() && wave.is_none() && q.opacity >= 1.0 {
                 let cr = q.corner_radius as i32;
                 if cr <= 0 {
                     covered.add_rect(rect);

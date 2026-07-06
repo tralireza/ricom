@@ -45,8 +45,8 @@ fn defaults_match_compiled_behaviour() {
     assert_eq!(c.anim.scale_from, 0.85);
     assert_eq!((c.anim.wobble_spring, c.anim.wobble_friction), (350.0, 14.0));
     assert_eq!(
-        (c.anim.wave_amplitude, c.anim.wave_wavelength, c.anim.wave_speed, c.anim.wave_decay),
-        (24.0, 0.5, 1.5, 0.05)
+        (c.anim.wave_amplitude, c.anim.wave_wavelength, c.anim.wave_speed, c.anim.wave_duration),
+        (0.04, 0.5, 1.5, 1.5)
     );
     assert_eq!(
         (c.anim.ripple_amplitude, c.anim.ripple_wavelength, c.anim.ripple_speed, c.anim.ripple_r0, c.anim.ripple_duration),
@@ -350,25 +350,25 @@ focus = "wave"
 fn wave_preset_expands_to_a_wave_block() {
     assert_eq!(
         expand_sel(&AnimSel::Preset("wave".into())).blocks,
-        [Primitive::Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::X, decay: None }]
+        [Primitive::Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::X, duration: None }]
     );
 }
 
 #[test]
 fn wave_block_params_parse() {
-    let t = "[anim.open]\nblocks = [ { block = \"wave\", amplitude = 20.0, wavelength = 0.4, speed = 2.0, axis = \"y\", decay = 0.2 } ]\n";
+    let t = "[anim.open]\nblocks = [ { block = \"wave\", amplitude = 0.06, wavelength = 0.4, speed = 2.0, axis = \"y\", duration = 2.0 } ]\n";
     let c: Config = toml::from_str(t).unwrap();
     let AnimSel::Spec(s) = &c.anim.open else { panic!("expected explicit spec") };
     assert_eq!(
         s.blocks,
-        [Primitive::Wave { amplitude: Some(20.0), wavelength: Some(0.4), speed: Some(2.0), axis: Axis::Y, decay: Some(0.2) }]
+        [Primitive::Wave { amplitude: Some(0.06), wavelength: Some(0.4), speed: Some(2.0), axis: Axis::Y, duration: Some(2.0) }]
     );
     // Omitted params → None (fall back to [anim] wave_*); axis defaults to Both (X-travel).
     let c: Config = toml::from_str("[anim.open]\nblocks = [ { block = \"wave\" } ]\n").unwrap();
     let AnimSel::Spec(s) = &c.anim.open else { panic!("expected spec") };
     assert_eq!(
         s.blocks,
-        [Primitive::Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::Both, decay: None }]
+        [Primitive::Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::Both, duration: None }]
     );
 }
 

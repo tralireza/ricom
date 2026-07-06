@@ -411,16 +411,15 @@ impl WindowStack {
         }
     }
 
-    /// Start a traveling-wave ripple over outer rect `rect` (`[x, y, w, h]` px):
-    /// amplitude `amp`, `wavelength` (fraction of the axis), `speed` (cycles/s),
-    /// along `axis`, ringing down by `decay`. Replaces any active wave and clears
-    /// any wobble (they share the single mesh). No-op if untracked.
-    #[allow(clippy::too_many_arguments)]
-    pub fn wave_to(&mut self, id: WindowId, rect: [f32; 4], amp: f32, wavelength: f32, speed: f32, axis: Axis, decay: f32) {
+    /// Start a traveling wave (per-pixel, no mesh): amplitude `amp` (UV), `wavelength`
+    /// (fraction of the axis), `speed` (cycles/s), along `axis`, settling over
+    /// `duration` seconds (`<= 0` loops). Replaces any active wave and clears any
+    /// wobble/ripple (one effect slot). No-op if untracked.
+    pub fn wave_to(&mut self, id: WindowId, amp: f32, wavelength: f32, speed: f32, axis: Axis, duration: f32) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.wobble = None; // one effect slot: wave ⟂ wobble / ripple
             w.ripple = None;
-            w.wave = Some(Wave::new(rect, amp, wavelength, speed, axis, decay));
+            w.wave = Some(Wave::new(amp, wavelength, speed, axis, duration));
         }
     }
 

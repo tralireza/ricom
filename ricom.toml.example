@@ -40,7 +40,7 @@ default_opacity = 1.0
 #   unroll   a centre line grows to full HEIGHT (scale y; opaque, shows content)
 #   minimize shrink to a point + slide off the bottom edge (simplified genie)
 #   spin     rotate about the centre (full turn) + fade  (GPU)
-#   wave     traveling sinusoidal ripple (mesh deform); rings down + settles flat
+#   wave     traveling sinusoidal crest (per-pixel refraction); rings down + settles flat
 #   ripple   radial "drop in a lake" — per-pixel refraction from the centre out (GPU)
 [anim]
 open  = "pop"           # window mapped
@@ -52,10 +52,10 @@ duration = 0.2          # default seconds for opacity / scale / translate
 scale_from = 0.85       # default `scale` start factor (open) / end factor (close)
 wobble_spring = 350.0   # default wobble spring stiffness k (higher = snappier)
 wobble_friction = 14.0  # default wobble velocity damping (higher = less jiggle)
-wave_amplitude = 24.0   # default `wave` ripple height (px)
+wave_amplitude = 0.04   # default `wave` amplitude (UV; fraction of the perpendicular side)
 wave_wavelength = 0.5   # `wave` wavelength as a fraction of the axis (1.0 = one cycle across; 0.5 = two)
 wave_speed = 1.5        # default `wave` crest travel speed (cycles/second)
-wave_decay = 0.05       # default `wave` per-second amplitude decay (<1 rings down; 1.0 loops)
+wave_duration = 1.5     # default `wave` settle time (seconds; how long it lasts, <=0 loops)
 ripple_amplitude = 0.08  # default `ripple` peak refraction (UV units; ~8% of the window)
 ripple_wavelength = 0.18 # `ripple` ring spacing (fraction of the radius; smaller = more rings)
 ripple_speed = 1.2       # default `ripple` ring expansion speed (cycles/second)
@@ -81,7 +81,7 @@ ripple_duration = 2.5    # default `ripple` settle time (seconds; how long it la
 #   translate { dx, dy, edge = "left"|"right"|"top"|"bottom", easing }
 #             #   edge = slide fully off that screen edge; else use dx/dy (px)
 #   wobble    { spring, friction }
-#   wave      { amplitude, wavelength, speed, axis = "x"|"y", decay }  # sinusoidal ripple
+#   wave      { amplitude, wavelength, speed, axis = "x"|"y", duration } # sinusoidal (per-pixel)
 #   ripple    { amplitude, wavelength, speed, r0, duration }           # radial refraction (GPU)
 #   burn      # no params here — the dissolve look comes from [burn] below
 

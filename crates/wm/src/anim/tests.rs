@@ -203,54 +203,38 @@ fn wobble_zero_spring_settles_instantly() {
     assert!((v[0][0] - 50.0).abs() < 1e-4 && (v[0][1] - 50.0).abs() < 1e-4);
 }
 
-// --- Wave ripple ---------------------------------------------------------
+// --- Wave (traveling-crest params) ---------------------------------------
 
 #[test]
-fn wave_is_flat_grid_at_zero_amp() {
-    let w = Wave::new([10.0, 20.0, 100.0, 80.0], 0.0, 0.5, 1.5, Axis::X, 0.12);
-    let v = w.vertices();
-    assert_eq!(v.len(), WOBBLE_N * WOBBLE_N);
-    assert!((v[0][0] - 10.0).abs() < 1e-4 && (v[0][1] - 20.0).abs() < 1e-4); // corner (0,0)
-    let last = v.len() - 1;
-    assert!((v[last][0] - 110.0).abs() < 1e-4 && (v[last][1] - 100.0).abs() < 1e-4); // bottom-right
-}
-
-#[test]
-fn wave_x_axis_displaces_y_only() {
-    // Axis::X travels along X and displaces Y; X coords stay on the anchor grid.
-    let d = (WOBBLE_N - 1) as f32;
-    let w = Wave::new([0.0, 0.0, 100.0, 100.0], 15.0, 0.5, 1.0, Axis::X, 0.5);
-    for (k, p) in w.vertices().iter().enumerate() {
-        let anchor_x = (k % WOBBLE_N) as f32 / d * 100.0;
-        assert!((p[0] - anchor_x).abs() < 1e-4, "x should not move on an X-axis wave");
+fn wave_settles_at_requested_duration() {
+    // `duration` is the settle time: the derived decay drives amp to the threshold at ~D.
+    for d in [1.0_f32, 2.0, 3.5] {
+        let mut w = Wave::new(0.06, 0.5, 1.5, Axis::X, d);
+        let (a0, wl, ph0, _axis) = w.params();
+        assert!(a0 > 0.0 && wl > 0.0 && ph0 == 0.0);
+        let mut steps = 0;
+        while w.advance(1.0 / 60.0) {
+            steps += 1;
+            assert!(steps < 100_000, "wave never settled");
+        }
+        let secs = steps as f32 / 60.0;
+        assert!((secs - d).abs() < d * 0.15, "duration {d}: settled in {secs}s");
+        assert!(w.params().2 > 0.0, "phase should advance (crest travels)");
     }
 }
 
 #[test]
-fn wave_displaces_then_rings_down_to_flat() {
-    let mut w = Wave::new([0.0, 0.0, 200.0, 200.0], 20.0, 0.5, 1.5, Axis::X, 0.05);
-    let d = (WOBBLE_N - 1) as f32;
-    // At t=0 some vertex is displaced off its anchor row.
-    let displaced = w.vertices().iter().enumerate().any(|(k, p)| {
-        let anchor_y = (k / WOBBLE_N) as f32 / d * 200.0;
-        (p[1] - anchor_y).abs() > 1.0
-    });
-    assert!(displaced, "wave should deform the grid at t=0");
-    // A decaying wave must settle in finite time.
-    let mut steps = 0;
-    while w.advance(1.0 / 60.0) {
-        steps += 1;
-        assert!(steps < 100_000, "wave never settled");
-    }
-    assert!(steps > 0, "a decaying wave should take some frames to ring down");
-}
-
-#[test]
-fn wave_loops_forever_when_decay_is_one() {
-    let mut w = Wave::new([0.0, 0.0, 100.0, 100.0], 12.0, 0.5, 1.5, Axis::X, 1.0);
+fn wave_loops_when_duration_zero() {
+    let mut w = Wave::new(0.06, 0.5, 1.5, Axis::X, 0.0);
     for _ in 0..600 {
-        assert!(w.advance(1.0 / 60.0), "decay = 1.0 should loop, not settle");
+        assert!(w.advance(1.0 / 60.0), "duration 0 should loop, not settle");
     }
+}
+
+#[test]
+fn wave_axis_is_preserved() {
+    let w = Wave::new(0.06, 0.5, 1.5, Axis::Y, 2.0);
+    assert!(matches!(w.params().3, Axis::Y));
 }
 
 // --- Ripple (radial refraction params) -----------------------------------

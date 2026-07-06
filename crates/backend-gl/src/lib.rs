@@ -122,6 +122,30 @@ void main() {
 }
 "#;
 
+/// Traveling-wave content refraction (reuses [`BLIT_VS`]: `u_rect`/`u_screen`/`v_tex`).
+/// The per-pixel replacement for the old mesh `wave`: a sine crest travels along
+/// `u_axis` (0 = X, displaces V; 1 = Y, displaces U), offsetting the sampled UV
+/// perpendicular to travel by `u_amp` (UV) — smooth at any amplitude, where the
+/// 16×16 grid faceted. `u_phase` advances so the crest sweeps. Premultiplied output.
+const WAVE_FS: &str = r#"#version 330 core
+in vec2 v_tex;
+uniform sampler2D u_tex;
+uniform float u_opacity;
+uniform float u_amp;         // peak perpendicular UV displacement
+uniform float u_wavelength;  // fraction of the travel axis (1.0 = one cycle across)
+uniform float u_phase;       // advances -> crest travels
+uniform int   u_axis;        // 0 = travel along X (displaces V); 1 = along Y (displaces U)
+out vec4 frag;
+void main() {
+    float along = (u_axis == 1) ? v_tex.y : v_tex.x;
+    float off = u_amp * sin(6.2831853 * (along / max(u_wavelength, 1e-3) - u_phase));
+    vec2 uv = v_tex;
+    if (u_axis == 1) { uv.x += off; } else { uv.y += off; }
+    uv = clamp(uv, 0.0, 1.0);
+    frag = vec4(texture(u_tex, uv).rgb * u_opacity, u_opacity);
+}
+"#;
+
 /// Burn / dissolve close animation (reuses [`BLIT_VS`], so it has `u_rect`/
 /// `u_screen`/`v_tex`). The window erodes away on animated value-noise with a
 /// glowing ember band at the dissolving front — "uniform segments": chunky
@@ -428,6 +452,22 @@ pub struct RippleParams {
     pub r0: f32,
 }
 
+/// Traveling-wave (content refraction) parameters for [`WAVE_FS`]. When a
+/// [`WindowDraw`] carries `Some`, the backend draws it through the wave program
+/// (per-pixel UV warp; no shadow / frost / corner — like the ripple path). Replaces
+/// the old mesh-based wave, so it's smooth at any amplitude.
+#[derive(Debug, Clone, Copy)]
+pub struct WaveParams {
+    /// Peak perpendicular UV displacement.
+    pub amp: f32,
+    /// Wavelength as a fraction of the travel axis (`1.0` = one cycle across).
+    pub wavelength: f32,
+    /// Phase (cycles); advances so the crest travels.
+    pub phase: f32,
+    /// Travel axis: `0` = along X (displaces V), `1` = along Y (displaces U).
+    pub axis: u32,
+}
+
 /// A window to composite plus the screen-space rectangles it's actually visible
 /// in (region-level occlusion): [`GlBackend::present_windows`] scissors each of
 /// the quad's draws to `clip`, so pixels covered by an opaque window on top are
@@ -451,6 +491,9 @@ pub struct WindowDraw {
     /// Radial water-refraction ripple. `Some` → draw via [`RIPPLE_FS`] (per-pixel UV
     /// warp; no shadow / frost / corner), mutually exclusive with `mesh`/`burn`/`spin`.
     pub ripple: Option<RippleParams>,
+    /// Traveling wave (content refraction). `Some` → draw via [`WAVE_FS`] (per-pixel UV
+    /// warp; no shadow / frost / corner), mutually exclusive with `mesh`/`burn`/`spin`/`ripple`.
+    pub wave: Option<WaveParams>,
 }
 
 impl WindowDraw {
@@ -465,6 +508,7 @@ impl WindowDraw {
             burn: None,
             spin: None,
             ripple: None,
+            wave: None,
         }
     }
 }
@@ -763,6 +807,16 @@ pub struct GlBackend {
     rp_wavelength: Option<glow::NativeUniformLocation>,
     rp_phase: Option<glow::NativeUniformLocation>,
     rp_r0: Option<glow::NativeUniformLocation>,
+    // Wave (traveling-crest UV refraction) program: BLIT_VS + WAVE_FS, reuses the blit VAO.
+    wave_program: glow::NativeProgram,
+    wv_rect: Option<glow::NativeUniformLocation>,
+    wv_screen: Option<glow::NativeUniformLocation>,
+    wv_tex: Option<glow::NativeUniformLocation>,
+    wv_opacity: Option<glow::NativeUniformLocation>,
+    wv_amp: Option<glow::NativeUniformLocation>,
+    wv_wavelength: Option<glow::NativeUniformLocation>,
+    wv_phase: Option<glow::NativeUniformLocation>,
+    wv_axis: Option<glow::NativeUniformLocation>,
     blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
@@ -923,6 +977,23 @@ impl GlBackend {
             )
         };
 
+        // Wave program: BLIT_VS + WAVE_FS, reuses the blit unit-quad VAO. Selected
+        // per-window when a traveling wave is active (per-pixel; replaces mesh wave).
+        let (wave_program, wv_rect, wv_screen, wv_tex, wv_opacity, wv_amp, wv_wavelength, wv_phase, wv_axis) = unsafe {
+            let program = make_program(&gl, BLIT_VS, WAVE_FS)?;
+            (
+                program,
+                gl.get_uniform_location(program, "u_rect"),
+                gl.get_uniform_location(program, "u_screen"),
+                gl.get_uniform_location(program, "u_tex"),
+                gl.get_uniform_location(program, "u_opacity"),
+                gl.get_uniform_location(program, "u_amp"),
+                gl.get_uniform_location(program, "u_wavelength"),
+                gl.get_uniform_location(program, "u_phase"),
+                gl.get_uniform_location(program, "u_axis"),
+            )
+        };
+
         // Wobble mesh program + its VAO: a dynamic vertex VBO ([x,y,u,v] per
         // control point, re-uploaded per frame) and a static triangle-index EBO
         // (two triangles per grid cell). The EBO binding is captured in the VAO.
@@ -1062,6 +1133,7 @@ impl GlBackend {
             burn_program, bu_rect, bu_screen, bu_tex, bu_opacity, bu_progress, bu_seed, bu_segscale, bu_ember, bu_ember_cool, bu_ember_hot,
             spin_program, spin_vao, sp_rect, sp_screen, sp_tex, sp_opacity, sp_corner, sp_angle,
             ripple_program, rp_rect, rp_screen, rp_tex, rp_opacity, rp_center, rp_amp, rp_wavelength, rp_phase, rp_r0,
+            wave_program, wv_rect, wv_screen, wv_tex, wv_opacity, wv_amp, wv_wavelength, wv_phase, wv_axis,
             blur: RefCell::new(None),
             image_target, render, text,
             solid_program, sol_rect, sol_screen, sol_color, sol_radius,
@@ -1576,7 +1648,7 @@ impl GlBackend {
             self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
             self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
         }
-        for WindowDraw { quad, clip, mesh, burn, spin, ripple } in items {
+        for WindowDraw { quad, clip, mesh, burn, spin, ripple, wave } in items {
             if clip.is_empty() {
                 continue; // fully occluded — nothing visible to draw
             }
@@ -1730,6 +1802,33 @@ impl GlBackend {
                     self.gl.uniform_1_f32(self.rp_wavelength.as_ref(), rp.wavelength);
                     self.gl.uniform_1_f32(self.rp_phase.as_ref(), rp.phase);
                     self.gl.uniform_1_f32(self.rp_r0.as_ref(), rp.r0);
+                    self.gl.enable(glow::SCISSOR_TEST);
+                    for r in clip {
+                        self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
+                        self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
+                    }
+                    self.gl.disable(glow::SCISSOR_TEST);
+                    self.gl.use_program(Some(self.program)); // restore blit for the next item
+                    self.gl.delete_texture(tex);
+                    let _ = self.egl.destroy_image(self.display, image);
+                    continue;
+                }
+                // Waving window: per-pixel traveling-crest UV refraction via the wave
+                // program (no shadow / frost; corners suppressed), scissored to each
+                // clip rect — LINEAR filtering so the offset sampling stays smooth.
+                if let Some(wv) = wave {
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::LINEAR as i32);
+                    self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::LINEAR as i32);
+                    self.gl.use_program(Some(self.wave_program));
+                    self.gl.bind_vertex_array(Some(self.vao));
+                    self.gl.uniform_2_f32(self.wv_screen.as_ref(), screen_w as f32, screen_h as f32);
+                    self.gl.uniform_1_i32(self.wv_tex.as_ref(), 0);
+                    self.gl.uniform_4_f32(self.wv_rect.as_ref(), fx, fy, fw, fh);
+                    self.gl.uniform_1_f32(self.wv_opacity.as_ref(), opacity);
+                    self.gl.uniform_1_f32(self.wv_amp.as_ref(), wv.amp);
+                    self.gl.uniform_1_f32(self.wv_wavelength.as_ref(), wv.wavelength);
+                    self.gl.uniform_1_f32(self.wv_phase.as_ref(), wv.phase);
+                    self.gl.uniform_1_i32(self.wv_axis.as_ref(), wv.axis as i32);
                     self.gl.enable(glow::SCISSOR_TEST);
                     for r in clip {
                         self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());
