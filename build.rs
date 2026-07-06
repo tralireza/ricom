@@ -1,5 +1,7 @@
-//! Build script: stamp the git short hash + commit date (YYMMDD) into the binary
-//! so `--version` and the startup log identify the exact build.
+//! Build script: stamp the git short hash + commit date (YYMMDD) + a monotonic
+//! per-checkout build number into the binary, so `--version` and the startup log
+//! identify the exact build (the build number disambiguates same-hash rebuilds of
+//! a `-dirty` tree, where the hash alone doesn't move).
 //!
 //! Resolution order, independently for the hash and the date:
 //!   1. env override — `RICOM_GIT_HASH` / `RICOM_GIT_DATE`. The deploy step sets
@@ -22,6 +24,7 @@ fn main() {
 
     println!("cargo:rustc-env=RICOM_GIT_HASH={hash}");
     println!("cargo:rustc-env=RICOM_GIT_DATE={date}");
+    println!("cargo:rustc-env=RICOM_BUILD_NUMBER={}", next_build_number());
 
     // Refresh the stamp when the override changes (deploy path) or when the
     // commit / working tree changes (plain-checkout path).
@@ -65,4 +68,23 @@ fn git(args: &[&str]) -> Option<String> {
     }
     let s = String::from_utf8(out.stdout).ok()?.trim().to_string();
     (!s.is_empty()).then_some(s)
+}
+
+/// A monotonic, per-checkout build counter. Reads the integer in `.build-number`
+/// (0 if absent/garbage), increments, writes it back, and returns the new value.
+/// The file is gitignored + not synced, so it counts *this machine's* builds —
+/// disambiguating successive rebuilds of the same (often `-dirty`) tree, where the
+/// git hash alone doesn't change. Deliberately NOT declared `rerun-if-changed`
+/// (that would loop); it advances whenever build.rs itself re-runs — i.e. on the
+/// same triggers as the stamp (env / `.git` change, or `touch build.rs`). Lives at
+/// the repo root, so it survives `cargo clean` (which only wipes `target/`).
+fn next_build_number() -> u64 {
+    let path = ".build-number";
+    let n = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0)
+        + 1;
+    let _ = std::fs::write(path, n.to_string());
+    n
 }

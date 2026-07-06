@@ -47,18 +47,21 @@ _NET_WM_CM_S0.
 ";
 
 /// Version line for `--version` and the startup log, e.g.
-/// `ricom 0.1.0 (39d0212 260703)` — short git hash + commit date (YYMMDD),
-/// baked at build time by `build.rs`. Degrades to `ricom 0.1.0 (39d0212)` with
-/// no date, or a bare `ricom 0.1.0` when no git info is available.
+/// `ricom 0.1.0 (39d0212 260703 #42)` — short git hash + commit date (YYMMDD) +
+/// monotonic per-checkout build number, baked at build time by `build.rs`. The
+/// hash/date each degrade gracefully (e.g. `ricom 0.1.0 (#42)` with no git info);
+/// the build number is always present and disambiguates same-hash rebuilds.
 fn version_string() -> String {
     let base = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
     let hash = option_env!("RICOM_GIT_HASH").unwrap_or("unknown");
     let date = option_env!("RICOM_GIT_DATE").unwrap_or("");
-    match (hash, date) {
-        ("unknown", _) => base.to_string(),
-        (hash, "") => format!("{base} ({hash})"),
-        (hash, date) => format!("{base} ({hash} {date})"),
-    }
+    let build = option_env!("RICOM_BUILD_NUMBER").unwrap_or("0");
+    let stamp = match (hash, date) {
+        ("unknown", _) => format!("#{build}"),
+        (hash, "") => format!("{hash} #{build}"),
+        (hash, date) => format!("{hash} {date} #{build}"),
+    };
+    format!("{base} ({stamp})")
 }
 
 fn main() -> Result<()> {
