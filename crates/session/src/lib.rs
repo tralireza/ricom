@@ -1062,7 +1062,7 @@ impl App {
                 self.config.anim.ripple_wavelength,
                 self.config.anim.ripple_speed,
                 self.config.anim.ripple_r0,
-                self.config.anim.ripple_decay,
+                self.config.anim.ripple_duration,
             ),
             "reset" => self.windows.reset_transforms(win),
             _ => return false,
@@ -1274,7 +1274,7 @@ impl App {
                                 decay.unwrap_or(self.config.anim.wave_decay),
                             );
                         }
-                        Primitive::Ripple { amplitude, wavelength, speed, r0, decay } => {
+                        Primitive::Ripple { amplitude, wavelength, speed, r0, duration } => {
                             self.windows.ripple_to(
                                 id,
                                 [0.5, 0.5],
@@ -1282,7 +1282,7 @@ impl App {
                                 wavelength.unwrap_or(self.config.anim.ripple_wavelength),
                                 speed.unwrap_or(self.config.anim.ripple_speed),
                                 r0.unwrap_or(self.config.anim.ripple_r0),
-                                decay.unwrap_or(self.config.anim.ripple_decay),
+                                duration.unwrap_or(self.config.anim.ripple_duration),
                             );
                         }
                         Primitive::Opacity { .. } | Primitive::Burn => {}
@@ -1333,7 +1333,7 @@ impl App {
                                 decay.unwrap_or(self.config.anim.wave_decay),
                             );
                         }
-                        Primitive::Ripple { amplitude, wavelength, speed, r0, decay } => {
+                        Primitive::Ripple { amplitude, wavelength, speed, r0, duration } => {
                             // Ripple while the opacity fade (below) carries the window out.
                             self.windows.ripple_to(
                                 id,
@@ -1342,7 +1342,7 @@ impl App {
                                 wavelength.unwrap_or(self.config.anim.ripple_wavelength),
                                 speed.unwrap_or(self.config.anim.ripple_speed),
                                 r0.unwrap_or(self.config.anim.ripple_r0),
-                                decay.unwrap_or(self.config.anim.ripple_decay),
+                                duration.unwrap_or(self.config.anim.ripple_duration),
                             );
                         }
                         // Wobble on close is ignored — a closing window uses the fade path.

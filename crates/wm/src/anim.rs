@@ -514,22 +514,34 @@ pub struct Ripple {
     phase: f32,
     /// Spread constant — amplitude falls with radius (large centre, faint rim).
     r0: f32,
-    /// Per-second amplitude factor in `0.0..=1.0` (`1.0` = never decays → loop).
+    /// Per-frame amplitude factor in `0.0..=1.0`, derived from the requested
+    /// duration (`1.0` = never settles → loop).
     decay: f32,
 }
 
 impl Ripple {
     /// A ripple centred at `center` (UV): `amp` (UV displacement), `wavelength`,
-    /// `speed` (cycles/s), spread `r0`, ringing down by `decay`.
-    pub fn new(center: [f32; 2], amp: f32, wavelength: f32, speed: f32, r0: f32, decay: f32) -> Self {
+    /// `speed` (cycles/s), spread `r0`, settling over `duration` seconds. The
+    /// ring-down `decay` is derived so the amplitude reaches the settle threshold
+    /// exactly at `duration`; `duration <= 0.0` loops forever.
+    pub fn new(center: [f32; 2], amp: f32, wavelength: f32, speed: f32, r0: f32, duration: f32) -> Self {
+        let amp = amp.max(0.0);
+        // Want amp * decay^duration == RIPPLE_AMP_EPS, so decay = (eps/amp)^(1/duration).
+        let decay = if duration <= 0.0 {
+            1.0 // loop: never settles
+        } else if amp <= RIPPLE_AMP_EPS {
+            0.0 // already sub-threshold: settle at once
+        } else {
+            (RIPPLE_AMP_EPS / amp).powf(1.0 / duration).clamp(0.0, 1.0)
+        };
         Ripple {
             center,
-            amp: amp.max(0.0),
+            amp,
             wavelength: wavelength.max(1e-3),
             speed,
             phase: 0.0,
             r0: r0.max(1e-3),
-            decay: decay.clamp(0.0, 1.0),
+            decay,
         }
     }
 

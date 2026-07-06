@@ -363,7 +363,7 @@ wobble_friction = 14.0          # wobble velocity damping (higher = less jiggle)
 [fps]
 enabled = false                 # start with the FPS HUD visible (also toggled by the hotkey)
 hotkey = "Super+Shift+F"        # toggle shortcut (XGrabKey); its modifiers + arrows move corners live
-corner = "top-right"            # initial corner: top-left | top-right | bottom-left | bottom-right
+corner = "bottom-left"          # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true                    # rolling frame-time graph under the numbers
 scale = 1.0                     # size multiplier on top of auto screen-height scaling (4K = 2×)
 

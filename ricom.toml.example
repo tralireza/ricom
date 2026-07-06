@@ -56,11 +56,11 @@ wave_amplitude = 24.0   # default `wave` ripple height (px)
 wave_wavelength = 0.5   # `wave` wavelength as a fraction of the axis (1.0 = one cycle across; 0.5 = two)
 wave_speed = 1.5        # default `wave` crest travel speed (cycles/second)
 wave_decay = 0.05       # default `wave` per-second amplitude decay (<1 rings down; 1.0 loops)
-ripple_amplitude = 0.03  # default `ripple` peak refraction (UV units; ~3% of the window)
+ripple_amplitude = 0.08  # default `ripple` peak refraction (UV units; ~8% of the window)
 ripple_wavelength = 0.18 # `ripple` ring spacing (fraction of the radius; smaller = more rings)
 ripple_speed = 1.2       # default `ripple` ring expansion speed (cycles/second)
 ripple_r0 = 0.12         # `ripple` spread — big rings at the centre, dying toward the rim
-ripple_decay = 0.12      # default `ripple` per-second amplitude decay (<1 rings down; 1.0 loops)
+ripple_duration = 2.5    # default `ripple` settle time (seconds; how long it lasts, <=0 loops)
 
 # Explicit block composition (overrides the preset for that category). Each block
 # is a table tagged by `block`; a spec may set its own `duration`. `easing` is
@@ -82,7 +82,7 @@ ripple_decay = 0.12      # default `ripple` per-second amplitude decay (<1 rings
 #             #   edge = slide fully off that screen edge; else use dx/dy (px)
 #   wobble    { spring, friction }
 #   wave      { amplitude, wavelength, speed, axis = "x"|"y", decay }  # sinusoidal ripple
-#   ripple    { amplitude, wavelength, speed, r0, decay }              # radial refraction (GPU)
+#   ripple    { amplitude, wavelength, speed, r0, duration }           # radial refraction (GPU)
 #   burn      # no params here — the dissolve look comes from [burn] below
 
 [shadow]
@@ -134,7 +134,7 @@ ember_hot  = [0.75, 0.22, 0.04] # hottest leading-edge colour; raise both for a 
 enabled = false          # start with the on-demand FPS HUD visible (also toggles live via the hotkey)
 hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + arrow keys move it
                          # between corners live (e.g. Super+Shift+Left)
-corner = "top-right"     # initial corner: top-left | top-right | bottom-left | bottom-right
+corner = "bottom-left"   # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true             # draw the rolling frame-time graph under the numbers
 scale = 1.0              # size multiplier on top of automatic screen-height scaling (4K = 2x)
 # The HUD also shows a 1m/5m/15m load block (fps + GPU render ms); the same

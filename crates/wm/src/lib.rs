@@ -425,15 +425,15 @@ impl WindowStack {
     }
 
     /// Start a radial ripple centred at `center` (UV; `[0.5, 0.5]` = window centre):
-    /// `amp` (UV displacement), `wavelength`, `speed` (cycles/s), spread `r0`, ringing
-    /// down by `decay`. Rendered per-pixel (no mesh). Clears any wobble/wave (one
-    /// effect slot). No-op if untracked.
+    /// `amp` (UV displacement), `wavelength`, `speed` (cycles/s), spread `r0`, settling
+    /// over `duration` seconds (`<= 0` loops). Rendered per-pixel (no mesh). Clears any
+    /// wobble/wave (one effect slot). No-op if untracked.
     #[allow(clippy::too_many_arguments)]
-    pub fn ripple_to(&mut self, id: WindowId, center: [f32; 2], amp: f32, wavelength: f32, speed: f32, r0: f32, decay: f32) {
+    pub fn ripple_to(&mut self, id: WindowId, center: [f32; 2], amp: f32, wavelength: f32, speed: f32, r0: f32, duration: f32) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.wobble = None;
             w.wave = None;
-            w.ripple = Some(Ripple::new(center, amp, wavelength, speed, r0, decay));
+            w.ripple = Some(Ripple::new(center, amp, wavelength, speed, r0, duration));
         }
     }
 

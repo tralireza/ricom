@@ -256,24 +256,28 @@ fn wave_loops_forever_when_decay_is_one() {
 // --- Ripple (radial refraction params) -----------------------------------
 
 #[test]
-fn ripple_rings_down_and_settles() {
-    let mut rp = Ripple::new([0.5, 0.5], 0.03, 0.18, 1.2, 0.12, 0.1);
-    let (c, a0, wl, ph0, r0) = rp.params();
-    assert_eq!(c, [0.5, 0.5]);
-    assert!(a0 > 0.0 && wl > 0.0 && r0 > 0.0 && ph0 == 0.0);
-    let mut steps = 0;
-    while rp.advance(1.0 / 60.0) {
-        steps += 1;
-        assert!(steps < 100_000, "ripple never settled");
+fn ripple_settles_at_requested_duration() {
+    // `duration` is the settle time: the derived decay drives amp to the threshold at ~D.
+    for d in [1.5_f32, 2.5, 4.0] {
+        let mut rp = Ripple::new([0.5, 0.5], 0.06, 0.18, 1.2, 0.12, d);
+        let (c, a0, wl, ph0, r0) = rp.params();
+        assert_eq!(c, [0.5, 0.5]);
+        assert!(a0 > 0.0 && wl > 0.0 && r0 > 0.0 && ph0 == 0.0);
+        let mut steps = 0;
+        while rp.advance(1.0 / 60.0) {
+            steps += 1;
+            assert!(steps < 100_000, "ripple never settled");
+        }
+        let secs = steps as f32 / 60.0;
+        assert!((secs - d).abs() < d * 0.15, "duration {d}: settled in {secs}s");
+        assert!(rp.params().3 > 0.0, "phase should advance (rings expand)");
     }
-    assert!(steps > 0, "a decaying ripple should take some frames to settle");
-    assert!(rp.params().3 > ph0, "phase should advance (rings expand)");
 }
 
 #[test]
-fn ripple_loops_when_decay_is_one() {
-    let mut rp = Ripple::new([0.5, 0.5], 0.03, 0.18, 1.2, 0.12, 1.0);
+fn ripple_loops_when_duration_zero() {
+    let mut rp = Ripple::new([0.5, 0.5], 0.06, 0.18, 1.2, 0.12, 0.0);
     for _ in 0..600 {
-        assert!(rp.advance(1.0 / 60.0), "decay = 1.0 ripple should loop, not settle");
+        assert!(rp.advance(1.0 / 60.0), "duration 0 should loop, not settle");
     }
 }

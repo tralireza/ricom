@@ -391,7 +391,7 @@ pub enum Primitive {
         #[serde(default)]
         r0: Option<f32>,
         #[serde(default)]
-        decay: Option<f32>,
+        duration: Option<f32>,
     },
     /// Rotate about the window centre by `degrees` (default 360, a full turn):
     /// spin in on open (rotated → 0) / spin out on close (0 → rotated). GPU primitive.
@@ -495,7 +495,7 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
         // Traveling ripple: one-shot that rings down (see `[anim] wave_*`).
         "wave" => vec![Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::X, decay: None }],
         // Radial water-refraction ripple (per-pixel; see `[anim] ripple_*`).
-        "ripple" => vec![Ripple { amplitude: None, wavelength: None, speed: None, r0: None, decay: None }],
+        "ripple" => vec![Ripple { amplitude: None, wavelength: None, speed: None, r0: None, duration: None }],
         _ => return None,
     })
 }
@@ -539,8 +539,8 @@ pub struct Anim {
     pub ripple_speed: f32,
     /// Default `ripple` spread constant (large centre, faint rim).
     pub ripple_r0: f32,
-    /// Default `ripple` per-second amplitude decay (`<1` rings down; `1.0` loops).
-    pub ripple_decay: f32,
+    /// Default `ripple` settle time in seconds (how long it lasts; `<= 0` loops).
+    pub ripple_duration: f32,
     /// Open animation (window mapped). Default preset `"pop"`.
     pub open: AnimSel,
     /// Close animation (window unmapped/destroyed). Default preset `"fade"`.
@@ -622,11 +622,11 @@ impl Default for Anim {
             wave_wavelength: 0.5,
             wave_speed: 1.5,
             wave_decay: 0.05,
-            ripple_amplitude: 0.03,
+            ripple_amplitude: 0.08,
             ripple_wavelength: 0.18,
             ripple_speed: 1.2,
             ripple_r0: 0.12,
-            ripple_decay: 0.12,
+            ripple_duration: 2.5,
             open: AnimSel::Preset("pop".into()),
             close: AnimSel::Preset("fade".into()),
             r#move: AnimSel::Preset("wobble".into()),
@@ -669,7 +669,7 @@ impl Default for Fps {
         Fps {
             enabled: false,
             hotkey: "Super+Shift+F".to_string(),
-            corner: "top-right".to_string(),
+            corner: "bottom-left".to_string(),
             graph: true,
             scale: 1.0,
         }
@@ -758,7 +758,7 @@ impl Config {
         chg!("anim.ripple_wavelength", prev.anim.ripple_wavelength, self.anim.ripple_wavelength);
         chg!("anim.ripple_speed", prev.anim.ripple_speed, self.anim.ripple_speed);
         chg!("anim.ripple_r0", prev.anim.ripple_r0, self.anim.ripple_r0);
-        chg!("anim.ripple_decay", prev.anim.ripple_decay, self.anim.ripple_decay);
+        chg!("anim.ripple_duration", prev.anim.ripple_duration, self.anim.ripple_duration);
         chg!("anim.open", prev.anim.open, self.anim.open);
         chg!("anim.close", prev.anim.close, self.anim.close);
         chg!("anim.move", prev.anim.r#move, self.anim.r#move);

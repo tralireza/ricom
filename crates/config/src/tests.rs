@@ -38,7 +38,7 @@ fn defaults_match_compiled_behaviour() {
     assert_eq!(c.dim.focus, FocusSource::Ewmh);
     assert!(!c.fps.enabled);
     assert_eq!(c.fps.hotkey, "Super+Shift+F");
-    assert_eq!(c.fps.corner, "top-right");
+    assert_eq!(c.fps.corner, "bottom-left");
     assert!(c.fps.graph);
     assert_eq!(c.fps.scale, 1.0);
     assert_eq!(c.default_opacity, 1.0);
@@ -49,8 +49,8 @@ fn defaults_match_compiled_behaviour() {
         (24.0, 0.5, 1.5, 0.05)
     );
     assert_eq!(
-        (c.anim.ripple_amplitude, c.anim.ripple_wavelength, c.anim.ripple_speed, c.anim.ripple_r0, c.anim.ripple_decay),
-        (0.03, 0.18, 1.2, 0.12, 0.12)
+        (c.anim.ripple_amplitude, c.anim.ripple_wavelength, c.anim.ripple_speed, c.anim.ripple_r0, c.anim.ripple_duration),
+        (0.08, 0.18, 1.2, 0.12, 2.5)
     );
     assert_eq!(c.anim.open, AnimSel::Preset("pop".into()));
     assert_eq!(c.anim.close, AnimSel::Preset("fade".into()));
@@ -80,7 +80,7 @@ radius = 6.0
 [fps]
 enabled = true
 hotkey = "Control+Alt+P"
-corner = "bottom-left"
+corner = "top-left"
 graph = false
 scale = 2.0
 [anim]
@@ -106,7 +106,7 @@ ember_hot = [0.75, 0.25, 0.05]
     assert_eq!((c.blur.enabled, c.blur.passes, c.blur.radius), (true, 5, 6.0));
     assert!(c.fps.enabled);
     assert_eq!(c.fps.hotkey, "Control+Alt+P");
-    assert_eq!(c.fps.corner, "bottom-left");
+    assert_eq!(c.fps.corner, "top-left");
     assert!(!c.fps.graph);
     assert_eq!(c.fps.scale, 2.0);
     assert_eq!(c.anim.scale_from, 0.7);
@@ -376,25 +376,25 @@ fn wave_block_params_parse() {
 fn ripple_preset_expands_to_a_ripple_block() {
     assert_eq!(
         expand_sel(&AnimSel::Preset("ripple".into())).blocks,
-        [Primitive::Ripple { amplitude: None, wavelength: None, speed: None, r0: None, decay: None }]
+        [Primitive::Ripple { amplitude: None, wavelength: None, speed: None, r0: None, duration: None }]
     );
 }
 
 #[test]
 fn ripple_block_params_parse() {
-    let t = "[anim.close]\nblocks = [ { block = \"ripple\", amplitude = 0.05, wavelength = 0.2, speed = 1.5, r0 = 0.1, decay = 0.2 } ]\n";
+    let t = "[anim.close]\nblocks = [ { block = \"ripple\", amplitude = 0.05, wavelength = 0.2, speed = 1.5, r0 = 0.1, duration = 2.0 } ]\n";
     let c: Config = toml::from_str(t).unwrap();
     let AnimSel::Spec(s) = &c.anim.close else { panic!("expected explicit spec") };
     assert_eq!(
         s.blocks,
-        [Primitive::Ripple { amplitude: Some(0.05), wavelength: Some(0.2), speed: Some(1.5), r0: Some(0.1), decay: Some(0.2) }]
+        [Primitive::Ripple { amplitude: Some(0.05), wavelength: Some(0.2), speed: Some(1.5), r0: Some(0.1), duration: Some(2.0) }]
     );
     // Omitted params → None (fall back to [anim] ripple_*).
     let c: Config = toml::from_str("[anim.close]\nblocks = [ { block = \"ripple\" } ]\n").unwrap();
     let AnimSel::Spec(s) = &c.anim.close else { panic!("expected spec") };
     assert_eq!(
         s.blocks,
-        [Primitive::Ripple { amplitude: None, wavelength: None, speed: None, r0: None, decay: None }]
+        [Primitive::Ripple { amplitude: None, wavelength: None, speed: None, r0: None, duration: None }]
     );
 }
 
