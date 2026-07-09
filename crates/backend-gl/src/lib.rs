@@ -1633,10 +1633,8 @@ impl GlBackend {
         let sep2w = text.measure(text_px, sep2).0;
         let tw = numw + sep1w + msw + sep2w;
         let samples = self.render_samples.borrow();
-        let bar_w = 2.0 * s;
         let graph_h = if hud.graph { 34.0 * s } else { 0.0 };
         let graph_gap = if hud.graph { 6.0 * s } else { 0.0 };
-        let graph_w = if hud.graph { (samples.len() as f32 * bar_w).max(tw) } else { 0.0 };
         // Optional 1m/5m/15m load block (Super+Shift+L): a label column + three
         // right-aligned value columns, all measured — proportional-font-safe.
         let load_px = 15.0 * s;
@@ -1649,7 +1647,13 @@ impl GlBackend {
         let load_gap = if has_load { 8.0 * s } else { 0.0 };
         // Two rows: gap + one inter-row pitch + one cell height.
         let load_block_h = if has_load { load_gap + load_pitch + load_cell } else { 0.0 };
-        let content_w = tw.max(graph_w).max(load_w);
+        // Panel width is fixed by the text/load block (never the graph), so it stays a
+        // constant size from the first frame. The graph then FILLS that width: exactly
+        // HUD_GRAPH_SAMPLES bars span it, so the bar width self-adjusts to any font/DPI
+        // — the graph reaches full width at a full ring, and 120 samples is kept at any
+        // resolution (the bars widen/narrow, the count doesn't change).
+        let content_w = tw.max(load_w);
+        let bar_w = if hud.graph { (content_w / HUD_GRAPH_SAMPLES as f32).max(1.0) } else { 0.0 };
         let panel_w = content_w + pad * 2.0;
         let panel_h = th + graph_gap + graph_h + load_block_h + pad * 2.0;
         let (px, py) = match hud.corner {
@@ -1667,8 +1671,8 @@ impl GlBackend {
             let gy = py + pad + th + graph_gap;
             for (i, &ms) in samples.iter().enumerate() {
                 let bx = gx + i as f32 * bar_w;
-                if bx + bar_w > gx + content_w {
-                    break;
+                if bx >= gx + content_w {
+                    break; // ring larger than the panel can show (shouldn't happen — 120 bars fit exactly)
                 }
                 let norm = (ms / budget).clamp(0.0, 1.0);
                 let bh = (norm * graph_h).max(1.0);
