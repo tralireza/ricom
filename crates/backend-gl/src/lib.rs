@@ -430,6 +430,15 @@ pub struct RenderParams {
     pub burn_ember_cool: [f32; 3],
     /// Hottest leading-edge ember colour (`u_ember_hot`, RGB).
     pub burn_ember_hot: [f32; 3],
+    /// On-screen-text outline width (px at 1080p, scaled with the surface); `0` = none.
+    /// Shared by HUD/OSD; each surface toggles whether to apply it (`Hud.outline`/`Osd.outline`).
+    pub text_outline: f32,
+    /// Text outline colour (RGB).
+    pub text_outline_color: [f32; 3],
+    /// Text drop-shadow offset (px at 1080p, down-right, scaled); `0` = none.
+    pub text_shadow: f32,
+    /// Text drop-shadow colour (RGB).
+    pub text_shadow_color: [f32; 3],
 }
 
 impl Default for RenderParams {
@@ -446,6 +455,10 @@ impl Default for RenderParams {
             burn_ember: 0.07,
             burn_ember_cool: [0.28, 0.02, 0.0],
             burn_ember_hot: [0.75, 0.22, 0.04],
+            text_outline: 1.5,
+            text_outline_color: [0.0, 0.0, 0.0],
+            text_shadow: 0.0,
+            text_shadow_color: [0.0, 0.0, 0.0],
         }
     }
 }
@@ -617,6 +630,9 @@ pub struct Hud {
     pub refresh_hz: f32,
     /// Optional 1m/5m/15m load block, shown under the graph (`Super+Shift+L`).
     pub load: Option<HudLoad>,
+    /// Outline the HUD text (per `RenderParams` text style) so it reads without the
+    /// panel. `false` = plain text (the panel provides contrast).
+    pub outline: bool,
 }
 
 /// How the OSD toast appears/disappears — the caller picks the open or close
@@ -1493,6 +1509,20 @@ impl GlBackend {
         }
     }
 
+    /// Build the on-screen-text decoration (outline + drop-shadow) from the current
+    /// render params, scaled by the surface size factor `s`, at overall `alpha`. Shared
+    /// by the HUD and OSD so both pick up `[font]` outline/shadow consistently.
+    fn text_style(&self, s: f32, alpha: f32) -> text::TextStyle {
+        let oc = self.render.text_outline_color;
+        let sc = self.render.text_shadow_color;
+        text::TextStyle {
+            outline_px: self.render.text_outline * s,
+            outline_color: [oc[0], oc[1], oc[2], alpha],
+            shadow_px: self.render.text_shadow * s,
+            shadow_color: [sc[0], sc[1], sc[2], alpha],
+        }
+    }
+
     /// Draw the OSD toast — a top-center rounded pill + text that slides down and
     /// fades in as `presence` goes 0→1. Drawn over everything (after the HUD).
     fn draw_osd(&self, osd: &Osd, sw: i32, sh: i32) {
@@ -1578,21 +1608,17 @@ impl GlBackend {
         // `y` is the line's top (baseline = y + ascent), so rows stack by `line_h`.
         let tx = px + pad;
         let c = osd.color;
-        // An 8-way dark halo behind each line keeps text legible over any backdrop
-        // — the contrast the box used to give, so a transparent box still reads.
-        let o = 1.6 * s;
-        const HALO: [(f32, f32); 8] = [
-            (-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0),
-            (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0),
-        ];
+        // Outline + drop-shadow (from the config text style) keep the toast legible over
+        // any backdrop, so a transparent box still reads. Scaled with the OSD size; alpha
+        // rides the fade. `osd.outline = false` → plain text (rely on the box).
+        let style = if osd.outline {
+            self.text_style(s, alpha)
+        } else {
+            text::TextStyle::NONE
+        };
         for (i, line) in lines.iter().enumerate() {
             let ly = py + pad + i as f32 * line_h;
-            if osd.outline {
-                for (dx, dy) in HALO {
-                    text.draw(&self.gl, sw, sh, tx + dx * o, ly + dy * o, text_px, [0.0, 0.0, 0.0, alpha], line);
-                }
-            }
-            text.draw(&self.gl, sw, sh, tx, ly, text_px, [c[0], c[1], c[2], alpha], line);
+            text.draw_styled(&self.gl, sw, sh, tx, ly, text_px, [c[0], c[1], c[2], alpha], &style, line);
         }
         if reveal {
             unsafe {
@@ -1689,17 +1715,20 @@ impl GlBackend {
             self.fill_rect(gx, gy, content_w, s.max(1.0), 0.0, [1.0, 1.0, 1.0, 0.22], sw, sh);
         }
         drop(samples);
+        // Text decoration: outlined when `hud.outline` (so the HUD reads without its
+        // panel), else plain. Shared style, scaled with the HUD size factor `s`.
+        let hstyle = if hud.outline { self.text_style(s, 1.0) } else { text::TextStyle::NONE };
         // Numbers on top — fps + ms, each number right-aligned in its field.
         let x0 = px + pad;
         let ny = py + pad;
         let col = [0.90, 1.0, 0.95, 1.0];
         let fw = text.measure(text_px, &fps_s).0;
-        text.draw(&self.gl, sw, sh, x0 + numw - fw, ny, text_px, col, &fps_s);
-        text.draw(&self.gl, sw, sh, x0 + numw, ny, text_px, col, sep1);
+        text.draw_styled(&self.gl, sw, sh, x0 + numw - fw, ny, text_px, col, &hstyle, &fps_s);
+        text.draw_styled(&self.gl, sw, sh, x0 + numw, ny, text_px, col, &hstyle, sep1);
         let mx0 = x0 + numw + sep1w;
         let mw = text.measure(text_px, &ms_s).0;
-        text.draw(&self.gl, sw, sh, mx0 + msw - mw, ny, text_px, col, &ms_s);
-        text.draw(&self.gl, sw, sh, mx0 + msw, ny, text_px, col, sep2);
+        text.draw_styled(&self.gl, sw, sh, mx0 + msw - mw, ny, text_px, col, &hstyle, &ms_s);
+        text.draw_styled(&self.gl, sw, sh, mx0 + msw, ny, text_px, col, &hstyle, sep2);
         // Load block under the graph: label + three right-aligned value columns.
         if let Some(l) = &hud.load {
             let lcol = [0.80, 0.88, 1.0, 1.0];
@@ -1709,7 +1738,7 @@ impl GlBackend {
             ];
             let mut ly = py + pad + th + graph_gap + graph_h + load_gap;
             for (label, vals) in rows {
-                text.draw(&self.gl, sw, sh, x0, ly, load_px, lcol, label);
+                text.draw_styled(&self.gl, sw, sh, x0, ly, load_px, lcol, &hstyle, label);
                 for (k, v) in vals.iter().enumerate() {
                     let vs = match v {
                         Some(x) => format!("{x:.1}"),
@@ -1717,7 +1746,7 @@ impl GlBackend {
                     };
                     let right = x0 + load_lbl_w + (k as f32 + 1.0) * load_col_w;
                     let vw = text.measure(load_px, &vs).0;
-                    text.draw(&self.gl, sw, sh, right - vw, ly, load_px, lcol, &vs);
+                    text.draw_styled(&self.gl, sw, sh, right - vw, ly, load_px, lcol, &hstyle, &vs);
                 }
                 ly += load_pitch;
             }

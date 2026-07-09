@@ -127,8 +127,8 @@ out_dur = 0.08      # disappear-animation length (seconds)
 ack = true          # toast a short confirmation for ping / reload / fps toggle
 background = [0.05, 0.05, 0.07, 0.88]  # banner box colour (RGBA); set alpha = 0.0 for a
                     # text-only toast (no box). Keep `outline` on so it stays readable.
-outline = true      # dark halo behind the glyphs — legible over any backdrop (bright windows,
-                    # video) even with no box; harmless (hidden) behind an opaque box
+outline = true      # outline the toast text (using the [font] outline/shadow style) — legible
+                    # over any backdrop (bright windows, video) with no box; hidden behind a box
 
 [burn]
 # The `burn` close effect's look. These knobs are live-tunable: edit and reload
@@ -145,6 +145,8 @@ hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + a
 corner = "bottom-left"   # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true             # draw the rolling frame-time graph under the numbers
 scale = 1.0              # size multiplier on top of automatic screen-height scaling (4K = 2x)
+outline = false          # outline the HUD text (using the [font] outline/shadow style) so it
+                         # reads without the panel; false = plain text (panel gives contrast)
 # The HUD also shows a 1m/5m/15m load block (fps + GPU render ms); the same
 # figures are logged on demand via  kill -USR1 $(pidof ricom)
 
@@ -156,6 +158,12 @@ scale = 1.0              # size multiplier on top of automatic screen-height sca
 # keeps running, it just draws no HUD/OSD/notify text. Live-reloadable (SIGHUP).
 path = "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf"  # any .ttf; empty = text off
 size = 1.0               # global text size multiplier, on top of screen-height + [osd]/[fps] scale
+# Outline + drop-shadow so text stays legible over any backdrop without a box. The
+# STYLE is defined here; each surface opts in via [osd] outline / [fps] outline.
+outline_width = 1.5              # all-around outline width in px at 1080p (scales); 0 = none
+outline_color = [0.0, 0.0, 0.0]  # outline colour (RGB)
+shadow_offset = 0.0              # drop-shadow offset in px, down-right (scales); 0 = none
+shadow_color = [0.0, 0.0, 0.0]   # drop-shadow colour (RGB)
 # Note: colour-emoji (COLR/bitmap) glyphs are not rendered; complex shaping
 # (ligatures/BiDi/CJK cluster shaping) is not applied — glyphs map per codepoint.
 

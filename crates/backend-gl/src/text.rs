@@ -59,6 +59,33 @@ const ATLAS_MAX: i32 = 4096;
 /// Clamp on the rasterised glyph pixel size (sanity bound on the cache key + atlas use).
 const MAX_PX: f32 = 512.0;
 
+/// Eight unit offsets (axis + diagonal) used to lay down an all-around text outline.
+const OUTLINE_OFFSETS: [(f32, f32); 8] = [
+    (-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0),
+    (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0),
+];
+
+/// Text decoration for [`TextRenderer::draw_styled`]: an all-around outline and/or an
+/// offset drop-shadow, both in screen px (`0` disables that layer). Colours are straight
+/// RGBA (alpha lets the caller fade the whole run).
+///
+/// A1 renders these as multi-pass offset blits; A2 will render the outline in-shader —
+/// the field set + call sites stay identical, so that swap is internal to this module.
+#[derive(Clone, Copy)]
+pub struct TextStyle {
+    pub outline_px: f32,
+    pub outline_color: [f32; 4],
+    /// Drop-shadow offset (down-right) in px; `0` = no shadow.
+    pub shadow_px: f32,
+    pub shadow_color: [f32; 4],
+}
+
+impl TextStyle {
+    /// No decoration — `draw_styled` then behaves exactly like `draw`.
+    pub const NONE: TextStyle =
+        TextStyle { outline_px: 0.0, outline_color: [0.0; 4], shadow_px: 0.0, shadow_color: [0.0; 4] };
+}
+
 /// One cached glyph's placement in the atlas + the geometry to position its quad, all in
 /// **actual pixels at that glyph's size** (no scale factor — the raster is native).
 #[derive(Clone, Copy)]
@@ -359,5 +386,35 @@ impl TextRenderer {
                 pen += adv;
             }
         }
+    }
+
+    /// Draw `s` at (`x`, `y`) with an optional outline + drop-shadow (see [`TextStyle`]);
+    /// `fill` is the main glyph colour. Layered back-to-front: shadow, outline, fill.
+    /// `TextStyle::NONE` ⇒ a plain `draw`. Same VAO / premultiplied-blend assumptions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_styled(
+        &self,
+        gl: &glow::Context,
+        screen_w: i32,
+        screen_h: i32,
+        x: f32,
+        y: f32,
+        px: f32,
+        fill: [f32; 4],
+        style: &TextStyle,
+        s: &str,
+    ) {
+        // Drop-shadow behind everything (one offset pass).
+        if style.shadow_px > 0.0 && style.shadow_color[3] > 0.0 {
+            self.draw(gl, screen_w, screen_h, x + style.shadow_px, y + style.shadow_px, px, style.shadow_color, s);
+        }
+        // All-around outline: eight offset passes at `outline_px`.
+        if style.outline_px > 0.0 && style.outline_color[3] > 0.0 {
+            for (dx, dy) in OUTLINE_OFFSETS {
+                self.draw(gl, screen_w, screen_h, x + dx * style.outline_px, y + dy * style.outline_px, px, style.outline_color, s);
+            }
+        }
+        // Fill on top.
+        self.draw(gl, screen_w, screen_h, x, y, px, fill, s);
     }
 }

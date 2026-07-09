@@ -244,6 +244,9 @@ pub struct Fps {
     /// Extra size multiplier for the HUD, on top of the automatic screen-height
     /// scaling (`1.0` = auto only; e.g. `1.5` = 1.5× larger).
     pub scale: f32,
+    /// Outline the HUD text (using the `[font]` outline/shadow style) so it reads
+    /// without the panel. `false` (default) = plain text; the panel gives contrast.
+    pub outline: bool,
 }
 
 /// On-screen text font. ricom rasterises glyphs at runtime from this TrueType
@@ -258,6 +261,16 @@ pub struct Font {
     /// Global size multiplier for all on-screen text, applied on top of the
     /// automatic screen-height scaling and the per-surface (`[osd]`/`[fps]`) `scale`.
     pub size: f32,
+    /// All-around text outline width in px (at 1080p; scales with the surface). `0.0`
+    /// = no outline. Lets text read over any backdrop without a background box; each
+    /// surface opts in (`[osd] outline`, `[fps] outline`).
+    pub outline_width: f32,
+    /// Text outline colour (RGB, `0.0..=1.0`).
+    pub outline_color: [f32; 3],
+    /// Text drop-shadow offset in px (at 1080p, down-right; scales). `0.0` = no shadow.
+    pub shadow_offset: f32,
+    /// Text drop-shadow colour (RGB, `0.0..=1.0`).
+    pub shadow_color: [f32; 3],
 }
 
 /// Burn / dissolve close animation: the window disintegrates on animated noise
@@ -680,6 +693,10 @@ impl Default for Font {
         Font {
             path: "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf".to_string(),
             size: 1.0,
+            outline_width: 1.5,
+            outline_color: [0.0, 0.0, 0.0],
+            shadow_offset: 0.0,
+            shadow_color: [0.0, 0.0, 0.0],
         }
     }
 }
@@ -760,6 +777,7 @@ impl Default for Fps {
             corner: "bottom-left".to_string(),
             graph: true,
             scale: 1.0,
+            outline: false,
         }
     }
 }
@@ -868,6 +886,7 @@ impl Config {
         chg!("fps.corner", prev.fps.corner, self.fps.corner);
         chg!("fps.graph", prev.fps.graph, self.fps.graph);
         chg!("fps.scale", prev.fps.scale, self.fps.scale);
+        chg!("fps.outline", prev.fps.outline, self.fps.outline);
         chg!("osd.enabled", prev.osd.enabled, self.osd.enabled);
         chg!("osd.duration", prev.osd.duration, self.osd.duration);
         chg!("osd.scale", prev.osd.scale, self.osd.scale);
@@ -884,6 +903,10 @@ impl Config {
         chg!("burn.ember_hot", prev.burn.ember_hot, self.burn.ember_hot);
         chg!("font.path", prev.font.path, self.font.path);
         chg!("font.size", prev.font.size, self.font.size);
+        chg!("font.outline_width", prev.font.outline_width, self.font.outline_width);
+        chg!("font.outline_color", prev.font.outline_color, self.font.outline_color);
+        chg!("font.shadow_offset", prev.font.shadow_offset, self.font.shadow_offset);
+        chg!("font.shadow_color", prev.font.shadow_color, self.font.shadow_color);
         if prev.rules != self.rules {
             out.push(format!("rules {}→{}", prev.rules.len(), self.rules.len()));
         }

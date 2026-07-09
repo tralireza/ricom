@@ -54,6 +54,10 @@ fn render_params(cfg: &Config) -> RenderParams {
         burn_ember: cfg.burn.ember_width,
         burn_ember_cool: cfg.burn.ember_cool,
         burn_ember_hot: cfg.burn.ember_hot,
+        text_outline: cfg.font.outline_width,
+        text_outline_color: cfg.font.outline_color,
+        text_shadow: cfg.font.shadow_offset,
+        text_shadow_color: cfg.font.shadow_color,
     }
 }
 
@@ -2107,6 +2111,7 @@ impl App {
                 scale: self.config.fps.scale,
                 refresh_hz: self.refresh_hz as f32,
                 load: hud_load,
+                outline: self.config.fps.outline,
             })
         } else {
             None
