@@ -38,6 +38,8 @@ COMMANDS:
                        params override [anim] defaults, e.g. amplitude=0.1 duration=3)
     set <cat> <fx> [k=v …]  Live-select a transition's effect (session-only; a
                       reload/SIGHUP reverts). cat: open|close|move|focus
+    font <path> [size]  Live-swap the on-screen text font (session-only; a
+                      reload/SIGHUP reverts). size = global multiplier (default: keep)
     effects           List effects and their params
 
 EXAMPLES:
@@ -49,6 +51,7 @@ EXAMPLES:
     ricomctl set close drain turns=3
     ricomctl effects
     ricomctl unredir off
+    ricomctl font /usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf
     ricomctl reload
 ";
 
@@ -177,6 +180,22 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
                 params.push((k.to_string(), v.to_string()));
             }
             Command::SetAnim { category: cat.to_string(), effect: fx.to_string(), params }
+        }
+        "font" => {
+            let p = a.next().ok_or_else(|| Exit::Usage("font needs a <path> to a .ttf/.otf\n".into()))?;
+            // Absolutise so the path resolves in ricom's cwd (which may differ from
+            // ours). If canonicalize fails (e.g. the file is missing), send it as-is
+            // and let the server report it unusable.
+            let path = std::fs::canonicalize(p)
+                .map(|c| c.to_string_lossy().into_owned())
+                .unwrap_or_else(|_| p.to_string());
+            let size = match a.next() {
+                Some(s) => Some(
+                    s.parse::<f32>().map_err(|_| Exit::Usage(format!("invalid size '{s}' (a number)\n")))?,
+                ),
+                None => None,
+            };
+            Command::Font { path, size }
         }
         // Client-side: print the shared effect→params reference and exit (no server).
         "effects" => return Err(Exit::Stdout(format_effects())),

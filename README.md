@@ -31,10 +31,10 @@ https://github.com/user-attachments/assets/051b89cc-22a2-4cf1-8b9a-7aa63c9bef39
 - **The staples, done properly.** Per-window opacity, fade in/out, soft drop shadows, rounded
   corners, dual-Kawase background blur, and inactive-window dimming.
 - **A HUD it draws itself.** On-demand FPS / frame-time / loadavg overlay, rendered by a
-  hand-rolled SDF text engine (crisp at any size, no font dependency), hotkey-toggled and movable
-  between corners live.
+  hand-rolled text engine (per-size native glyph cache, crisp from a configurable TrueType font), hotkey-toggled
+  and movable between corners live.
 - **All hand-rolled.** Eight small Rust crates, pure-Rust deps only (`x11rb`, `calloop`, `glow`,
-  `khronos-egl`) — the Composite / Damage / Render / Present / RandR plumbing is written from
+  `khronos-egl`, `fontdue`) — the Composite / Damage / Render / Present / RandR plumbing is written from
   scratch, no compositing toolkit.
 
 ## Effects & animations
@@ -187,8 +187,9 @@ Working today:
   (content spirals into a vanishing point + fades). All ride `use-damage`, so an animating window
   repaints only its moving path, not the whole screen.
 - **On-demand FPS HUD** — a global hotkey (`Super+Shift+F` by default) toggles an overlay showing
-  FPS, frame-time, and a rolling frame-time graph, drawn with a general **SDF text engine**
-  (arbitrary strings, crisp at any size, no runtime font dependency) — ricom's first on-screen text.
+  FPS, frame-time, and a rolling frame-time graph, drawn with a general **text engine**
+  (arbitrary UTF-8 strings, crisp at any size, rasterised at runtime from a configurable TrueType
+  font via `fontdue`) — ricom's first on-screen text.
   The hotkey's modifiers + arrow keys move it between corners live, and it auto-scales with resolution
   (2× at 4K).
 - **Load average** — a `loadavg`-style 1m/5m/15m rolling average of compositor FPS and GPU
@@ -478,7 +479,7 @@ ricomctl --json list          # machine-readable reply
 ```
 
 `ricomctl` is a thin client (std + a shared `proto` crate — no GL); the wire format is
-newline-delimited JSON. `notify` renders a native OSD banner via the SDF text engine (styled under
+newline-delimited JSON. `notify` renders a native OSD banner via the text engine (styled under
 `[osd]`). `animate` / `set` drive animation overrides live (one-shot per-window + per-category);
 live per-window opacity / dim overrides are still planned.
 
@@ -486,7 +487,8 @@ live per-window opacity / dim overrides are still planned.
 
 Done: per-window opacity, fade in/out, left+bottom drop shadows, rounded corners, background blur
 (dual-Kawase), a TOML config file with live (SIGHUP) reload, an on-demand FPS HUD (global hotkey)
-built on a general SDF text engine, per-window rules (match on class/type/title/fullscreen), a
+built on a general text engine (runtime TrueType via `fontdue` → per-size native glyph cache; renders
+any Unicode the configured font covers), per-window rules (match on class/type/title/fullscreen), a
 loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), region-level occlusion
 culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial repaint
 (EGL buffer-age; repaint only the changed region), and a composable transition-animation system —
@@ -512,5 +514,6 @@ Next:
 
 MPL-2.0. `ricom` is a port of picom (MPL-2.0); data structures and GLSL are derived from it.
 
-The bundled SDF glyph atlas (`crates/backend-gl/src/glyphs.bin`) is generated from
-[Liberation Mono](https://github.com/liberationfonts) (SIL Open Font License 1.1) — see [`NOTICE`](NOTICE).
+ricom bundles no font: on-screen text is rasterised at runtime from a user-supplied TrueType font
+(`[font] path` in `ricom.toml`) via the pure-Rust [`fontdue`](https://github.com/mooman219/fontdue)
+crate — see [`NOTICE`](NOTICE).

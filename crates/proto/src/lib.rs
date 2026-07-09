@@ -12,13 +12,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Wire-protocol version. Bump on any incompatible `Command`/`Reply` change.
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// Raw X window id (mirrors `wm::WindowId`).
 pub type WinId = u32;
 
 /// A control command sent from `ricomctl` to a running `ricom`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// Not `Eq`: `Font { size: Option<f32> }` carries an `f32` (only `PartialEq`), which is
+// all the comparisons (round-trip tests, arg-parse tests) need — same as `Reply`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Command {
     /// Liveness check → `Reply::Text(banner)`.
@@ -69,6 +71,15 @@ pub enum Command {
     Unredir {
         #[serde(default)]
         enable: Option<bool>,
+    },
+    /// Live-swap the on-screen-text font (session-only; a `Reload`/SIGHUP reverts to
+    /// the config `[font]`). `path` is a `.ttf`/`.otf` (empty or unusable ⇒ on-screen
+    /// text is disabled). `size` overrides the global size multiplier; `None` keeps the
+    /// current one.
+    Font {
+        path: String,
+        #[serde(default)]
+        size: Option<f32>,
     },
 }
 

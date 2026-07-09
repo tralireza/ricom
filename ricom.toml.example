@@ -148,6 +148,17 @@ scale = 1.0              # size multiplier on top of automatic screen-height sca
 # The HUD also shows a 1m/5m/15m load block (fps + GPU render ms); the same
 # figures are logged on demand via  kill -USR1 $(pidof ricom)
 
+[font]
+# On-screen text (the FPS HUD, OSD toasts, `ricomctl notify`) is rasterised at
+# runtime from this TrueType font, so titles/messages render in any script the
+# font covers (not just ASCII). There is NO built-in fallback face: if `path` is
+# empty or not a usable .ttf, on-screen text is simply disabled — the compositor
+# keeps running, it just draws no HUD/OSD/notify text. Live-reloadable (SIGHUP).
+path = "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf"  # any .ttf; empty = text off
+size = 1.0               # global text size multiplier, on top of screen-height + [osd]/[fps] scale
+# Note: colour-emoji (COLR/bitmap) glyphs are not rendered; complex shaping
+# (ligatures/BiDi/CJK cluster shaping) is not applied — glyphs map per codepoint.
+
 # Per-window rules. Each [[rule]] has a `match` (all listed conditions must hold —
 # class/instance/window_type match exactly, title matches as a substring,
 # fullscreen matches state) plus the settings it overrides: opacity / blur /

@@ -14,8 +14,6 @@ use anyhow::{anyhow, bail, Result};
 use glow::HasContext as _;
 use khronos_egl as egl;
 
-#[allow(dead_code)] // a few generated consts (e.g. ROWS) are informational
-mod glyphs;
 mod text;
 
 /// `glEGLImageTargetTexture2DOES(target, image)` — loaded via eglGetProcAddress.
@@ -897,8 +895,11 @@ pub struct GlBackend {
     blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
-    /// General SDF text renderer (FPS HUD and any future on-screen text).
-    text: text::TextRenderer,
+    /// Runtime TrueType text renderer (FPS HUD / OSD / notify). `None` when no
+    /// usable font is configured — on-screen text is then disabled.
+    text: Option<text::TextRenderer>,
+    /// Global on-screen-text size multiplier (`[font] size`), applied to HUD/OSD px.
+    font_size: f32,
     /// Solid-fill program (HUD panel + graph bars), shares `BLIT_VS`.
     solid_program: glow::NativeProgram,
     sol_rect: Option<glow::NativeUniformLocation>,
@@ -1193,7 +1194,6 @@ impl GlBackend {
                 gl.get_uniform_location(p, "u_ember_hot"),
             )
         };
-        let text = text::TextRenderer::new(&gl)?;
         let (solid_program, sol_rect, sol_screen, sol_color, sol_radius) = unsafe {
             let p = make_program(&gl, BLIT_VS, SOLID_FS)?;
             (
@@ -1230,7 +1230,7 @@ impl GlBackend {
             wave_program, wv_rect, wv_screen, wv_tex, wv_opacity, wv_amp, wv_wavelength, wv_phase, wv_axis,
             drain_program, dr_rect, dr_screen, dr_tex, dr_opacity, dr_center, dr_progress, dr_turns, dr_seed,
             blur: RefCell::new(None),
-            image_target, render, text,
+            image_target, render, text: None, font_size: 1.0,
             solid_program, sol_rect, sol_screen, sol_color, sol_radius,
             gpu_timers,
             timer_slot: Cell::new(0),
@@ -1245,6 +1245,47 @@ impl GlBackend {
     /// config reload. Takes effect on the next `present_windows`.
     pub fn set_render_params(&mut self, render: RenderParams) {
         self.render = render;
+    }
+
+    /// (Re)load the on-screen-text font from `path` (a `.ttf`) at global size
+    /// multiplier `size`. An empty, unreadable, or unparsable path **disables**
+    /// on-screen text (`self.text = None`) rather than erroring — the compositor
+    /// keeps running, just draws no HUD/OSD/notify text. Called at startup and on
+    /// config reload; requires the backend's GL context to be current (it is on the
+    /// single compositor thread).
+    pub fn set_font(&mut self, path: &str, size: f32) {
+        self.font_size = if size > 0.0 { size } else { 1.0 };
+        let next = if path.is_empty() {
+            tracing::info!("font path empty — on-screen text disabled");
+            None
+        } else {
+            match std::fs::read(path) {
+                Ok(bytes) => match text::TextRenderer::new(&self.gl, &bytes) {
+                    Ok(tr) => {
+                        tracing::info!(path, "on-screen text font loaded");
+                        Some(tr)
+                    }
+                    Err(e) => {
+                        tracing::warn!(path, "font parse failed: {e} — on-screen text disabled");
+                        None
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!(path, "font read failed: {e} — on-screen text disabled");
+                    None
+                }
+            }
+        };
+        // Free the previous font's GL objects before replacing (reload-safe).
+        if let Some(old) = self.text.take() {
+            old.destroy(&self.gl);
+        }
+        self.text = next;
+    }
+
+    /// Whether on-screen text is currently available (a usable font is loaded).
+    pub fn has_text(&self) -> bool {
+        self.text.is_some()
     }
 
     /// Clear the surface to a colour and present.
@@ -1459,36 +1500,47 @@ impl GlBackend {
         if p <= 0.0 {
             return;
         }
-        let sb = (sh as f32 / 1080.0).max(0.5) * osd.scale;
+        // No usable font → no on-screen text (the compositor still runs).
+        let Some(text) = self.text.as_ref() else { return };
+        let sb = (sh as f32 / 1080.0).max(0.5) * osd.scale * self.font_size;
         // Pop scales the whole banner uniformly; others draw at full size.
         let zoom = if osd.effect == OsdEffect::Pop { 0.6 + 0.4 * p } else { 1.0 };
         let s = sb * zoom;
         let pad = 20.0 * s;
         let text_px = 34.0 * s;
         let radius = 14.0 * s;
-        // Per-line metrics (monospace): one glyph's advance + the cell height.
-        let (advance, line_h) = self.text.measure(text_px, "x");
-        // Grow the box up to the screen width (minus a margin); any line longer than
-        // that is cut with a trailing "..." so it never runs off-screen.
+        let line_h = text.line_height(text_px);
+        // Grow the box up to the screen width (minus a margin); any line wider than
+        // that is trimmed to fit with a trailing "..." — measured per glyph, so it's
+        // correct for a proportional font (no fixed-advance assumption).
         let hmargin = 40.0 * sb;
-        let max_text_w = (sw as f32 - 2.0 * hmargin - 2.0 * pad).max(advance);
-        let max_chars = (max_text_w / advance).floor() as usize;
+        let min_w = text.measure(text_px, "x").0;
+        let max_text_w = (sw as f32 - 2.0 * hmargin - 2.0 * pad).max(min_w);
+        let ell_w = text.measure(text_px, "...").0;
         let lines: Vec<String> = osd
             .text
             .split('\n')
             .map(|l| {
-                if self.text.measure(text_px, l).0 <= max_text_w {
-                    l.to_string()
-                } else {
-                    let kept: String = l.chars().take(max_chars.saturating_sub(3)).collect();
-                    format!("{kept}...")
+                if text.measure(text_px, l).0 <= max_text_w {
+                    return l.to_string();
                 }
+                let budget = (max_text_w - ell_w).max(0.0);
+                let mut kept = String::new();
+                let mut w = 0.0;
+                let mut buf = [0u8; 4];
+                for ch in l.chars() {
+                    let cw = text.measure(text_px, ch.encode_utf8(&mut buf)).0;
+                    if w + cw > budget {
+                        break;
+                    }
+                    w += cw;
+                    kept.push(ch);
+                }
+                kept.push_str("...");
+                kept
             })
             .collect();
-        let tw = lines
-            .iter()
-            .map(|l| self.text.measure(text_px, l).0)
-            .fold(0.0_f32, f32::max);
+        let tw = lines.iter().map(|l| text.measure(text_px, l).0).fold(0.0_f32, f32::max);
         let panel_w = tw + 2.0 * pad;
         let panel_h = lines.len() as f32 * line_h + 2.0 * pad;
         let px = (sw as f32 - panel_w) * 0.5; // horizontally centred
@@ -1522,9 +1574,9 @@ impl GlBackend {
         if bg[3] > 0.001 {
             self.fill_rect(px, py, panel_w, panel_h, radius, [bg[0], bg[1], bg[2], bg[3] * alpha], sw, sh);
         }
-        // Left-shift by the square cell's side padding to centre horizontally; per
-        // line, nudge down by the cell's descender excess to centre vertically.
-        let tx = px + pad - (line_h - advance) * 0.5;
+        // Left-aligned: each glyph carries its own bearing, and `draw` places text so
+        // `y` is the line's top (baseline = y + ascent), so rows stack by `line_h`.
+        let tx = px + pad;
         let c = osd.color;
         // An 8-way dark halo behind each line keeps text legible over any backdrop
         // — the contrast the box used to give, so a transparent box still reads.
@@ -1534,13 +1586,13 @@ impl GlBackend {
             (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0),
         ];
         for (i, line) in lines.iter().enumerate() {
-            let ly = py + pad + i as f32 * line_h + (line_h - text_px) * 0.5;
+            let ly = py + pad + i as f32 * line_h;
             if osd.outline {
                 for (dx, dy) in HALO {
-                    self.text.draw(&self.gl, sw, sh, tx + dx * o, ly + dy * o, text_px, [0.0, 0.0, 0.0, alpha], line);
+                    text.draw(&self.gl, sw, sh, tx + dx * o, ly + dy * o, text_px, [0.0, 0.0, 0.0, alpha], line);
                 }
             }
-            self.text.draw(&self.gl, sw, sh, tx, ly, text_px, [c[0], c[1], c[2], alpha], line);
+            text.draw(&self.gl, sw, sh, tx, ly, text_px, [c[0], c[1], c[2], alpha], line);
         }
         if reveal {
             unsafe {
@@ -1552,10 +1604,11 @@ impl GlBackend {
     /// Draw the FPS HUD — a translucent panel, an optional frame-time graph, and
     /// the numbers — anchored to `hud.corner`.
     fn draw_hud(&self, hud: &Hud, sw: i32, sh: i32) {
+        // No usable font → no HUD text (the compositor still runs).
+        let Some(text) = self.text.as_ref() else { return };
         // Scale the whole HUD with the screen height (1080p = 1×, 4K/2160p = 2×)
-        // times the optional config multiplier, so it stays legible at any DPI.
-        // SDF text scales cleanly.
-        let s = (sh as f32 / 1080.0).max(0.5) * hud.scale;
+        // times the config + global font multipliers, so it stays legible at any DPI.
+        let s = (sh as f32 / 1080.0).max(0.5) * hud.scale * self.font_size;
         let pad = 8.0 * s;
         let margin = 28.0 * s; // inset from the screen edge (the HUD floats in a bit)
         let radius = 10.0 * s; // HUD panel corner radius (special-cased, not the window setting)
@@ -1564,45 +1617,38 @@ impl GlBackend {
         // it to hit vsync. Colour by headroom, not by the (content-driven) frame rate.
         let budget = 1000.0 / hud.refresh_hz.max(1.0);
         let render_ms = self.render_ms.get();
-        // Width-padded fields so a one-frame spike (fps or render_ms briefly hitting
-        // 3 digits) can't reflow the labels — no "flick". Monospace + fixed field.
-        let label = format!("{:>3} fps   {:>5.1} ms", hud.fps, render_ms);
-        let (tw, th) = self.text.measure(text_px, &label);
+        let th = text.line_height(text_px);
+        // Measured-column layout (font-agnostic): the fps/ms numbers are right-aligned
+        // within fixed-width fields (sized to a worst-case digit count) and the labels
+        // sit at fixed offsets — so a proportional font neither reflows the panel nor
+        // jitters the digits as the values change (the old space-padding needed a
+        // monospace face). Works tabularly with any TTF.
+        let fps_s = format!("{}", hud.fps);
+        let ms_s = format!("{render_ms:.1}");
+        let numw = text.measure(text_px, "000").0; // fps field: up to 3 digits
+        let msw = text.measure(text_px, "000.0").0; // ms field: up to 5 chars
+        let sep1 = " fps   ";
+        let sep2 = " ms";
+        let sep1w = text.measure(text_px, sep1).0;
+        let sep2w = text.measure(text_px, sep2).0;
+        let tw = numw + sep1w + msw + sep2w;
         let samples = self.render_samples.borrow();
         let bar_w = 2.0 * s;
         let graph_h = if hud.graph { 34.0 * s } else { 0.0 };
         let graph_gap = if hud.graph { 6.0 * s } else { 0.0 };
         let graph_w = if hud.graph { (samples.len() as f32 * bar_w).max(tw) } else { 0.0 };
-        // Optional 1m/5m/15m load block (Super+Shift+L): monospace-aligned rows
-        // under the graph. Liberation Mono lets simple column padding align.
+        // Optional 1m/5m/15m load block (Super+Shift+L): a label column + three
+        // right-aligned value columns, all measured — proportional-font-safe.
         let load_px = 15.0 * s;
-        let load_lines: Vec<String> = match &hud.load {
-            Some(l) => {
-                let c = |v: f32| format!("{v:>6.1}");
-                let co = |o: Option<f32>| o.map_or_else(|| format!("{:>6}", "--"), |v| format!("{v:>6.1}"));
-                vec![
-                    format!("{:<4}{}{}{}", "fps", c(l.fps[0]), c(l.fps[1]), c(l.fps[2])),
-                    format!("{:<4}{}{}{}", "ms", co(l.render_ms[0]), co(l.render_ms[1]), co(l.render_ms[2])),
-                ]
-            }
-            None => Vec::new(),
-        };
-        // Tight line spacing: the atlas cell height (measure().1) pads each glyph
-        // for the SDF spread, so stacking rows by it leaves too much air. Advance
-        // by a small multiple of the glyph size instead, and size the panel to match.
+        let has_load = hud.load.is_some();
+        let load_lbl_w = if has_load { text.measure(load_px, "fps  ").0 } else { 0.0 };
+        let load_col_w = if has_load { text.measure(load_px, "  000.0").0 } else { 0.0 };
+        let load_w = if has_load { load_lbl_w + 3.0 * load_col_w } else { 0.0 };
         let load_pitch = load_px * 1.2;
-        let (load_w, load_cell) = if load_lines.is_empty() {
-            (0.0, 0.0)
-        } else {
-            let w = load_lines.iter().map(|l| self.text.measure(load_px, l).0).fold(0.0_f32, f32::max);
-            (w, self.text.measure(load_px, "M").1)
-        };
-        let load_gap = if load_lines.is_empty() { 0.0 } else { 8.0 * s };
-        let load_block_h = if load_lines.is_empty() {
-            0.0
-        } else {
-            load_gap + (load_lines.len() as f32 - 1.0) * load_pitch + load_cell
-        };
+        let load_cell = if has_load { text.line_height(load_px) } else { 0.0 };
+        let load_gap = if has_load { 8.0 * s } else { 0.0 };
+        // Two rows: gap + one inter-row pitch + one cell height.
+        let load_block_h = if has_load { load_gap + load_pitch + load_cell } else { 0.0 };
         let content_w = tw.max(graph_w).max(load_w);
         let panel_w = content_w + pad * 2.0;
         let panel_h = th + graph_gap + graph_h + load_block_h + pad * 2.0;
@@ -1639,13 +1685,36 @@ impl GlBackend {
             self.fill_rect(gx, gy, content_w, s.max(1.0), 0.0, [1.0, 1.0, 1.0, 0.22], sw, sh);
         }
         drop(samples);
-        // Numbers on top.
-        self.text.draw(&self.gl, sw, sh, px + pad, py + pad, text_px, [0.90, 1.0, 0.95, 1.0], &label);
-        // Load block under the graph.
-        if !load_lines.is_empty() {
+        // Numbers on top — fps + ms, each number right-aligned in its field.
+        let x0 = px + pad;
+        let ny = py + pad;
+        let col = [0.90, 1.0, 0.95, 1.0];
+        let fw = text.measure(text_px, &fps_s).0;
+        text.draw(&self.gl, sw, sh, x0 + numw - fw, ny, text_px, col, &fps_s);
+        text.draw(&self.gl, sw, sh, x0 + numw, ny, text_px, col, sep1);
+        let mx0 = x0 + numw + sep1w;
+        let mw = text.measure(text_px, &ms_s).0;
+        text.draw(&self.gl, sw, sh, mx0 + msw - mw, ny, text_px, col, &ms_s);
+        text.draw(&self.gl, sw, sh, mx0 + msw, ny, text_px, col, sep2);
+        // Load block under the graph: label + three right-aligned value columns.
+        if let Some(l) = &hud.load {
+            let lcol = [0.80, 0.88, 1.0, 1.0];
+            let rows: [(&str, [Option<f32>; 3]); 2] = [
+                ("fps", [Some(l.fps[0]), Some(l.fps[1]), Some(l.fps[2])]),
+                ("ms", [l.render_ms[0], l.render_ms[1], l.render_ms[2]]),
+            ];
             let mut ly = py + pad + th + graph_gap + graph_h + load_gap;
-            for line in &load_lines {
-                self.text.draw(&self.gl, sw, sh, px + pad, ly, load_px, [0.80, 0.88, 1.0, 1.0], line);
+            for (label, vals) in rows {
+                text.draw(&self.gl, sw, sh, x0, ly, load_px, lcol, label);
+                for (k, v) in vals.iter().enumerate() {
+                    let vs = match v {
+                        Some(x) => format!("{x:.1}"),
+                        None => "--".to_string(),
+                    };
+                    let right = x0 + load_lbl_w + (k as f32 + 1.0) * load_col_w;
+                    let vw = text.measure(load_px, &vs).0;
+                    text.draw(&self.gl, sw, sh, right - vw, ly, load_px, lcol, &vs);
+                }
                 ly += load_pitch;
             }
         }

@@ -15,5 +15,3 @@ xconn = { version = "0.1.0", path = "crates/xconn" }
 [workspace]
 resolver = "2"
 members = ["crates/session", "crates/xconn", "crates/region", "crates/wm", "crates/backend-gl", "crates/config", "crates/proto", "crates/ricomctl"]
-# Dev-only atlas generator — kept out of the runtime build graph.
-exclude = ["tools/gen-sdf-atlas"]

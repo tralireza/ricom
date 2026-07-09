@@ -705,10 +705,15 @@ impl App {
                 let opacity_changed =
                     cfg.default_opacity != self.config.default_opacity || cfg.rules != self.config.rules;
                 let dim_changed = cfg.dim != self.config.dim || cfg.rules != self.config.rules;
+                let font_changed = cfg.font != self.config.font;
                 self.config = cfg;
                 log_config_warnings(&self.config);
                 if let Some(b) = self.backend.as_mut() {
                     b.set_render_params(render_params(&self.config));
+                    // Re-rasterise glyphs from the new font (or disable text) live.
+                    if font_changed {
+                        b.set_font(&self.config.font.path, self.config.font.size);
+                    }
                 }
                 // A changed FPS hotkey: drop the old grabs and bind the new combo.
                 if hotkey_changed {
@@ -783,6 +788,11 @@ impl App {
         self.x.redirect_subwindows()?;
         self.redirected = true;
         self.backend = Some(GlBackend::new(self.overlay, visual, render_params(&self.config))?);
+        // Load the on-screen-text font (HUD/OSD/notify). A missing/invalid font just
+        // disables text; the compositor runs regardless.
+        if let Some(b) = self.backend.as_mut() {
+            b.set_font(&self.config.font.path, self.config.font.size);
+        }
 
         // Seed the stack + per-window resources from the current tree.
         for w in self.x.list_tree()? {
@@ -1068,6 +1078,7 @@ impl App {
             C::Animate { win, effect, params } => self.animate_window(win, &effect, &params),
             C::SetAnim { category, effect, params } => self.set_anim(&category, &effect, &params),
             C::Unredir { enable } => self.set_unredir(enable),
+            C::Font { path, size } => self.set_font_cmd(path, size),
         }
     }
 
@@ -1088,6 +1099,39 @@ impl App {
             if on { "on (fullscreen may bypass)" } else { "off (always compositing)" },
             if self.redirected { "compositing now" } else { "fullscreen bypass now" },
         ))
+    }
+
+    /// Live-swap the on-screen-text font (session-only; a `Reload`/SIGHUP reverts to the
+    /// config `[font]`). Mirrors `set_unredir`: it keeps `self.config.font` in sync so the
+    /// reload diff re-asserts the file's font, then rebuilds the backend's glyph cache. An
+    /// empty/unreadable/unparsable path disables on-screen text (the compositor keeps
+    /// running) and returns an error so `ricomctl` reports it.
+    fn set_font_cmd(&mut self, path: String, size: Option<f32>) -> proto::Reply {
+        let sz = size.unwrap_or(self.config.font.size);
+        // Keep the in-memory config current so a later Reload/SIGHUP reverts to the file.
+        self.config.font.path = path.clone();
+        self.config.font.size = sz;
+        // Scope the backend borrow so `show_osd` (needs &mut self) can run afterwards.
+        let loaded = {
+            let Some(b) = self.backend.as_mut() else {
+                return proto::Reply::Error("backend not ready".into());
+            };
+            b.set_font(&path, sz);
+            b.has_text()
+        };
+        if loaded {
+            if self.config.osd.enabled && self.config.osd.ack {
+                let name = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone());
+                // The ack renders in the just-loaded font — instant visual confirmation.
+                self.show_osd(format!(">> font: {name}"), self.config.osd.duration.min(1.5), OSD_ACK);
+            }
+            proto::Reply::Text(format!("font set: {path}"))
+        } else {
+            proto::Reply::Error(format!("font '{path}' unusable — on-screen text disabled"))
+        }
     }
 
     /// Start (or replace) the OSD toast with `text` in `color`, held for `hold` seconds.

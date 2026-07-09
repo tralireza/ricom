@@ -48,6 +48,7 @@ pub struct Config {
     pub fps: Fps,
     pub osd: Osd,
     pub burn: Burn,
+    pub font: Font,
     /// Per-window override rules, applied in order (last match wins per field).
     /// Written as `[[rule]]` tables in TOML.
     #[serde(rename = "rule")]
@@ -243,6 +244,20 @@ pub struct Fps {
     /// Extra size multiplier for the HUD, on top of the automatic screen-height
     /// scaling (`1.0` = auto only; e.g. `1.5` = 1.5× larger).
     pub scale: f32,
+}
+
+/// On-screen text font. ricom rasterises glyphs at runtime from this TrueType
+/// font for all on-screen text (the FPS HUD, OSD toasts, `ricomctl notify`). There
+/// is no built-in fallback face: if `path` is empty or not a usable `.ttf`, on-screen
+/// text is simply **disabled** — the compositor keeps running, it just draws no text.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Font {
+    /// Path to a TrueType (`.ttf`) font file. Empty disables on-screen text.
+    pub path: String,
+    /// Global size multiplier for all on-screen text, applied on top of the
+    /// automatic screen-height scaling and the per-surface (`[osd]`/`[fps]`) `scale`.
+    pub size: f32,
 }
 
 /// Burn / dissolve close animation: the window disintegrates on animated noise
@@ -651,7 +666,20 @@ impl Default for Config {
             fps: Fps::default(),
             osd: Osd::default(),
             burn: Burn::default(),
+            font: Font::default(),
             rules: Vec::new(),
+        }
+    }
+}
+
+impl Default for Font {
+    fn default() -> Self {
+        // A commonly-present monospace TTF; on i7 this is the same face the old
+        // baked atlas used. Point it at any `.ttf` you like, or clear it to disable
+        // on-screen text. A missing/invalid path degrades to "text disabled".
+        Font {
+            path: "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf".to_string(),
+            size: 1.0,
         }
     }
 }
@@ -854,6 +882,8 @@ impl Config {
         chg!("burn.ember_width", prev.burn.ember_width, self.burn.ember_width);
         chg!("burn.ember_cool", prev.burn.ember_cool, self.burn.ember_cool);
         chg!("burn.ember_hot", prev.burn.ember_hot, self.burn.ember_hot);
+        chg!("font.path", prev.font.path, self.font.path);
+        chg!("font.size", prev.font.size, self.font.size);
         if prev.rules != self.rules {
             out.push(format!("rules {}→{}", prev.rules.len(), self.rules.len()));
         }
@@ -940,6 +970,13 @@ impl Config {
         }
         if !FOCUS_EFFECTS.contains(&self.anim.focus.as_str()) {
             warns.push(format!("anim.focus: unknown effect {:?} (no focus animation)", self.anim.focus));
+        }
+        // Font: flag the one static case here — an empty path means on-screen text is
+        // off. The authoritative "path not found / not a usable TTF" warning is emitted
+        // by the backend at load time (it parses the font via fontdue); this crate stays
+        // pure (no filesystem probing in `validate`).
+        if self.font.path.is_empty() {
+            warns.push("font.path is empty — on-screen text (HUD/OSD/notify) is disabled".to_string());
         }
         for (i, rule) in self.rules.iter().enumerate() {
             if let Some(s) = &rule.open {

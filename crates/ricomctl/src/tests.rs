@@ -53,6 +53,15 @@ fn commands_map() {
             params: vec![("turns".into(), "3".into())],
         }
     );
+    // font: path (+ optional size). A nonexistent path passes through un-canonicalised.
+    assert_eq!(
+        cmd(&["font", "/nonexistent-ricom-test.ttf"]),
+        Command::Font { path: "/nonexistent-ricom-test.ttf".into(), size: None }
+    );
+    assert_eq!(
+        cmd(&["font", "/nonexistent-ricom-test.ttf", "1.5"]),
+        Command::Font { path: "/nonexistent-ricom-test.ttf".into(), size: Some(1.5) }
+    );
 }
 
 #[test]
@@ -91,4 +100,7 @@ fn errors_are_usage() {
     assert!(matches!(parse(&["set"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["set", "close"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["set", "close", "drain", "notakv"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["font"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["font", "/x.ttf", "notanum"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["font", "/x.ttf", "1.0", "extra"]), Err(Exit::Usage(_))));
 }
