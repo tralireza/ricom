@@ -513,7 +513,3 @@ Next:
 ## License
 
 MPL-2.0. `ricom` is a port of picom (MPL-2.0); data structures and GLSL are derived from it.
-
-ricom bundles no font: on-screen text is rasterised at runtime from a user-supplied TrueType font
-(`[font] path` in `ricom.toml`) via the pure-Rust [`fontdue`](https://github.com/mooman219/fontdue)
-crate — see [`NOTICE`](NOTICE).
