@@ -215,48 +215,96 @@ ricom redirects every top-level window into an off-screen pixmap, binds each pix
 GL texture, and draws them back-to-front onto the X composite overlay — which the X server
 then scans out as a single tear-free frame:
 
-```
-        +-----------------------------------------------------+
-        |  X CLIENTS:  mpv, browser, xterm, ...               |
-        +-----------------------------------------------------+
-             |  each app draws into its own top-level window
-             v
-        +-----------------------------------------------------+
-        |  X SERVER  (Composite + Damage extensions)          |
-        +-----------------------------------------------------+
-             |  Composite redirect_subwindows(Manual):
-             |  every window is rendered to an OFF-SCREEN pixmap
-             |     +--------+ +--------+ +--------+  one per window
-             |     |pixmap A| |pixmap B| |pixmap C|
-             |     +--------+ +--------+ +--------+
-             |  Damage -> DamageNotify when a window's pixels change
-             v
-        +-----------------------------------------------------+
-        |  ricom  (xconn, wm, region, backend-gl)             |
-        +-----------------------------------------------------+
-             |  - bind each pixmap as a GL texture, zero-copy:
-             |      eglCreateImage(EGL_NATIVE_PIXMAP_KHR)
-             |        -> glEGLImageTargetTexture2DOES
-             |  - draw mapped windows bottom-to-top as textured
-             |    quads at their on-screen geometry
-             v
-        +-----------------------------------------------------+
-        |  COMPOSITE OVERLAY WINDOW  (owned by ricom)         |
-        +-----------------------------------------------------+
-             |  eglSwapBuffers + swap_interval(1)  =>  vsync
-             v
-        +-----------------------------------------------------+
-        |  MONITOR - one tear-free, fully-composited frame    |
-        +-----------------------------------------------------+
-```
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="screenshots/how-pipeline-dark.svg">
+    <img src="screenshots/how-pipeline.svg" width="600"
+         alt="ricom's compositing pipeline: X clients each draw into their own top-level window; the X server redirects every window into an off-screen pixmap and fires DamageNotify on change; ricom binds each pixmap as a zero-copy GL texture and draws the mapped stack bottom-to-top onto the composite overlay; eglSwapBuffers with swap_interval(1) scans out one tear-free frame at vsync.">
+  </picture>
+</p>
 
-The loop is **damage-driven**: ricom waits on the X connection with `calloop`, and X events
-drive a single dirty flag —
+<details>
+<summary><b>Same pipeline as plain text</b></summary>
 
 ```
-DamageNotify, MapNotify, UnmapNotify, ConfigureNotify, ...  ->  mark dirty
-   dirty  ->  recomposite the mapped stack  ->  eglSwapBuffers (vsync)
+┌──────────────────────────────────────────────────────────────┐
+│ X CLIENTS   mpv · browser · xterm …                          │
+│ each app draws into its own top-level window                 │
+└──────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ X SERVER   Composite + Damage                       [ xconn ]│
+│ redirect_subwindows(Manual): every window → off-screen pixmap│
+│    ┌──────────┐  ┌──────────┐  ┌──────────┐                  │
+│    │ pixmap A │  │ pixmap B │  │ pixmap C │   one per window │
+│    └──────────┘  └──────────┘  └──────────┘                  │
+│ Damage → DamageNotify when a window's pixels change          │
+└──────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ ricom   bind each pixmap as a GL texture — zero-copy         │
+│     eglCreateImage(EGL_NATIVE_PIXMAP_KHR)                    │
+│        → glEGLImageTargetTexture2DOES                        │
+│ draw mapped windows bottom-to-top as textured quads          │
+│            [ wm · region · backend-gl · session ]            │
+└──────────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ COMPOSITE OVERLAY WINDOW   (owned by ricom)                  │
+└──────────────────────────────────────────────────────────────┘
+                                │  eglSwapBuffers + swap_interval(1) ⇒ vsync
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ MONITOR   one tear-free, fully-composited frame              │
+└──────────────────────────────────────────────────────────────┘
 ```
+
+</details>
+
+The loop is **damage-driven**: ricom waits on the X connection with `calloop`, and every
+event source — an X structure/damage event, an animation tick, or a `ricomctl` command — does
+nothing but set a single dirty flag. Each pass through the loop then repaints *at most once*,
+paced by `eglSwapBuffers` at vsync, so a burst of simultaneous events coalesces into one frame:
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="screenshots/how-frame-loop-dark.svg">
+    <img src="screenshots/how-frame-loop.svg" width="820"
+         alt="ricom's damage-driven frame loop: every event source (X fd, frame timer, control socket, signals) just sets one dirty flag; composite() walks the visible stack, folds opacity = fade × dim, picks one effect per window, and intersects occlusion with damage to build a draw list; present_windows draws it and eglSwapBuffers presents at vsync, which paces the loop. An idle screen drops the frame timer for zero wakeups; a lone fullscreen window is unredirected and bypasses the compositor.">
+  </picture>
+</p>
+
+<details>
+<summary><b>Same loop as plain text</b></summary>
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ EVENT SOURCES  → each just sets one dirty flag              │
+│   X fd:  DamageNotify · Map/Unmap · Configure · Destroy     │
+│   frame-timer anim tick · ricomctl command · SIGHUP/USR1    │
+└─────────────────────────────────────────────────────────────┘
+                               │  dirty?
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ composite()   walk visible stack · opacity = fade × dim     │
+│               pick one effect · occlusion ∩ damage → draws  │
+└─────────────────────────────────────────────────────────────┘
+                               │
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│ present_windows → eglSwapBuffers + swap_interval(1)  (vsync)│
+└─────────────────────────────────────────────────────────────┘
+                                 │  vsync paces the loop
+                                 └────────────▶  (next frame)
+
+  idle    frame timer drops itself on settle → zero wakeups
+  unredir lone fullscreen window bypasses compositing (cost → 0)
+```
+
+</details>
 
 The stages map onto the crates: **xconn** speaks the X protocol (extension setup, become-CM,
 overlay + redirect, `NameWindowPixmap`, damage); **wm** keeps the bottom-to-top window stack

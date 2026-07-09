@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 722" width="900" role="img"
+     aria-label="How ricom composites a frame: redirect every window off-screen, bind each pixmap as a GL texture, composite the stack onto the overlay, and scan out one tear-free frame.">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace; }
+    .t   { fill: #1d1f2b; }
+    .m   { fill: #565b70; }
+    .code{ fill: #33385a; }
+    .tag { fill: #7c82a1; font-style: italic; }
+    .box { fill: #f5f6fb; }
+    .pix { fill: #eceef7; stroke: #c4c8db; }
+  </style>
+  <defs>
+    <marker id="arw" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8a90a6"/>
+    </marker>
+  </defs>
+
+  <rect x="6" y="6" width="888" height="710" rx="16" fill="#ffffff" stroke="#d7dae6"/>
+
+  <text x="450" y="44" class="t" font-size="20" font-weight="700" text-anchor="middle">How ricom composites a frame</text>
+  <text x="450" y="66" class="m" font-size="12" text-anchor="middle">redirect every window off-screen · bind as a GL texture · composite the stack · scan out one tear-free frame</text>
+
+  <!-- 1. clients -->
+  <rect class="box" x="200" y="92" width="500" height="56" rx="10" stroke="#2f6fed" stroke-width="1.4"/>
+  <text x="450" y="118" class="t" font-size="15" font-weight="600" text-anchor="middle">X CLIENTS</text>
+  <text x="450" y="137" class="m" font-size="11.5" text-anchor="middle">mpv · browser · xterm — each app draws into its own top-level window</text>
+  <line x1="450" y1="148" x2="450" y2="174" stroke="#8a90a6" stroke-width="1.6" marker-end="url(#arw)"/>
+
+  <!-- 2. X server -->
+  <rect class="box" x="200" y="176" width="500" height="140" rx="10" stroke="#2f6fed" stroke-width="1.4"/>
+  <text x="224" y="202" class="t" font-size="15" font-weight="600">X SERVER · Composite + Damage</text>
+  <text x="676" y="200" class="tag" font-size="10.5" text-anchor="end">xconn</text>
+  <text x="450" y="224" class="m" font-size="11.5" text-anchor="middle">redirect_subwindows(Manual) → every window renders to an off-screen pixmap</text>
+  <rect class="pix" x="295" y="236" width="90" height="30" rx="6"/>
+  <rect class="pix" x="405" y="236" width="90" height="30" rx="6"/>
+  <rect class="pix" x="515" y="236" width="90" height="30" rx="6"/>
+  <text x="340" y="255" class="code mono" font-size="11" text-anchor="middle">pixmap A</text>
+  <text x="450" y="255" class="code mono" font-size="11" text-anchor="middle">pixmap B</text>
+  <text x="560" y="255" class="code mono" font-size="11" text-anchor="middle">pixmap C</text>
+  <text x="450" y="294" class="m" font-size="11.5" text-anchor="middle">Damage → DamageNotify the instant a window's pixels change</text>
+  <line x1="450" y1="316" x2="450" y2="342" stroke="#8a90a6" stroke-width="1.6" marker-end="url(#arw)"/>
+
+  <!-- 3. ricom -->
+  <rect class="box" x="200" y="344" width="500" height="120" rx="10" stroke="#0f9182" stroke-width="1.4"/>
+  <text x="224" y="370" class="t" font-size="15" font-weight="600">ricom · bind each pixmap as a GL texture</text>
+  <text x="676" y="368" class="tag" font-size="10.5" text-anchor="end">backend-gl · session</text>
+  <text x="450" y="394" class="code mono" font-size="11" text-anchor="middle">eglCreateImage(EGL_NATIVE_PIXMAP_KHR) → glEGLImageTargetTexture2DOES</text>
+  <text x="450" y="416" class="m" font-size="11.5" text-anchor="middle">draw mapped windows bottom-to-top as textured quads at their on-screen geometry</text>
+  <text x="450" y="440" class="tag" font-size="10.5" text-anchor="middle">zero-copy texture-from-pixmap · wm keeps the stack · region culls + use-damage</text>
+  <line x1="450" y1="464" x2="450" y2="490" stroke="#8a90a6" stroke-width="1.6" marker-end="url(#arw)"/>
+
+  <!-- 4. overlay -->
+  <rect class="box" x="200" y="492" width="500" height="54" rx="10" stroke="#7a4dff" stroke-width="1.4"/>
+  <text x="450" y="516" class="t" font-size="15" font-weight="600" text-anchor="middle">COMPOSITE OVERLAY WINDOW</text>
+  <text x="450" y="534" class="m" font-size="11.5" text-anchor="middle">owned by ricom</text>
+  <line x1="450" y1="546" x2="450" y2="572" stroke="#8a90a6" stroke-width="1.6" marker-end="url(#arw)"/>
+
+  <!-- 5. vsync -->
+  <rect class="box" x="200" y="574" width="500" height="46" rx="10" stroke="#7a4dff" stroke-width="1.4"/>
+  <text x="450" y="602" class="code mono" font-size="12.5" text-anchor="middle">eglSwapBuffers + swap_interval(1)  →  vsync</text>
+  <line x1="450" y1="620" x2="450" y2="646" stroke="#8a90a6" stroke-width="1.6" marker-end="url(#arw)"/>
+
+  <!-- 6. monitor -->
+  <rect class="box" x="200" y="648" width="500" height="50" rx="10" stroke="#1a9b53" stroke-width="1.4"/>
+  <text x="450" y="678" class="t" font-size="15" font-weight="600" text-anchor="middle">MONITOR — one tear-free, fully-composited frame</text>
+</svg>
