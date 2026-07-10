@@ -18,7 +18,7 @@ use calloop::generic::Generic;
 #[cfg(target_os = "linux")]
 use calloop::signals::{Signal, Signals};
 use calloop::timer::{TimeoutAction, Timer};
-use calloop::{EventLoop, Interest, LoopHandle, Mode, PostAction, RegistrationToken};
+use calloop::{EventLoop, Interest, LoopHandle, LoopSignal, Mode, PostAction, RegistrationToken};
 use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
@@ -508,6 +508,12 @@ pub struct App {
     redirected: bool,
     /// calloop handle, kept so event handlers can (re)arm the fade frame clock.
     loop_handle: Option<LoopHandle<'static, App>>,
+    /// calloop stop handle: a shutdown request (SIGTERM/SIGINT, or `ricomctl quit`)
+    /// calls `stop()` to break `event_loop.run`, so it returns into the single
+    /// `teardown()` path. Read by the signal source (Linux) and the control channel;
+    /// allow it to be unused where neither reader is compiled.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    loop_signal: Option<LoopSignal>,
     /// The frame-clock timer while any window is fading; `None` when settled, so
     /// there are zero timer wakeups on an idle screen.
     frame_timer: Option<RegistrationToken>,
@@ -584,6 +590,18 @@ fn read_line_capped<R: std::io::BufRead>(r: &mut R, buf: &mut Vec<u8>, cap: usiz
     Ok(())
 }
 
+impl Drop for App {
+    fn drop(&mut self) {
+        // Backstop for panic / early-error paths that never reach `teardown()`: only
+        // the socket — no X calls during unwind (ordering-fragile). On the normal
+        // path `teardown()` already took `socket_path`, so this is a no-op then.
+        #[cfg(unix)]
+        if let Some(p) = self.socket_path.take() {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+}
+
 impl App {
     /// Connect to X and negotiate the extensions we depend on. `config` holds the
     /// effect settings; `config_path` is remembered for `SIGHUP` reloads.
@@ -606,6 +624,7 @@ impl App {
             damage_history: VecDeque::new(),
             redirected: false,
             loop_handle: None,
+            loop_signal: None,
             frame_timer: None,
             last_frame: None,
             show_fps: config.fps.enabled,
@@ -834,6 +853,9 @@ impl App {
         let mut event_loop: EventLoop<'static, App> = EventLoop::try_new().context("create event loop")?;
         let handle = event_loop.handle();
         self.loop_handle = Some(handle.clone());
+        // Kept so a shutdown request (a caught signal, or `ricomctl quit`) can break
+        // `run` below and fall through to the single `teardown()` path.
+        self.loop_signal = Some(event_loop.get_signal());
         let fd = self
             .x
             .conn
@@ -855,12 +877,26 @@ impl App {
         // Linux-only: calloop's signal source is built on signalfd.
         #[cfg(target_os = "linux")]
         {
-            let signals =
-                Signals::new(&[Signal::SIGHUP, Signal::SIGUSR1]).context("create signal source")?;
+            let signals = Signals::new(&[
+                Signal::SIGHUP,
+                Signal::SIGUSR1,
+                Signal::SIGTERM,
+                Signal::SIGINT,
+            ])
+            .context("create signal source")?;
             handle
                 .insert_source(signals, |event, _meta, app: &mut App| match event.signal() {
                     Signal::SIGHUP => app.reload_config(),
                     Signal::SIGUSR1 => app.log_load(),
+                    // Graceful stop: break the loop so `run` returns into teardown().
+                    // Catching SIGINT here replaces the default Ctrl-C terminate, so
+                    // Ctrl-C now tears down cleanly too.
+                    Signal::SIGTERM | Signal::SIGINT => {
+                        tracing::info!(signal = ?event.signal(), "shutting down");
+                        if let Some(s) = app.loop_signal.as_ref() {
+                            s.stop();
+                        }
+                    }
                     _ => {}
                 })
                 .map_err(|e| anyhow::anyhow!("insert signal source: {e}"))?;
@@ -937,13 +973,41 @@ impl App {
             })
             .context("event loop")?;
 
-        // Graceful-exit cleanup (best-effort; Ctrl-C skips this — the startup
-        // reclaim above is the load-bearing path).
+        // The loop returns only once a shutdown was requested (SIGTERM/SIGINT, or
+        // `ricomctl quit` → LoopSignal::stop()). Run the single teardown path.
+        self.teardown();
+        Ok(())
+    }
+
+    /// Tear the compositor down in reverse of `run()` setup — best-effort and
+    /// idempotent. Reached when the event loop stops (a caught signal, or a
+    /// `ricomctl quit`). A hard `SIGKILL` can't run this; the startup stale-socket
+    /// reclaim covers that case.
+    fn teardown(&mut self) {
+        tracing::info!("tearing down: restoring the display");
+        // 1. Control socket: unlink so a fresh ricom / ricomctl won't hit a dead one.
         #[cfg(unix)]
         if let Some(p) = self.socket_path.take() {
             let _ = std::fs::remove_file(&p);
         }
-        Ok(())
+        // 2. Free every per-window pixmap + damage handle before the connection goes.
+        for (_, g) in std::mem::take(&mut self.gfx) {
+            self.free_gfx(g);
+        }
+        // 3. Tear down EGL/GL *before* releasing the overlay (its surface lives there).
+        self.backend = None;
+        // 4. Restore normal server drawing if we're still compositing.
+        if self.redirected {
+            let _ = self.x.unredirect_subwindows();
+            self.redirected = false;
+        }
+        // 5. Give the composite overlay back to the server.
+        if self.overlay != 0 {
+            let _ = self.x.release_overlay();
+            self.overlay = 0;
+        }
+        // 6. Push it all to the server before XConn drops and closes the connection.
+        let _ = self.x.flush();
     }
 
     /// Serve one control-channel connection: read a single command line, dispatch
@@ -1084,6 +1148,16 @@ impl App {
             C::SetAnim { category, effect, params } => self.set_anim(&category, &effect, &params),
             C::Unredir { enable } => self.set_unredir(enable),
             C::Font { path, size } => self.set_font_cmd(path, size),
+            C::Quit => {
+                tracing::info!("quit requested via control channel");
+                // Break the loop → `run` returns into the single teardown path. The
+                // reply below is written synchronously before calloop observes the
+                // stop flag, so the client still receives it.
+                if let Some(s) = self.loop_signal.as_ref() {
+                    s.stop();
+                }
+                proto::Reply::Text("shutting down ...".into())
+            }
         }
     }
 

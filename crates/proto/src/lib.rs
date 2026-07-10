@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Wire-protocol version. Bump on any incompatible `Command`/`Reply` change.
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// Raw X window id (mirrors `wm::WindowId`).
 pub type WinId = u32;
@@ -81,6 +81,9 @@ pub enum Command {
         #[serde(default)]
         size: Option<f32>,
     },
+    /// Ask the compositor to shut down cleanly: run its teardown, then exit. The
+    /// reply is written before the event loop stops, so the client still gets it.
+    Quit,
 }
 
 /// Every effect/preset name `animate` and `set` accept — for help + validation.

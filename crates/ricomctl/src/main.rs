@@ -33,6 +33,7 @@ COMMANDS:
     inspect <win>     Show one window (id: decimal or 0x hex)
     notify <text> [s] Show an on-screen message for [s] seconds (default: config)
     version           Show ricom's version (on-screen toast + stdout)
+    quit              Ask the compositor to shut down cleanly (run teardown, exit)
     animate <win> <fx> [k=v …]  Play a transform on one window
                       (fx: spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset;
                        params override [anim] defaults, e.g. amplitude=0.1 duration=3)
@@ -53,6 +54,7 @@ EXAMPLES:
     ricomctl unredir off
     ricomctl font /usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf
     ricomctl reload
+    ricomctl quit
 ";
 
 /// A parsed invocation: global options + the command to send.
@@ -117,6 +119,7 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
         "reload" => Command::Reload,
         "list" => Command::List,
         "version" => Command::Version,
+        "quit" => Command::Quit,
         "fps" => match a.next() {
             Some("toggle") => Command::FpsToggle,
             Some(other) => {

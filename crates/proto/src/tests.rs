@@ -36,6 +36,7 @@ fn command_roundtrip() {
     roundtrip_cmd(Command::Unredir { enable: None });
     roundtrip_cmd(Command::Font { path: "/usr/share/fonts/DejaVuSans.ttf".into(), size: Some(1.25) });
     roundtrip_cmd(Command::Font { path: String::new(), size: None });
+    roundtrip_cmd(Command::Quit);
 }
 
 #[test]

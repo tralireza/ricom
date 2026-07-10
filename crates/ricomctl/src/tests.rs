@@ -23,6 +23,7 @@ fn commands_map() {
     assert_eq!(cmd(&["notify", "hi"]), Command::Notify { text: "hi".into(), timeout_ms: None });
     assert_eq!(cmd(&["notify", "hi", "3"]), Command::Notify { text: "hi".into(), timeout_ms: Some(3000) });
     assert_eq!(cmd(&["version"]), Command::Version);
+    assert_eq!(cmd(&["quit"]), Command::Quit);
     assert_eq!(
         cmd(&["animate", "0x1a00007", "spin"]),
         Command::Animate { win: 0x1a00007, effect: "spin".into(), params: vec![] }
@@ -91,6 +92,7 @@ fn errors_are_usage() {
     assert!(matches!(parse(&["inspect"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["inspect", "zz"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["list", "extra"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["quit", "x"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["--socket"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["notify"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["animate"]), Err(Exit::Usage(_))));
