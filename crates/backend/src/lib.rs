@@ -244,6 +244,13 @@ pub struct Hud {
     /// Outline the HUD text (per `RenderParams` text style) so it reads without the
     /// panel. `false` = plain text (the panel provides contrast).
     pub outline: bool,
+    /// Mid auto-hop: the corner the HUD is sliding FROM + progress 0→1 (0 = at `from`,
+    /// 1 = arrived at `corner`). `None` = static at `corner`. Progress is pre-eased by
+    /// the caller; the backend lerps the panel anchor linearly by it.
+    pub transition: Option<(HudCorner, f32)>,
+    /// Whole-HUD opacity (panel + text + graph), `1.0` = opaque. The caller dips this
+    /// during an auto-hop for the fade; `1.0` otherwise.
+    pub opacity: f32,
 }
 
 /// How the OSD toast appears/disappears — the caller picks the open or close

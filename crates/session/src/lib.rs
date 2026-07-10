@@ -287,6 +287,62 @@ fn move_corner(corner: HudCorner, dir: Move) -> HudCorner {
     }
 }
 
+/// HUD auto-hop animation: the corner the HUD is sliding FROM → TO, with linear
+/// progress `t` (0→1) over `dur` seconds. Position easing + the opacity dip are
+/// applied when building the `Hud` (see `composite`).
+struct HudMove {
+    from: HudCorner,
+    to: HudCorner,
+    t: f64,
+    dur: f64,
+}
+
+impl HudMove {
+    /// Advance progress by `dt`; returns `true` while still moving (t < 1).
+    fn advance(&mut self, dt: f64) -> bool {
+        self.t = (self.t + dt / self.dur.max(0.001)).min(1.0);
+        self.t < 1.0
+    }
+}
+
+/// Smoothstep ease-in-out for the glide (0→1).
+fn ease_in_out(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// HUD opacity floor at mid-hop — it fades to this (not fully invisible), so the
+/// glide stays visible as it crosses the screen.
+const HUD_FADE_FLOOR: f64 = 0.2;
+
+/// One xorshift64 step — a tiny inline PRNG (no `rand` dependency).
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut x = *state;
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    *state = x;
+    x
+}
+
+/// A random corner *different* from `current` (uniform over the other three).
+fn random_corner(current: HudCorner, rng: &mut u64) -> HudCorner {
+    use HudCorner::*;
+    let others: [HudCorner; 3] = match current {
+        TopLeft => [TopRight, BottomLeft, BottomRight],
+        TopRight => [TopLeft, BottomLeft, BottomRight],
+        BottomLeft => [TopLeft, TopRight, BottomRight],
+        BottomRight => [TopLeft, TopRight, BottomLeft],
+    };
+    others[(xorshift64(rng) % 3) as usize]
+}
+
+/// A non-zero PRNG seed from the OS-randomised `RandomState` (no time / `rand` dep).
+fn seed_rng() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    std::collections::hash_map::RandomState::new().build_hasher().finish() | 1
+}
+
 /// Per-window X resources used for compositing.
 #[derive(Default)]
 struct WinGfx {
@@ -547,6 +603,12 @@ pub struct App {
     hud_corner: HudCorner,
     /// Directional HUD-move hotkeys: `(keycode, modifier_mask, direction)`.
     move_keys: Vec<(u8, u16, Move)>,
+    /// In-flight HUD auto-hop (sliding to a new corner), else `None`.
+    hud_move: Option<HudMove>,
+    /// Periodic auto-hop timer source; present iff `[fps] auto_move` is on.
+    automove_timer: Option<RegistrationToken>,
+    /// xorshift PRNG state for picking a random corner.
+    rng: u64,
     /// Cached display refresh rate (Hz) for the HUD graph's budget; refreshed on RandR.
     refresh_hz: f64,
     /// Rolling frame-rate meter, sampled each composite while redirected.
@@ -646,6 +708,9 @@ impl App {
             config_path,
             fps_key: None,
             move_keys: Vec::new(),
+            hud_move: None,
+            automove_timer: None,
+            rng: seed_rng(),
             refresh_hz,
             fps_meter: FpsMeter::new(),
             load: LoadTracker::new(Instant::now()),
@@ -759,6 +824,12 @@ impl App {
                 // A changed config corner repositions the runtime HUD corner.
                 if corner_changed {
                     self.hud_corner = hud_corner(&self.config.fps.corner);
+                }
+                // A reload may toggle auto-move on/off (interval/duration take effect
+                // at the next hop). Only (dis)arm on an actual state change so an
+                // unrelated reload doesn't reset the countdown.
+                if self.automove_timer.is_some() != self.config.fps.auto_move {
+                    self.set_automove(self.config.fps.auto_move);
                 }
                 // Changed default_opacity/rules: re-target every window's opacity
                 // (blur/shadow/corner re-resolve on the repaint below).
@@ -966,6 +1037,9 @@ impl App {
             }
         }
 
+        // Auto-hop: arm the periodic HUD corner-mover if enabled in the config.
+        self.set_automove(self.config.fps.auto_move);
+
         // Prime the pump: setup already flushed, which may have buffered events
         // inside x11rb that will never re-trigger the fd watch. Drain them (and
         // repaint) before blocking so we don't start out stalled.
@@ -1085,6 +1159,15 @@ impl App {
                     self.show_osd(format!(">> FPS HUD {s}."), self.config.osd.duration.min(1.2), OSD_ACK);
                 }
                 Reply::Ok
+            }
+            C::FpsAutoMove { enable } => {
+                let on = enable.unwrap_or(!self.config.fps.auto_move);
+                self.set_automove(on);
+                if self.config.osd.enabled && self.config.osd.ack {
+                    let s = if on { "on" } else { "off" };
+                    self.show_osd(format!(">> fps auto {s}."), self.config.osd.duration.min(1.2), OSD_ACK);
+                }
+                Reply::Text(format!("fps auto-move {}", if on { "on" } else { "off" }))
             }
             C::List => {
                 // Heal any startup-adopted blanks before reporting (their first read
@@ -1743,6 +1826,7 @@ impl App {
             app.last_frame = Some(now);
             let animating = app.windows.advance_anims(dt);
             let osd = app.advance_osd(dt);
+            let hud_moving = app.advance_hud_move(dt);
             if app.reap_finished_fadeouts() {
                 app.update_redirection(); // a reaped window can change the top window
             }
@@ -1817,10 +1901,10 @@ impl App {
             }
             let has_cur = !cur.is_empty();
             app.anim_damage = cur.into_iter().collect();
-            if has_cur || had_prev || osd == OsdTick::Moving {
+            if has_cur || had_prev || osd == OsdTick::Moving || hud_moving {
                 app.dirty = true; // repaint happens once, in the run callback
             }
-            let moving = animating || osd == OsdTick::Moving;
+            let moving = animating || osd == OsdTick::Moving || hud_moving;
             if moving {
                 // While compositing, eglSwapBuffers(vsync) paces us to the refresh
                 // rate, so an immediate re-arm self-throttles; when unredirected
@@ -1839,6 +1923,62 @@ impl App {
         match token {
             Ok(tok) => self.frame_timer = Some(tok),
             Err(e) => tracing::error!("insert frame timer: {e}"),
+        }
+    }
+
+    /// Advance an in-flight HUD auto-hop; returns `true` if one was active this tick
+    /// (so the frame clock repaints). On arrival, commit the destination corner.
+    fn advance_hud_move(&mut self, dt: f64) -> bool {
+        let Some(m) = self.hud_move.as_mut() else { return false };
+        let still = m.advance(dt);
+        let to = m.to;
+        if !still {
+            self.hud_corner = to;
+            self.hud_move = None;
+        }
+        true
+    }
+
+    /// Kick off an auto-hop to a random *different* corner. No-op while the HUD is
+    /// hidden (nothing to move).
+    fn trigger_automove(&mut self) {
+        if !self.show_fps {
+            return;
+        }
+        let to = random_corner(self.hud_corner, &mut self.rng);
+        let dur = self.config.fps.auto_move_duration.max(0.05);
+        self.hud_move = Some(HudMove { from: self.hud_corner, to, t: 0.0, dur });
+        self.ensure_frame_timer();
+        self.dirty = true;
+        tracing::debug!(?to, "fps HUD auto-hop");
+    }
+
+    /// Arm or disarm the periodic auto-hop timer to match `on` (session-only; a
+    /// reload re-reads `[fps] auto_move`). Idempotent: removes any existing timer first.
+    fn set_automove(&mut self, on: bool) {
+        self.config.fps.auto_move = on;
+        if let Some(tok) = self.automove_timer.take()
+            && let Some(h) = self.loop_handle.clone()
+        {
+            h.remove(tok);
+        }
+        if !on {
+            return;
+        }
+        let Some(handle) = self.loop_handle.clone() else { return };
+        let interval = Duration::from_secs_f64(self.config.fps.auto_move_interval.max(1.0));
+        let tok = handle.insert_source(
+            Timer::from_duration(interval),
+            |_deadline, _meta, app: &mut App| {
+                app.trigger_automove();
+                TimeoutAction::ToDuration(Duration::from_secs_f64(
+                    app.config.fps.auto_move_interval.max(1.0),
+                ))
+            },
+        );
+        match tok {
+            Ok(t) => self.automove_timer = Some(t),
+            Err(e) => tracing::error!("insert automove timer: {e}"),
         }
     }
 
@@ -2192,14 +2332,26 @@ impl App {
         draws.reverse(); // restore bottom-to-top for correct layering
         tracing::trace!(windows = items.len(), drawn = draws.len(), "composite");
         let hud = if self.show_fps {
+            // While auto-hopping, draw toward the destination corner with an eased
+            // slide (transition) and a mid-hop opacity dip (fade); static otherwise.
+            let (corner, transition, opacity) = match &self.hud_move {
+                Some(m) => {
+                    let te = ease_in_out(m.t) as f32;
+                    let fade = 1.0 - (1.0 - HUD_FADE_FLOOR) * (std::f64::consts::PI * m.t).sin();
+                    (m.to, Some((m.from, te)), fade as f32)
+                }
+                None => (self.hud_corner, None, 1.0),
+            };
             Some(Hud {
                 fps: self.fps_meter.fps(),
                 graph: self.config.fps.graph,
-                corner: self.hud_corner,
+                corner,
                 scale: self.config.fps.scale,
                 refresh_hz: self.refresh_hz as f32,
                 load: hud_load,
                 outline: self.config.fps.outline,
+                transition,
+                opacity,
             })
         } else {
             None

@@ -259,6 +259,13 @@ pub struct Fps {
     /// Outline the HUD text (using the `[font]` outline/shadow style) so it reads
     /// without the panel. `false` (default) = plain text; the panel gives contrast.
     pub outline: bool,
+    /// Auto-hop: every `auto_move_interval` seconds the HUD fade-slides to a random
+    /// different corner. `true` (default). Live-toggleable via `ricomctl fps auto`.
+    pub auto_move: bool,
+    /// Seconds between auto-hops (default `300.0` = 5 min).
+    pub auto_move_interval: f64,
+    /// Fade-slide duration of one auto-hop, in seconds (default `0.6`).
+    pub auto_move_duration: f64,
 }
 
 /// On-screen text font. ricom rasterises glyphs at runtime from this TrueType
@@ -796,6 +803,9 @@ impl Default for Fps {
             graph: true,
             scale: 1.0,
             outline: false,
+            auto_move: true,
+            auto_move_interval: 300.0,
+            auto_move_duration: 0.6,
         }
     }
 }

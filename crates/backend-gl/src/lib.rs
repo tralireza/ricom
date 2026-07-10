@@ -1423,14 +1423,25 @@ impl GlBackend {
         let bar_w = if hud.graph { (content_w / HUD_GRAPH_SAMPLES as f32).max(1.0) } else { 0.0 };
         let panel_w = content_w + pad * 2.0;
         let panel_h = th + graph_gap + graph_h + load_block_h + pad * 2.0;
-        let (px, py) = match hud.corner {
+        let a = hud.opacity;
+        // Anchor the panel to a corner; while auto-hopping, lerp between the from/to
+        // corner anchors by the (already-eased) transition progress.
+        let anchor = |c: HudCorner| match c {
             HudCorner::TopLeft => (margin, margin),
             HudCorner::TopRight => (sw as f32 - margin - panel_w, margin),
             HudCorner::BottomLeft => (margin, sh as f32 - margin - panel_h),
             HudCorner::BottomRight => (sw as f32 - margin - panel_w, sh as f32 - margin - panel_h),
         };
+        let (px, py) = match hud.transition {
+            None => anchor(hud.corner),
+            Some((from, t)) => {
+                let (fx, fy) = anchor(from);
+                let (tx, ty) = anchor(hud.corner);
+                (fx + (tx - fx) * t, fy + (ty - fy) * t)
+            }
+        };
         // Panel background.
-        self.fill_rect(px, py, panel_w, panel_h, radius, [0.05, 0.05, 0.07, 0.72], sw, sh);
+        self.fill_rect(px, py, panel_w, panel_h, radius, [0.05, 0.05, 0.07, 0.72 * a], sw, sh);
         // Render-time graph: one bar per composite, full height = one refresh budget.
         // Green = plenty of headroom, amber = tight, red = at/over budget (missed vsync).
         if hud.graph && !samples.is_empty() {
@@ -1443,26 +1454,27 @@ impl GlBackend {
                 }
                 let norm = (ms / budget).clamp(0.0, 1.0);
                 let bh = (norm * graph_h).max(1.0);
-                let col = if ms <= budget * 0.5 {
+                let mut col = if ms <= budget * 0.5 {
                     [0.40, 0.90, 0.50, 0.90]
                 } else if ms <= budget * 0.85 {
                     [0.95, 0.80, 0.30, 0.90]
                 } else {
                     [0.95, 0.40, 0.35, 0.90]
                 };
+                col[3] *= a;
                 self.fill_rect(bx, gy + (graph_h - bh), (bar_w - 0.5 * s).max(1.0), bh, 0.0, col, sw, sh);
             }
             // Budget ceiling line at the top of the graph (= one refresh interval).
-            self.fill_rect(gx, gy, content_w, s.max(1.0), 0.0, [1.0, 1.0, 1.0, 0.22], sw, sh);
+            self.fill_rect(gx, gy, content_w, s.max(1.0), 0.0, [1.0, 1.0, 1.0, 0.22 * a], sw, sh);
         }
         drop(samples);
         // Text decoration: outlined when `hud.outline` (so the HUD reads without its
         // panel), else plain. Shared style, scaled with the HUD size factor `s`.
-        let hstyle = if hud.outline { self.text_style(s, 1.0) } else { text::TextStyle::NONE };
+        let hstyle = if hud.outline { self.text_style(s, a) } else { text::TextStyle::NONE };
         // Numbers on top — fps + ms, each number right-aligned in its field.
         let x0 = px + pad;
         let ny = py + pad;
-        let col = [0.90, 1.0, 0.95, 1.0];
+        let col = [0.90, 1.0, 0.95, a];
         let fw = text.measure(text_px, &fps_s).0;
         text.draw_styled(&self.gl, sw, sh, x0 + numw - fw, ny, text_px, col, &hstyle, &fps_s);
         text.draw_styled(&self.gl, sw, sh, x0 + numw, ny, text_px, col, &hstyle, sep1);
@@ -1472,7 +1484,7 @@ impl GlBackend {
         text.draw_styled(&self.gl, sw, sh, mx0 + msw, ny, text_px, col, &hstyle, sep2);
         // Load block under the graph: label + three right-aligned value columns.
         if let Some(l) = &hud.load {
-            let lcol = [0.80, 0.88, 1.0, 1.0];
+            let lcol = [0.80, 0.88, 1.0, a];
             let rows: [(&str, [Option<f32>; 3]); 2] = [
                 ("fps", [Some(l.fps[0]), Some(l.fps[1]), Some(l.fps[2])]),
                 ("ms", [l.render_ms[0], l.render_ms[1], l.render_ms[2]]),

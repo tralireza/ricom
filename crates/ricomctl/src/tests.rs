@@ -15,6 +15,10 @@ fn commands_map() {
     assert_eq!(cmd(&["reload"]), Command::Reload);
     assert_eq!(cmd(&["list"]), Command::List);
     assert_eq!(cmd(&["fps", "toggle"]), Command::FpsToggle);
+    assert_eq!(cmd(&["fps", "auto"]), Command::FpsAutoMove { enable: None });
+    assert_eq!(cmd(&["fps", "auto", "on"]), Command::FpsAutoMove { enable: Some(true) });
+    assert_eq!(cmd(&["fps", "auto", "off"]), Command::FpsAutoMove { enable: Some(false) });
+    assert_eq!(cmd(&["fps", "auto", "toggle"]), Command::FpsAutoMove { enable: None });
     assert_eq!(cmd(&["unredir", "on"]), Command::Unredir { enable: Some(true) });
     assert_eq!(cmd(&["unredir", "off"]), Command::Unredir { enable: Some(false) });
     assert_eq!(cmd(&["unredir", "toggle"]), Command::Unredir { enable: None });
@@ -86,6 +90,8 @@ fn errors_are_usage() {
     assert!(matches!(parse(&["bogus"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["fps"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["fps", "nope"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["fps", "auto", "nope"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["fps", "auto", "on", "extra"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["unredir"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["unredir", "nope"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["unredir", "on", "extra"]), Err(Exit::Usage(_))));

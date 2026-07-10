@@ -27,6 +27,7 @@ COMMANDS:
     ping              Check the compositor is alive
     reload            Re-read + apply the config file (same as SIGHUP)
     fps toggle        Toggle the FPS HUD
+    fps auto <state>  Auto-hop the HUD to a random corner every few min: on|off|toggle
     unredir <state>   Fullscreen compositor bypass: on (allow, perf default) |
                       off (always composite, so effects show) | toggle
     list              List tracked windows
@@ -122,10 +123,18 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
         "quit" => Command::Quit,
         "fps" => match a.next() {
             Some("toggle") => Command::FpsToggle,
+            Some("auto") => match a.next() {
+                Some("on") => Command::FpsAutoMove { enable: Some(true) },
+                Some("off") => Command::FpsAutoMove { enable: Some(false) },
+                Some("toggle") | None => Command::FpsAutoMove { enable: None },
+                Some(other) => {
+                    return Err(Exit::Usage(format!("unknown fps auto state '{other}' (want: on|off|toggle)\n")));
+                }
+            },
             Some(other) => {
-                return Err(Exit::Usage(format!("unknown fps subcommand '{other}' (want: toggle)\n")));
+                return Err(Exit::Usage(format!("unknown fps subcommand '{other}' (want: toggle|auto)\n")));
             }
-            None => return Err(Exit::Usage("fps needs a subcommand (toggle)\n".into())),
+            None => return Err(Exit::Usage("fps needs a subcommand (toggle|auto)\n".into())),
         },
         "unredir" => match a.next() {
             Some("on") => Command::Unredir { enable: Some(true) },

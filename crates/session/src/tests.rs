@@ -37,3 +37,19 @@ fn check_keys_strict() {
     assert!(check_keys("reset", &p(&[("x", "1")])).is_err());
     assert!(check_keys("reset", &p(&[])).is_ok());
 }
+
+#[test]
+fn random_corner_differs_and_covers_others() {
+    use HudCorner::*;
+    let mut rng = 0x9e37_79b9_7f4a_7c15u64; // fixed seed → deterministic test
+    let start = TopLeft;
+    let others = [TopRight, BottomLeft, BottomRight];
+    let mut hits = [false; 3];
+    for _ in 0..300 {
+        let c = random_corner(start, &mut rng);
+        assert_ne!(c, start, "auto-hop never picks the current corner");
+        let i = others.iter().position(|&o| o == c).expect("one of the other three");
+        hits[i] = true;
+    }
+    assert!(hits.iter().all(|&h| h), "all three other corners get picked");
+}

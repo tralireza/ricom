@@ -37,6 +37,9 @@ fn command_roundtrip() {
     roundtrip_cmd(Command::Font { path: "/usr/share/fonts/DejaVuSans.ttf".into(), size: Some(1.25) });
     roundtrip_cmd(Command::Font { path: String::new(), size: None });
     roundtrip_cmd(Command::Quit);
+    roundtrip_cmd(Command::FpsAutoMove { enable: Some(true) });
+    roundtrip_cmd(Command::FpsAutoMove { enable: Some(false) });
+    roundtrip_cmd(Command::FpsAutoMove { enable: None });
 }
 
 #[test]

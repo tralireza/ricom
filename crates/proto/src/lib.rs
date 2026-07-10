@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Wire-protocol version. Bump on any incompatible `Command`/`Reply` change.
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// Raw X window id (mirrors `wm::WindowId`).
 pub type WinId = u32;
@@ -29,6 +29,12 @@ pub enum Command {
     Reload,
     /// Toggle the FPS HUD.
     FpsToggle,
+    /// Toggle the periodic HUD auto-hop (`[fps] auto_move`); session-only (a reload
+    /// reverts). `Some(true)`/`Some(false)` set it; `None` flips the current state.
+    FpsAutoMove {
+        #[serde(default)]
+        enable: Option<bool>,
+    },
     /// List tracked windows.
     List,
     /// Detailed info for one window.
