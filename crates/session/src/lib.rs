@@ -23,7 +23,11 @@ use x11rb::connection::Connection;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
-use backend_gl::{Burn, DrainParams, GlBackend, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, RippleParams, WaveParams, WindowDraw};
+use backend::{
+    Backend, Burn, DrainParams, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, RippleParams,
+    WaveParams, WindowDraw,
+};
+use backend_gl::GlBackend;
 use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
@@ -33,7 +37,7 @@ const MAX_BUFFER_AGE: usize = 4;
 const WOBBLE_PAD: f32 = 8.0;
 /// Default `spin` rotation in degrees when a `Spin` block sets none (a full turn).
 const SPIN_DEFAULT_DEG: f64 = 360.0;
-use config::{Axis, Category, Config, Edge, FocusSource, OsdEffect, Primitive, RuleResult, WindowMatch};
+use config::{Axis, BackendKind, Category, Config, Edge, FocusSource, OsdEffect, Primitive, RuleResult, WindowMatch};
 use wm::anim::Fade;
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
@@ -59,6 +63,15 @@ fn render_params(cfg: &Config) -> RenderParams {
         text_shadow: cfg.font.shadow_offset,
         text_shadow_color: cfg.font.shadow_color,
         text_outline_drop: cfg.font.outline_style.eq_ignore_ascii_case("drop"),
+    }
+}
+
+/// Build the render backend named by the config (`backend = …`). Only the GL backend
+/// exists today; a future xrender/glx backend slots in as another match arm. Returns
+/// a `Box<dyn Backend>` so `session` never names a concrete backend past this point.
+fn make_backend(config: &Config, window: Window, visual: u32) -> Result<Box<dyn Backend>> {
+    match config.backend {
+        BackendKind::Gl => Ok(Box::new(GlBackend::new(window, visual, render_params(config))?)),
     }
 }
 
@@ -481,7 +494,7 @@ pub struct App {
     pub x: XConn,
     windows: WindowStack,
     overlay: Window,
-    backend: Option<GlBackend>,
+    backend: Option<Box<dyn Backend>>,
     gfx: HashMap<WindowId, WinGfx>,
     /// Cached per-window identity (WM_CLASS / type / title) for rule matching.
     identities: HashMap<WindowId, WinIdentity>,
@@ -811,7 +824,7 @@ impl App {
         let visual = self.x.window_visual(self.overlay)?;
         self.x.redirect_subwindows()?;
         self.redirected = true;
-        self.backend = Some(GlBackend::new(self.overlay, visual, render_params(&self.config))?);
+        self.backend = Some(make_backend(&self.config, self.overlay, visual)?);
         // Load the on-screen-text font (HUD/OSD/notify). A missing/invalid font just
         // disables text; the compositor runs regardless.
         if let Some(b) = self.backend.as_mut() {

@@ -34,6 +34,9 @@ pub struct Config {
     /// Repaint only the damaged region each frame (buffer-age partial repaint)
     /// instead of the whole screen. `true` (default); `false` forces full repaints.
     pub use_damage: bool,
+    /// Render backend: `"gl"` (EGL + OpenGL) — the only one today, chosen at startup.
+    /// `xrender` / `glx` are the roadmap alternatives.
+    pub backend: BackendKind,
     /// Composite background colour (RGB, `0.0..=1.0`), seen where no window covers.
     pub background: [f32; 3],
     /// Window corner radius in px. `0.0` (default) = square corners.
@@ -162,6 +165,15 @@ pub enum FocusSource {
     #[default]
     Ewmh,
     X11,
+}
+
+/// Which render backend the compositor uses. `Gl` (EGL + OpenGL) is the only one
+/// today; `xrender` / `glx` are roadmap alternatives. An unknown value is a load error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackendKind {
+    #[default]
+    Gl,
 }
 
 /// Inactive-window dimming: unfocused windows fade toward transparent so the
@@ -673,6 +685,7 @@ impl Default for Config {
         Config {
             unredir: true,
             use_damage: true,
+            backend: BackendKind::default(),
             background: [0.05, 0.05, 0.07],
             corner_radius: 0.0,
             default_opacity: 1.0,

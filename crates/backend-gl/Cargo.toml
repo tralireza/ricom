@@ -9,6 +9,7 @@ tracing = "0.1.44"
 glow = "0.17.0"
 khronos-egl = { version = "6.0.0", features = ["dynamic"] }
 region = { version = "0.1.0", path = "../region" }
+backend = { version = "0.1.0", path = "../backend" }
 x11-dl = "2.21.0"
 # Pure-Rust TrueType rasteriser (no C deps). Glyphs are rasterised on demand and
 # turned into a runtime SDF glyph cache; see `text.rs`.
