@@ -58,6 +58,7 @@ fn render_params(cfg: &Config) -> RenderParams {
         text_outline_color: cfg.font.outline_color,
         text_shadow: cfg.font.shadow_offset,
         text_shadow_color: cfg.font.shadow_color,
+        text_outline_drop: cfg.font.outline_style.eq_ignore_ascii_case("drop"),
     }
 }
 

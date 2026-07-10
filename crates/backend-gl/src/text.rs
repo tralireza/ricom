@@ -12,7 +12,7 @@
 //! no HUD/OSD/notify text.
 //!
 //! Reuses the backend's unit-quad VAO and `BLIT_VS` (position via `u_rect`/`u_screen`),
-//! so [`TextRenderer::draw`] assumes the caller has that VAO bound and premultiplied
+//! so [`TextRenderer::draw_run`] assumes the caller has that VAO bound and premultiplied
 //! blending enabled — exactly the state inside `GlBackend::present_windows`.
 //!
 //! Not implemented (by design — the "lean" path): complex shaping (ligatures / BiDi /
@@ -33,24 +33,79 @@ use glow::HasContext as _;
 use crate::{make_program, BLIT_VS};
 
 /// Fragment shader: sample the glyph's coverage from the atlas sub-rect and emit it as
-/// premultiplied alpha in `u_color`. Native antialiasing lives in the rasterised
-/// coverage itself, so — unlike the old SDF path — there's no threshold/`fwidth` step.
+/// premultiplied alpha in `u_color` (native AA lives in the coverage — no SDF threshold).
+///
+/// **A2 outline (single pass):** when `u_outline.a > 0`, also sample the coverage at a
+/// ring of taps out to `u_ostep` (the outline radius in atlas UV) and take the max — a
+/// cheap dilation of the glyph. The dilated shape painted in `u_outline`, with the fill
+/// composited over it, yields the outline in one draw. Taps are clamped to the glyph
+/// sub-rect so they can't bleed into a neighbouring cell.
+///
+/// `u_odrop` picks the direction: `0` dilates on a full ring (all-around outline); `1`
+/// dilates with only the up-left taps, so the band falls on the **bottom-right** of the
+/// glyph — the outline reads as a tight drop-shadow (no top/left edge). Because the
+/// atlas (and screen) put +uv.y downward and +uv.x rightward, sampling up/left means a
+/// pixel lights up only when the glyph sits above/left of it, i.e. below/right of the glyph.
 const GLYPH_FS: &str = r#"#version 330 core
 in vec2 v_tex;
 uniform sampler2D u_atlas;
-uniform vec4 u_uv;      // atlas sub-rect: xy = origin, zw = size (0..1)
-uniform vec4 u_color;   // straight RGBA
+uniform vec4 u_uv;       // atlas sub-rect: xy = origin, zw = size (0..1)
+uniform vec4 u_color;    // fill, straight RGBA
+uniform vec4 u_outline;  // outline colour, straight RGBA; a <= 0 disables the outline
+uniform vec2 u_ostep;    // outline radius in atlas UV (x,y); 0 = no outline
+uniform int  u_odrop;    // 0 = all-around ring; 1 = bottom-right only (drop-shadow)
 out vec4 frag;
+
+// Coverage at `uv`, clamped to this glyph's sub-rect (no neighbour bleed).
+float cov_at(vec2 uv) {
+    return texture(u_atlas, clamp(uv, u_uv.xy, u_uv.xy + u_uv.zw)).r;
+}
+
 void main() {
-    float cov = texture(u_atlas, u_uv.xy + v_tex * u_uv.zw).r; // 0..1 coverage
-    float a = cov * u_color.a;
-    frag = vec4(u_color.rgb * a, a); // premultiplied, matches ONE/1-SRC_ALPHA blend
+    vec2 uv = u_uv.xy + v_tex * u_uv.zw;
+    float inside = cov_at(uv);                 // glyph coverage here
+    float fa = inside * u_color.a;             // premultiplied fill alpha
+    vec3 frgb = u_color.rgb * fa;
+
+    if (u_outline.a > 0.0 && (u_ostep.x > 0.0 || u_ostep.y > 0.0)) {
+        // Dilated coverage: max over an outer ring (r) + an inner ring (0.5r) so thin
+        // outlines stay solid.
+        float d = inside;
+        vec2 o = u_ostep;
+        vec2 h = o * 0.70710678; // diagonal component of the outer ring
+        vec2 m = o * 0.5;        // inner ring
+        if (u_odrop == 1) {
+            // Up-left taps only ⇒ the band lands on the bottom-right (a drop-shadow).
+            d = max(d, cov_at(uv + vec2(-o.x, 0.0)));   // glyph to the left  ⇒ band on the right
+            d = max(d, cov_at(uv + vec2(0.0, -o.y)));   // glyph above        ⇒ band on the bottom
+            d = max(d, cov_at(uv + vec2(-h.x, -h.y)));  // glyph up-left      ⇒ bottom-right corner
+            d = max(d, cov_at(uv + vec2(-m.x, 0.0)));
+            d = max(d, cov_at(uv + vec2(0.0, -m.y)));
+            d = max(d, cov_at(uv + vec2(-m.x, -m.y)));
+        } else {
+            // Full ring: 12 taps + centre ≈ a small disk (all-around outline).
+            d = max(d, cov_at(uv + vec2( o.x, 0.0)));  d = max(d, cov_at(uv + vec2(-o.x, 0.0)));
+            d = max(d, cov_at(uv + vec2(0.0,  o.y)));  d = max(d, cov_at(uv + vec2(0.0, -o.y)));
+            d = max(d, cov_at(uv + vec2( h.x,  h.y))); d = max(d, cov_at(uv + vec2(-h.x, -h.y)));
+            d = max(d, cov_at(uv + vec2( h.x, -h.y))); d = max(d, cov_at(uv + vec2(-h.x,  h.y)));
+            d = max(d, cov_at(uv + vec2( m.x,  m.y))); d = max(d, cov_at(uv + vec2(-m.x, -m.y)));
+            d = max(d, cov_at(uv + vec2( m.x, -m.y))); d = max(d, cov_at(uv + vec2(-m.x,  m.y)));
+        }
+        float oa = d * u_outline.a;                // outline (dilated shape) premult alpha
+        vec3 orgb = u_outline.rgb * oa;
+        // Fill OVER outline (both premultiplied).
+        frag = vec4(frgb + orgb * (1.0 - fa), fa + oa * (1.0 - fa));
+    } else {
+        frag = vec4(frgb, fa);
+    }
 }
 "#;
 
-/// 1px transparent border around each glyph so LINEAR sampling at a quad edge fades to
-/// zero rather than catching a neighbour.
-const PAD: usize = 1;
+/// Transparent border (px) around each glyph in the atlas: LINEAR sampling fades to zero
+/// at a quad edge, AND the A2 outline dilates into this margin — so it also caps the max
+/// outline radius (an outline wider than `PAD` is clamped). `4` covers the default 1.5px
+/// outline up to ~4K (it scales with the surface).
+const PAD: usize = 4;
 /// 1px gutter between packed glyphs (belt-and-braces with `PAD` against bleed).
 const GUTTER: i32 = 1;
 /// Initial atlas edge (px); grows (doubling, cache re-packed) up to `ATLAS_MAX`.
@@ -59,31 +114,33 @@ const ATLAS_MAX: i32 = 4096;
 /// Clamp on the rasterised glyph pixel size (sanity bound on the cache key + atlas use).
 const MAX_PX: f32 = 512.0;
 
-/// Eight unit offsets (axis + diagonal) used to lay down an all-around text outline.
-const OUTLINE_OFFSETS: [(f32, f32); 8] = [
-    (-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0),
-    (-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0),
-];
-
-/// Text decoration for [`TextRenderer::draw_styled`]: an all-around outline and/or an
-/// offset drop-shadow, both in screen px (`0` disables that layer). Colours are straight
-/// RGBA (alpha lets the caller fade the whole run).
+/// Text decoration for [`TextRenderer::draw_styled`]: an outline (all-around, or masked to
+/// the bottom-right as a drop-shadow) and/or an offset drop-shadow, both in screen px (`0`
+/// disables that layer). Colours are straight RGBA (alpha lets the caller fade the whole run).
 ///
-/// A1 renders these as multi-pass offset blits; A2 will render the outline in-shader —
-/// the field set + call sites stay identical, so that swap is internal to this module.
+/// The outline is rendered in-shader in a single pass (see `GLYPH_FS`); the offset shadow is
+/// one extra pass. So an outlined+shadowed run is ≤ 2 draws per glyph-run (was ~10 in A1).
 #[derive(Clone, Copy)]
 pub struct TextStyle {
     pub outline_px: f32,
     pub outline_color: [f32; 4],
+    /// Outline direction: `false` rings the glyph on all sides; `true` masks the outline
+    /// band to the bottom-right only (up-left dilation taps), so it reads as a drop-shadow.
+    pub outline_drop: bool,
     /// Drop-shadow offset (down-right) in px; `0` = no shadow.
     pub shadow_px: f32,
     pub shadow_color: [f32; 4],
 }
 
 impl TextStyle {
-    /// No decoration — `draw_styled` then behaves exactly like `draw`.
-    pub const NONE: TextStyle =
-        TextStyle { outline_px: 0.0, outline_color: [0.0; 4], shadow_px: 0.0, shadow_color: [0.0; 4] };
+    /// No decoration — `draw_styled` then behaves like a plain coverage blit.
+    pub const NONE: TextStyle = TextStyle {
+        outline_px: 0.0,
+        outline_color: [0.0; 4],
+        outline_drop: false,
+        shadow_px: 0.0,
+        shadow_color: [0.0; 4],
+    };
 }
 
 /// One cached glyph's placement in the atlas + the geometry to position its quad, all in
@@ -122,6 +179,9 @@ pub struct TextRenderer {
     u_uv: Option<glow::NativeUniformLocation>,
     u_color: Option<glow::NativeUniformLocation>,
     u_atlas: Option<glow::NativeUniformLocation>,
+    u_outline: Option<glow::NativeUniformLocation>,
+    u_ostep: Option<glow::NativeUniformLocation>,
+    u_odrop: Option<glow::NativeUniformLocation>,
     font: Font,
     /// Drawable glyphs keyed by (char, size_px) → placement; `None` = a blank glyph.
     glyphs: RefCell<HashMap<(char, u32), Option<AtlasGlyph>>>,
@@ -147,7 +207,7 @@ impl TextRenderer {
             .map_err(|e| anyhow!("parse font: {e}"))?;
 
         let program = make_program(gl, BLIT_VS, GLYPH_FS)?;
-        let (atlas, u_screen, u_rect, u_uv, u_color, u_atlas) = unsafe {
+        let (atlas, u_screen, u_rect, u_uv, u_color, u_atlas, u_outline, u_ostep, u_odrop) = unsafe {
             let atlas = gl.create_texture().map_err(|e| anyhow!("text atlas texture: {e}"))?;
             gl.bind_texture(glow::TEXTURE_2D, Some(atlas));
             gl.pixel_store_i32(glow::UNPACK_ALIGNMENT, 1); // single-channel rows
@@ -169,6 +229,9 @@ impl TextRenderer {
                 gl.get_uniform_location(program, "u_uv"),
                 gl.get_uniform_location(program, "u_color"),
                 gl.get_uniform_location(program, "u_atlas"),
+                gl.get_uniform_location(program, "u_outline"),
+                gl.get_uniform_location(program, "u_ostep"),
+                gl.get_uniform_location(program, "u_odrop"),
             )
         };
         Ok(TextRenderer {
@@ -176,7 +239,7 @@ impl TextRenderer {
             atlas,
             atlas_w: Cell::new(ATLAS_START),
             atlas_h: Cell::new(ATLAS_START),
-            u_screen, u_rect, u_uv, u_color, u_atlas,
+            u_screen, u_rect, u_uv, u_color, u_atlas, u_outline, u_ostep, u_odrop,
             font,
             glyphs: RefCell::new(HashMap::new()),
             advances: RefCell::new(HashMap::new()),
@@ -347,13 +410,14 @@ impl TextRenderer {
         true
     }
 
-    /// Draw `s` with its top-left at (`x`, `y`), text `px` tall, in `color` (straight
-    /// RGBA). Assumes the unit-quad VAO is bound and premultiplied-alpha blending is
-    /// enabled (as in `present_windows`). The requested `px` is rounded to the nearest
-    /// integer for rasterisation + layout, so glyphs draw at their native pixel size.
-    /// Glyphs are rasterised + atlased on first use; missing/blank glyphs advance the pen.
+    /// Core single-pass renderer: draw `s` at (`x`, `y`), `px` tall, in `fill` (straight
+    /// RGBA; the shader premultiplies). If `outline = Some((colour, px))`, `GLYPH_FS` also
+    /// paints an outline of that width **in the same pass** (radius clamped to `PAD` so the
+    /// dilation taps stay in the glyph's cell); `odrop` masks it to the bottom-right only
+    /// (drop-shadow) instead of all-around. Assumes the unit-quad VAO is bound +
+    /// premultiplied blending on; `px` is rounded to the native glyph size.
     #[allow(clippy::too_many_arguments)]
-    pub fn draw(
+    fn draw_run(
         &self,
         gl: &glow::Context,
         screen_w: i32,
@@ -361,24 +425,39 @@ impl TextRenderer {
         x: f32,
         y: f32,
         px: f32,
-        color: [f32; 4],
+        fill: [f32; 4],
+        outline: Option<([f32; 4], f32)>,
+        odrop: bool,
         s: &str,
     ) {
         let sz = px_key(px);
+        // Outline colour + radius (px). 1 screen px ≈ 1 atlas texel (native raster);
+        // clamp to PAD so the taps stay inside the glyph's padded cell. `r == 0` ⇒ none.
+        let (ocol, r) = match outline {
+            Some((oc, opx)) if oc[3] > 0.0 && opx > 0.0 => (oc, opx.min(PAD as f32)),
+            _ => ([0.0; 4], 0.0),
+        };
         unsafe {
             gl.use_program(Some(self.program));
             gl.active_texture(glow::TEXTURE0);
             gl.bind_texture(glow::TEXTURE_2D, Some(self.atlas));
             gl.uniform_1_i32(self.u_atlas.as_ref(), 0);
             gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
-            gl.uniform_4_f32(self.u_color.as_ref(), color[0], color[1], color[2], color[3]);
+            gl.uniform_4_f32(self.u_color.as_ref(), fill[0], fill[1], fill[2], fill[3]);
+            gl.uniform_4_f32(self.u_outline.as_ref(), ocol[0], ocol[1], ocol[2], ocol[3]);
+            gl.uniform_1_i32(self.u_odrop.as_ref(), odrop as i32);
             let mut pen = x;
             for ch in s.chars() {
                 let adv = self.advance(ch, sz);
                 if let Some(g) = self.glyph(gl, ch, sz) {
-                    // A grow() during glyph() may have re-specced the atlas texture;
-                    // re-bind so this draw samples the current one.
+                    // A grow() during glyph() may have re-specced the atlas + changed its
+                    // dims; re-bind and refresh the UV-space outline radius per glyph.
                     gl.bind_texture(glow::TEXTURE_2D, Some(self.atlas));
+                    gl.uniform_2_f32(
+                        self.u_ostep.as_ref(),
+                        r / self.atlas_w.get() as f32,
+                        r / self.atlas_h.get() as f32,
+                    );
                     gl.uniform_4_f32(self.u_uv.as_ref(), g.uv[0], g.uv[1], g.uv[2], g.uv[3]);
                     gl.uniform_4_f32(self.u_rect.as_ref(), pen + g.off_x, y + g.off_y, g.pw, g.ph);
                     gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
@@ -389,8 +468,8 @@ impl TextRenderer {
     }
 
     /// Draw `s` at (`x`, `y`) with an optional outline + drop-shadow (see [`TextStyle`]);
-    /// `fill` is the main glyph colour. Layered back-to-front: shadow, outline, fill.
-    /// `TextStyle::NONE` ⇒ a plain `draw`. Same VAO / premultiplied-blend assumptions.
+    /// `fill` is the main glyph colour. The outline is one in-shader pass; the shadow is a
+    /// single offset pass behind it. `TextStyle::NONE` ⇒ a plain `draw`.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_styled(
         &self,
@@ -404,17 +483,17 @@ impl TextRenderer {
         style: &TextStyle,
         s: &str,
     ) {
-        // Drop-shadow behind everything (one offset pass).
+        // Drop-shadow behind everything: one plain offset pass in the shadow colour
+        // (no outline of its own, so its direction is irrelevant).
         if style.shadow_px > 0.0 && style.shadow_color[3] > 0.0 {
-            self.draw(gl, screen_w, screen_h, x + style.shadow_px, y + style.shadow_px, px, style.shadow_color, s);
+            self.draw_run(
+                gl, screen_w, screen_h,
+                x + style.shadow_px, y + style.shadow_px, px, style.shadow_color, None, false, s,
+            );
         }
-        // All-around outline: eight offset passes at `outline_px`.
-        if style.outline_px > 0.0 && style.outline_color[3] > 0.0 {
-            for (dx, dy) in OUTLINE_OFFSETS {
-                self.draw(gl, screen_w, screen_h, x + dx * style.outline_px, y + dy * style.outline_px, px, style.outline_color, s);
-            }
-        }
-        // Fill on top.
-        self.draw(gl, screen_w, screen_h, x, y, px, fill, s);
+        // Fill + outline in a single pass (GLYPH_FS dilation), all-around or bottom-right.
+        let outline = (style.outline_px > 0.0 && style.outline_color[3] > 0.0)
+            .then_some((style.outline_color, style.outline_px));
+        self.draw_run(gl, screen_w, screen_h, x, y, px, fill, outline, style.outline_drop, s);
     }
 }

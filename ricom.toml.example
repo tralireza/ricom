@@ -160,9 +160,13 @@ path = "/usr/share/fonts/liberation-mono/LiberationMono-Regular.ttf"  # any .ttf
 size = 1.0               # global text size multiplier, on top of screen-height + [osd]/[fps] scale
 # Outline + drop-shadow so text stays legible over any backdrop without a box. The
 # STYLE is defined here; each surface opts in via [osd] outline / [fps] outline.
-outline_width = 1.5              # all-around outline width in px at 1080p (scales); 0 = none
+outline_width = 1.5              # outline width in px at 1080p (scales); 0 = none
 outline_color = [0.0, 0.0, 0.0]  # outline colour (RGB)
-shadow_offset = 0.0              # drop-shadow offset in px, down-right (scales); 0 = none
+outline_style = "around"         # "around" = ring the glyph on all sides; "drop" = mask the
+                                 # outline band to the bottom-right only, so it reads as a
+                                 # tight drop-shadow hugging the glyph (in-shader, one pass)
+shadow_offset = 0.0              # OFFSET drop-shadow: stamp a shifted copy down-right (px,
+                                 # scales); 0 = none. Independent of the "drop" outline above
 shadow_color = [0.0, 0.0, 0.0]   # drop-shadow colour (RGB)
 # Note: colour-emoji (COLR/bitmap) glyphs are not rendered; complex shaping
 # (ligatures/BiDi/CJK cluster shaping) is not applied — glyphs map per codepoint.

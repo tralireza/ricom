@@ -271,6 +271,10 @@ pub struct Font {
     pub shadow_offset: f32,
     /// Text drop-shadow colour (RGB, `0.0..=1.0`).
     pub shadow_color: [f32; 3],
+    /// Outline direction: `"around"` (default) rings the glyph on all sides; `"drop"`
+    /// masks it to the bottom-right only, so the `outline_width` band reads as a tight
+    /// drop-shadow that hugs the glyph. Unknown values fall back to `"around"`.
+    pub outline_style: String,
 }
 
 /// Burn / dissolve close animation: the window disintegrates on animated noise
@@ -697,6 +701,7 @@ impl Default for Font {
             outline_color: [0.0, 0.0, 0.0],
             shadow_offset: 0.0,
             shadow_color: [0.0, 0.0, 0.0],
+            outline_style: "around".to_string(),
         }
     }
 }
@@ -907,6 +912,7 @@ impl Config {
         chg!("font.outline_color", prev.font.outline_color, self.font.outline_color);
         chg!("font.shadow_offset", prev.font.shadow_offset, self.font.shadow_offset);
         chg!("font.shadow_color", prev.font.shadow_color, self.font.shadow_color);
+        chg!("font.outline_style", prev.font.outline_style, self.font.outline_style);
         if prev.rules != self.rules {
             out.push(format!("rules {}→{}", prev.rules.len(), self.rules.len()));
         }
@@ -1000,6 +1006,12 @@ impl Config {
         // pure (no filesystem probing in `validate`).
         if self.font.path.is_empty() {
             warns.push("font.path is empty — on-screen text (HUD/OSD/notify) is disabled".to_string());
+        }
+        if !matches!(self.font.outline_style.as_str(), "around" | "drop") {
+            warns.push(format!(
+                "font.outline_style: unknown value {:?} (using \"around\")",
+                self.font.outline_style
+            ));
         }
         for (i, rule) in self.rules.iter().enumerate() {
             if let Some(s) = &rule.open {

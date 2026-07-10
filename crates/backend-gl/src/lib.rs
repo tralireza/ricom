@@ -439,6 +439,9 @@ pub struct RenderParams {
     pub text_shadow: f32,
     /// Text drop-shadow colour (RGB).
     pub text_shadow_color: [f32; 3],
+    /// Outline direction: `false` = all-around (rings the glyph); `true` = drop, masking
+    /// the `text_outline` band to the bottom-right only so it reads as a tight drop-shadow.
+    pub text_outline_drop: bool,
 }
 
 impl Default for RenderParams {
@@ -459,6 +462,7 @@ impl Default for RenderParams {
             text_outline_color: [0.0, 0.0, 0.0],
             text_shadow: 0.0,
             text_shadow_color: [0.0, 0.0, 0.0],
+            text_outline_drop: false,
         }
     }
 }
@@ -1518,6 +1522,7 @@ impl GlBackend {
         text::TextStyle {
             outline_px: self.render.text_outline * s,
             outline_color: [oc[0], oc[1], oc[2], alpha],
+            outline_drop: self.render.text_outline_drop,
             shadow_px: self.render.text_shadow * s,
             shadow_color: [sc[0], sc[1], sc[2], alpha],
         }
