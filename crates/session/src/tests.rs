@@ -46,10 +46,42 @@ fn random_corner_differs_and_covers_others() {
     let others = [TopRight, BottomLeft, BottomRight];
     let mut hits = [false; 3];
     for _ in 0..300 {
-        let c = random_corner(start, &mut rng);
+        let c = random_corner(start, &[], &mut rng).expect("a corner is always free with no avoid");
         assert_ne!(c, start, "auto-hop never picks the current corner");
         let i = others.iter().position(|&o| o == c).expect("one of the other three");
         hits[i] = true;
     }
     assert!(hits.iter().all(|&h| h), "all three other corners get picked");
+}
+
+#[test]
+fn random_corner_respects_avoid() {
+    use HudCorner::*;
+    let mut rng = 0x1234_5678_9abc_def0u64;
+    // From top-left, forbid bottom-right → only top-right / bottom-left remain.
+    for _ in 0..300 {
+        let c = random_corner(TopLeft, &[BottomRight], &mut rng).expect("two corners free");
+        assert!(matches!(c, TopRight | BottomLeft), "never the current or an avoided corner");
+    }
+}
+
+#[test]
+fn random_corner_moves_off_a_forbidden_current() {
+    use HudCorner::*;
+    // Parked on bottom-left while bottom-left is avoided → still hops away.
+    let mut rng = 0xdead_beef_cafe_0001u64;
+    for _ in 0..100 {
+        let c = random_corner(BottomLeft, &[BottomLeft], &mut rng).expect("three corners free");
+        assert_ne!(c, BottomLeft);
+    }
+}
+
+#[test]
+fn random_corner_none_when_no_corner_is_free() {
+    use HudCorner::*;
+    let mut rng = 0x0f0f_0f0f_0f0f_0f0fu64;
+    // All four avoided → nowhere to go.
+    assert!(random_corner(TopLeft, &[TopLeft, TopRight, BottomLeft, BottomRight], &mut rng).is_none());
+    // Current is the only non-avoided corner → stays put.
+    assert!(random_corner(TopRight, &[TopLeft, BottomLeft, BottomRight], &mut rng).is_none());
 }

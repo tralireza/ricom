@@ -84,15 +84,23 @@ fn log_config_warnings(cfg: &Config) {
     }
 }
 
+/// Strictly parse a corner string to [`HudCorner`]; `None` for anything
+/// unrecognised. Used for the `[fps] auto_move_avoid` list, where a typo must be
+/// dropped (and warned about by `config::validate`) rather than silently coerced.
+fn parse_corner(s: &str) -> Option<HudCorner> {
+    match s {
+        "top-left" => Some(HudCorner::TopLeft),
+        "top-right" => Some(HudCorner::TopRight),
+        "bottom-left" => Some(HudCorner::BottomLeft),
+        "bottom-right" => Some(HudCorner::BottomRight),
+        _ => None,
+    }
+}
+
 /// Map the config's corner string to the backend's [`HudCorner`] (defaults to
 /// top-right for anything unrecognised).
 fn hud_corner(s: &str) -> HudCorner {
-    match s {
-        "top-left" => HudCorner::TopLeft,
-        "bottom-left" => HudCorner::BottomLeft,
-        "bottom-right" => HudCorner::BottomRight,
-        _ => HudCorner::TopRight,
-    }
+    parse_corner(s).unwrap_or(HudCorner::TopRight)
 }
 
 /// Does an outer rectangle (position, size, uniform border) cover the whole root?
@@ -325,16 +333,19 @@ fn xorshift64(state: &mut u64) -> u64 {
     x
 }
 
-/// A random corner *different* from `current` (uniform over the other three).
-fn random_corner(current: HudCorner, rng: &mut u64) -> HudCorner {
+/// A random corner for an auto-hop: uniform over the corners that are neither
+/// `current` nor in `avoid`. `None` when nowhere is eligible — every corner is
+/// avoided, or the only non-avoided corner is where the HUD already sits — so the
+/// caller leaves the HUD put.
+fn random_corner(current: HudCorner, avoid: &[HudCorner], rng: &mut u64) -> Option<HudCorner> {
     use HudCorner::*;
-    let others: [HudCorner; 3] = match current {
-        TopLeft => [TopRight, BottomLeft, BottomRight],
-        TopRight => [TopLeft, BottomLeft, BottomRight],
-        BottomLeft => [TopLeft, TopRight, BottomRight],
-        BottomRight => [TopLeft, TopRight, BottomLeft],
-    };
-    others[(xorshift64(rng) % 3) as usize]
+    const ALL: [HudCorner; 4] = [TopLeft, TopRight, BottomLeft, BottomRight];
+    let cands: Vec<HudCorner> =
+        ALL.iter().copied().filter(|c| *c != current && !avoid.contains(c)).collect();
+    if cands.is_empty() {
+        return None;
+    }
+    Some(cands[(xorshift64(rng) % cands.len() as u64) as usize])
 }
 
 /// A non-zero PRNG seed from the OS-randomised `RandomState` (no time / `rand` dep).
@@ -1945,7 +1956,11 @@ impl App {
         if !self.show_fps {
             return;
         }
-        let to = random_corner(self.hud_corner, &mut self.rng);
+        let avoid: Vec<HudCorner> =
+            self.config.fps.auto_move_avoid.iter().filter_map(|s| parse_corner(s)).collect();
+        let Some(to) = random_corner(self.hud_corner, &avoid, &mut self.rng) else {
+            return; // every corner is off-limits — leave the HUD where it is
+        };
         let dur = self.config.fps.auto_move_duration.max(0.05);
         self.hud_move = Some(HudMove { from: self.hud_corner, to, t: 0.0, dur });
         self.ensure_frame_timer();

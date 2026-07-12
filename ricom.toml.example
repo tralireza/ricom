@@ -142,11 +142,18 @@ ember_hot  = [0.75, 0.22, 0.04] # hottest leading-edge colour; raise both for a 
 enabled = false          # start with the on-demand FPS HUD visible (also toggles live via the hotkey)
 hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + arrow keys move it
                          # between corners live (e.g. Super+Shift+Left)
-corner = "bottom-left"   # initial corner: top-left | top-right | bottom-left | bottom-right
+corner = "top-right"     # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true             # draw the rolling frame-time graph under the numbers
 scale = 1.0              # size multiplier on top of automatic screen-height scaling (4K = 2x)
 outline = false          # outline the HUD text (using the [font] outline/shadow style) so it
                          # reads without the panel; false = plain text (panel gives contrast)
+auto_move = true         # every auto_move_interval seconds the HUD fade-slides to a random
+                         # different corner (live toggle: ricomctl fps auto on|off|toggle)
+auto_move_interval = 300.0        # seconds between auto-hops (300 = 5 min)
+auto_move_duration = 0.6          # fade-slide duration of one hop, in seconds
+auto_move_avoid = ["bottom-left"] # corners the auto-hop must NEVER land on (destinations only —
+                         # the `corner` above may still start here, then it hops away and won't
+                         # return). [] = all four in play; listing all four = auto-move never hops
 # The HUD also shows a 1m/5m/15m load block (fps + GPU render ms); the same
 # figures are logged on demand via  kill -USR1 $(pidof ricom)
 

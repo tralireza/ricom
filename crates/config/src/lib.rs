@@ -266,6 +266,12 @@ pub struct Fps {
     pub auto_move_interval: f64,
     /// Fade-slide duration of one auto-hop, in seconds (default `0.6`).
     pub auto_move_duration: f64,
+    /// Corners the auto-hop must never pick as a *destination*, e.g.
+    /// `["top-left", "bottom-right"]`. Empty (the code default) = all four corners
+    /// are in play. Only affects auto-move: the initial `corner` and manual arrow
+    /// moves may still land on a listed corner — the next auto-hop then moves it
+    /// off and won't return. If all four are listed, auto-move never hops.
+    pub auto_move_avoid: Vec<String>,
 }
 
 /// On-screen text font. ricom rasterises glyphs at runtime from this TrueType
@@ -799,13 +805,14 @@ impl Default for Fps {
         Fps {
             enabled: false,
             hotkey: "Super+Shift+F".to_string(),
-            corner: "bottom-left".to_string(),
+            corner: "top-right".to_string(),
             graph: true,
             scale: 1.0,
             outline: false,
             auto_move: true,
             auto_move_interval: 300.0,
             auto_move_duration: 0.6,
+            auto_move_avoid: Vec::new(),
         }
     }
 }
@@ -915,6 +922,7 @@ impl Config {
         chg!("fps.graph", prev.fps.graph, self.fps.graph);
         chg!("fps.scale", prev.fps.scale, self.fps.scale);
         chg!("fps.outline", prev.fps.outline, self.fps.outline);
+        chg!("fps.auto_move_avoid", prev.fps.auto_move_avoid, self.fps.auto_move_avoid);
         chg!("osd.enabled", prev.osd.enabled, self.osd.enabled);
         chg!("osd.duration", prev.osd.duration, self.osd.duration);
         chg!("osd.scale", prev.osd.scale, self.osd.scale);
@@ -1051,6 +1059,20 @@ impl Config {
             {
                 warns.push(format!("rule[{i}].focus: unknown effect {f:?} (no focus animation)"));
             }
+        }
+        // FPS auto-move avoid list: flag unknown corner names, and warn if every
+        // corner is listed (auto-move would then have nowhere to hop).
+        const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
+        for c in &self.fps.auto_move_avoid {
+            if !CORNERS.contains(&c.as_str()) {
+                warns.push(format!("fps.auto_move_avoid: unknown corner {c:?} (ignored)"));
+            }
+        }
+        if CORNERS.iter().all(|c| self.fps.auto_move_avoid.iter().any(|a| a == c)) {
+            warns.push(
+                "fps.auto_move_avoid lists all four corners — the HUD auto-move will never hop"
+                    .to_string(),
+            );
         }
         warns
     }

@@ -38,9 +38,10 @@ fn defaults_match_compiled_behaviour() {
     assert_eq!(c.dim.focus, FocusSource::Ewmh);
     assert!(!c.fps.enabled);
     assert_eq!(c.fps.hotkey, "Super+Shift+F");
-    assert_eq!(c.fps.corner, "bottom-left");
+    assert_eq!(c.fps.corner, "top-right");
     assert!(c.fps.graph);
     assert_eq!(c.fps.scale, 1.0);
+    assert!(c.fps.auto_move_avoid.is_empty()); // code default: no forbidden corners
     assert_eq!(c.default_opacity, 1.0);
     assert_eq!(c.anim.scale_from, 0.85);
     assert_eq!((c.anim.wobble_spring, c.anim.wobble_friction), (350.0, 14.0));
@@ -61,6 +62,29 @@ fn defaults_match_compiled_behaviour() {
     assert_eq!(c.burn.ember_cool, [0.28, 0.02, 0.0]);
     assert_eq!(c.burn.ember_hot, [0.75, 0.22, 0.04]);
     assert!(c.rules.is_empty());
+}
+
+#[test]
+fn fps_auto_move_avoid_parse_and_validate() {
+    // Code default is empty; the shipped ricom.toml carries the recommended list.
+    assert!(Config::default().fps.auto_move_avoid.is_empty());
+
+    // Parses a list, preserving order and values; no avoid-related warning.
+    let c: Config =
+        toml::from_str("[fps]\nauto_move_avoid = [\"top-left\", \"bottom-right\"]\n").unwrap();
+    assert_eq!(c.fps.auto_move_avoid, vec!["top-left".to_string(), "bottom-right".to_string()]);
+    assert!(!c.validate().iter().any(|w| w.contains("auto_move_avoid")));
+
+    // Unknown corner name is flagged (but tolerated at runtime).
+    let c: Config = toml::from_str("[fps]\nauto_move_avoid = [\"middle\"]\n").unwrap();
+    assert!(c.validate().iter().any(|w| w.contains("auto_move_avoid") && w.contains("middle")));
+
+    // Listing all four warns that auto-move can never hop.
+    let c: Config = toml::from_str(
+        "[fps]\nauto_move_avoid = [\"top-left\", \"top-right\", \"bottom-left\", \"bottom-right\"]\n",
+    )
+    .unwrap();
+    assert!(c.validate().iter().any(|w| w.contains("all four corners")));
 }
 
 #[test]
