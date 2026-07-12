@@ -111,6 +111,7 @@ fn effective_params_resolve_from_anim_scalars() {
     assert_eq!(AnimSel::Preset("pop".into()).label(), "pop");
     let spec = anim_spec_from("drain", &[("turns".into(), "3".into())]).unwrap();
     assert_eq!(AnimSel::Spec(spec).label(), "drain");
+    assert_eq!(AnimSpec::default().label(), "none"); // empty spec
 }
 
 #[test]

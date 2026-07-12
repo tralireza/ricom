@@ -583,7 +583,20 @@ impl AnimSel {
         match self {
             AnimSel::Preset(name) => name.clone(),
             AnimSel::Spec(spec) if spec.blocks.is_empty() => "none".to_string(),
-            AnimSel::Spec(spec) => spec.blocks.iter().map(|b| b.name()).collect::<Vec<_>>().join("+"),
+            AnimSel::Spec(spec) => spec.label(),
+        }
+    }
+}
+
+impl AnimSpec {
+    /// Short display label: the block names joined (e.g. `opacity+scale`), or
+    /// `none` when empty. Used for `inspect`'s per-window (rule) animation view,
+    /// where selections are already expanded to specs.
+    pub fn label(&self) -> String {
+        if self.blocks.is_empty() {
+            "none".to_string()
+        } else {
+            self.blocks.iter().map(|b| b.name()).collect::<Vec<_>>().join("+")
         }
     }
 }

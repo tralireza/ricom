@@ -326,7 +326,7 @@ fn print_reply(reply: &Reply, json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Reply::Window(w) => {
-            print_windows(std::slice::from_ref(w));
+            print_window_detail(w);
             ExitCode::SUCCESS
         }
         Reply::Windows(ws) => {
@@ -362,6 +362,19 @@ fn print_windows(ws: &[proto::WinInfo]) {
             geom,
             w.title, // full title — it's the last column, so no alignment concern
         );
+    }
+}
+
+/// Print one window in detail: the compact row, plus (for `inspect`) its per-window
+/// effective animation with `(rule)` marking any category a `[[rule]]` overrides.
+fn print_window_detail(w: &proto::WinInfo) {
+    print_windows(std::slice::from_ref(w));
+    if let Some(a) = &w.anim {
+        println!("\nanim (effect per transition; (rule) = per-window override):");
+        for (cat, val) in [("open", &a.open), ("close", &a.close), ("move", &a.r#move), ("focus", &a.focus)] {
+            let tag = if a.overridden.iter().any(|o| o == cat) { "  (rule)" } else { "" };
+            println!("  {cat:<6} {val}{tag}");
+        }
     }
 }
 

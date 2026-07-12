@@ -82,6 +82,14 @@ fn reply_roundtrip() {
         height: 480,
         opacity: 0.8,
         closing: false,
+        anim: None,
+    };
+    let anim = AnimInfo {
+        event: "close".into(),
+        effect: "drain".into(),
+        params: vec![("turns".into(), "3".into())],
+        default_effect: "fade".into(),
+        default_params: vec![("duration".into(), "0.2".into())],
     };
     for r in [
         Reply::Ok,
@@ -89,6 +97,7 @@ fn reply_roundtrip() {
         Reply::Error("no such window".into()),
         Reply::Window(info.clone()),
         Reply::Windows(vec![info]),
+        Reply::Anims(vec![anim]),
     ] {
         let back: Reply = decode(&encode(&r)).unwrap();
         assert_eq!(r, back);

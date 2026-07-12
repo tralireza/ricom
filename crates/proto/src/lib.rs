@@ -225,6 +225,25 @@ pub struct WinInfo {
     /// Effective composited opacity now (`fade * dim`).
     pub opacity: f64,
     pub closing: bool,
+    /// Per-window effective animation + which categories a `[[rule]]` overrides.
+    /// `Some` only for `Inspect`; `None` for `List` (kept lean). Boxed so the common
+    /// `List` snapshot stays small (keeps `Reply::Window` off the large-variant path).
+    #[serde(default)]
+    pub anim: Option<Box<WinAnim>>,
+}
+
+/// Per-window effective animation, as reported by `Inspect`: the effect label for
+/// each transition, and which categories a matching `[[rule]]` overrides (the rest
+/// fall back to the global `[anim]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct WinAnim {
+    pub open: String,
+    pub close: String,
+    #[serde(rename = "move")]
+    pub r#move: String,
+    pub focus: String,
+    /// Which of `open`/`close`/`move`/`focus` a rule overrides.
+    pub overridden: Vec<String>,
 }
 
 /// One transition category's animation, as reported by `GetAnim`: the current

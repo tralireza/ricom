@@ -661,6 +661,7 @@ fn win_info(w: &Win, id: Option<&WinIdentity>) -> proto::WinInfo {
         height: w.height as u32,
         opacity: w.fade.current() * w.dim.current(),
         closing: w.closing,
+        anim: None, // filled in by `Inspect` only (see `win_anim`); `List` stays lean
     }
 }
 
@@ -1228,7 +1229,8 @@ impl App {
                 }
                 self.ensure_identity(win); // heal a startup-adopted blank before reporting
                 let w = self.windows.get(win).expect("existence checked above");
-                let info = win_info(w, self.identities.get(&win));
+                let mut info = win_info(w, self.identities.get(&win));
+                info.anim = Some(Box::new(self.win_anim(win))); // per-window rules (inspect only)
                 if self.config.osd.enabled {
                     let cls: String = info.class.chars().take(16).collect();
                     self.show_osd(
@@ -1537,6 +1539,46 @@ impl App {
             default_params: config::focus_params(&def.focus, &def),
         });
         proto::Reply::Anims(anims)
+    }
+
+    /// Per-window effective animation for `ricomctl inspect` — each transition's
+    /// effect label, with a matching `[[rule]]` override taking precedence over the
+    /// global `[anim]`. `overridden` lists the categories a rule set (rule specs are
+    /// already expanded, so a preset override shows its block names).
+    #[cfg(unix)]
+    fn win_anim(&self, id: WindowId) -> proto::WinAnim {
+        let rr = self.resolve_rules(id);
+        let g = &self.config.anim;
+        let mut overridden = Vec::new();
+        let open = match &rr.open {
+            Some(s) => {
+                overridden.push("open".to_string());
+                s.label()
+            }
+            None => g.open.label(),
+        };
+        let close = match &rr.close {
+            Some(s) => {
+                overridden.push("close".to_string());
+                s.label()
+            }
+            None => g.close.label(),
+        };
+        let r#move = match &rr.r#move {
+            Some(s) => {
+                overridden.push("move".to_string());
+                s.label()
+            }
+            None => g.r#move.label(),
+        };
+        let focus = match &rr.focus {
+            Some(f) => {
+                overridden.push("focus".to_string());
+                f.clone()
+            }
+            None => g.focus.clone(),
+        };
+        proto::WinAnim { open, close, r#move, focus, overridden }
     }
 
     /// The focus-triggered effect for `id`: a matching rule's `focus`, else the
