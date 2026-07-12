@@ -31,6 +31,8 @@ COMMANDS:
     unredir <state>   Fullscreen compositor bypass: on (allow, perf default) |
                       off (always composite, so effects show) | toggle
     list              List tracked windows
+    get               Show each transition's effect + params (open|close|move|focus),
+                      current vs the compiled default
     inspect <win>     Show one window (id: decimal or 0x hex)
     notify <text> [s] Show an on-screen message for [s] seconds (default: config)
     version           Show ricom's version (on-screen toast + stdout)
@@ -46,6 +48,7 @@ COMMANDS:
 
 EXAMPLES:
     ricomctl list
+    ricomctl get
     ricomctl inspect 0x1a00007
     ricomctl notify \"hello ricom\" 3
     ricomctl animate 0x1a00007 spin
@@ -119,6 +122,7 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
         "ping" => Command::Ping,
         "reload" => Command::Reload,
         "list" => Command::List,
+        "get" => Command::GetAnim,
         "version" => Command::Version,
         "quit" => Command::Quit,
         "fps" => match a.next() {
@@ -329,6 +333,10 @@ fn print_reply(reply: &Reply, json: bool) -> ExitCode {
             print_windows(ws);
             ExitCode::SUCCESS
         }
+        Reply::Anims(a) => {
+            print_anims(a);
+            ExitCode::SUCCESS
+        }
         Reply::Error(e) => {
             eprintln!("ricomctl: {e}");
             ExitCode::from(1)
@@ -354,6 +362,31 @@ fn print_windows(ws: &[proto::WinInfo]) {
             geom,
             w.title, // full title — it's the last column, so no alignment concern
         );
+    }
+}
+
+/// Print per-event animations as an aligned table: current effect + params, and the
+/// compiled default (or `(default)` when the current matches it).
+fn print_anims(anims: &[proto::AnimInfo]) {
+    println!("{:<6} {:<36} DEFAULT", "EVENT", "CURRENT");
+    for a in anims {
+        let cur = fmt_effect(&a.effect, &a.params);
+        let def = if a.effect == a.default_effect && a.params == a.default_params {
+            "(default)".to_string()
+        } else {
+            fmt_effect(&a.default_effect, &a.default_params)
+        };
+        println!("{:<6} {cur:<36} {def}", a.event);
+    }
+}
+
+/// `pop  duration=0.2 from=0.85` — an effect label followed by its `key=value` params.
+fn fmt_effect(effect: &str, params: &[(String, String)]) -> String {
+    if params.is_empty() {
+        effect.to_string()
+    } else {
+        let ps = params.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(" ");
+        format!("{effect}  {ps}")
     }
 }
 

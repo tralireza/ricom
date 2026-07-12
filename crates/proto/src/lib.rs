@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Wire-protocol version. Bump on any incompatible `Command`/`Reply` change.
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// Raw X window id (mirrors `wm::WindowId`).
 pub type WinId = u32;
@@ -70,6 +70,10 @@ pub enum Command {
         #[serde(default)]
         params: Vec<(String, String)>,
     },
+    /// Report the current effect + resolved params for each transition category
+    /// (`open`/`close`/`move`/`focus`), alongside the compiled defaults → `Reply::Anims`.
+    /// Reflects live `SetAnim` overrides (a `Reload`/SIGHUP reverts to the config).
+    GetAnim,
     /// Toggle unredir-if-possible at runtime (session-only; a `Reload`/SIGHUP reverts
     /// to the config). `enable = Some(true)` allows a lone fullscreen window to bypass
     /// the compositor (the perf default); `Some(false)` forces compositing even at
@@ -199,6 +203,8 @@ pub enum Reply {
     Windows(Vec<WinInfo>),
     /// One window (for `Inspect`).
     Window(WinInfo),
+    /// Per-event animation report (for `GetAnim`).
+    Anims(Vec<AnimInfo>),
     /// Command failed; the string explains why.
     Error(String),
 }
@@ -219,6 +225,24 @@ pub struct WinInfo {
     /// Effective composited opacity now (`fade * dim`).
     pub opacity: f64,
     pub closing: bool,
+}
+
+/// One transition category's animation, as reported by `GetAnim`: the current
+/// effect + resolved params (`[anim]` scalar defaults filled in), plus the
+/// compiled default for comparison. All values are pre-formatted strings so
+/// `proto` stays dependency-free.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnimInfo {
+    /// `"open"` | `"close"` | `"move"` | `"focus"`.
+    pub event: String,
+    /// Current effect label (preset name, or composed block names).
+    pub effect: String,
+    /// Current resolved params as `(key, value)` pairs (e.g. `("duration", "0.2")`).
+    pub params: Vec<(String, String)>,
+    /// Compiled-default effect label.
+    pub default_effect: String,
+    /// Compiled-default resolved params.
+    pub default_params: Vec<(String, String)>,
 }
 
 /// Encode a value as one NDJSON line (trailing `\n`).

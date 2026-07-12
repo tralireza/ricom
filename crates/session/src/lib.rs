@@ -1262,6 +1262,7 @@ impl App {
             }
             C::Animate { win, effect, params } => self.animate_window(win, &effect, &params),
             C::SetAnim { category, effect, params } => self.set_anim(&category, &effect, &params),
+            C::GetAnim => self.get_anim(),
             C::Unredir { enable } => self.set_unredir(enable),
             C::Font { path, size } => self.set_font_cmd(path, size),
             C::Quit => {
@@ -1505,6 +1506,37 @@ impl App {
             self.show_osd(format!(">> {category} = {effect}"), self.config.osd.duration.min(1.2), OSD_ACK);
         }
         proto::Reply::Ok
+    }
+
+    /// `ricomctl get` — report the current + compiled-default effect & resolved
+    /// params for each transition category. Reflects live `set` overrides (they
+    /// mutate `self.config.anim`); a `reload`/SIGHUP reverts to the config file.
+    #[cfg(unix)]
+    fn get_anim(&self) -> proto::Reply {
+        let cur = &self.config.anim;
+        let def = config::Anim::default();
+        let mut anims = Vec::with_capacity(4);
+        for (event, c, d) in [
+            ("open", &cur.open, &def.open),
+            ("close", &cur.close, &def.close),
+            ("move", &cur.r#move, &def.r#move),
+        ] {
+            anims.push(proto::AnimInfo {
+                event: event.to_string(),
+                effect: c.label(),
+                params: config::effective_params(c, cur),
+                default_effect: d.label(),
+                default_params: config::effective_params(d, &def),
+            });
+        }
+        anims.push(proto::AnimInfo {
+            event: "focus".to_string(),
+            effect: cur.focus.clone(),
+            params: config::focus_params(&cur.focus, cur),
+            default_effect: def.focus.clone(),
+            default_params: config::focus_params(&def.focus, &def),
+        });
+        proto::Reply::Anims(anims)
     }
 
     /// The focus-triggered effect for `id`: a matching rule's `focus`, else the

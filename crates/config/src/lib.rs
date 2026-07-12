@@ -576,6 +576,99 @@ pub fn expand_sel(sel: &AnimSel) -> AnimSpec {
     }
 }
 
+impl AnimSel {
+    /// Short display name for `ricomctl get`: the preset name, or for an explicit
+    /// spec the block names joined (e.g. `scale+opacity`), or `none` when empty.
+    pub fn label(&self) -> String {
+        match self {
+            AnimSel::Preset(name) => name.clone(),
+            AnimSel::Spec(spec) if spec.blocks.is_empty() => "none".to_string(),
+            AnimSel::Spec(spec) => spec.blocks.iter().map(|b| b.name()).collect::<Vec<_>>().join("+"),
+        }
+    }
+}
+
+/// The effective, human-readable params for a selection — each block's params with
+/// `None` fields filled from the matching `[anim]` scalar (mirrors how the runtime
+/// resolves them), plus the category `duration` for eased effects. Defaults like
+/// `easing`/`axis` are omitted to keep the list to the *tunable* params. For
+/// `ricomctl get`.
+pub fn effective_params(sel: &AnimSel, anim: &Anim) -> Vec<(String, String)> {
+    spec_params(&expand_sel(sel), anim)
+}
+
+/// [`effective_params`] for a bare focus effect name (`[anim] focus` /
+/// `[[rule]] focus`): `none`/`reset`/unknown ⇒ no params.
+pub fn focus_params(effect: &str, anim: &Anim) -> Vec<(String, String)> {
+    match anim_spec_from(effect, &[]) {
+        Ok(spec) => spec_params(&spec, anim),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Resolve a spec's blocks to `(key, value)` param strings against the `[anim]`
+/// scalar defaults. Numbers are formatted in their native type so `f32` fields
+/// (e.g. `0.85`) print cleanly rather than as widened `f64`.
+fn spec_params(spec: &AnimSpec, anim: &Anim) -> Vec<(String, String)> {
+    use Primitive::*;
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut eased = false;
+    for b in &spec.blocks {
+        match b {
+            Opacity { .. } => eased = true,
+            Scale { from, .. } => {
+                eased = true;
+                out.push(("from".into(), from.map_or_else(|| format!("{}", anim.scale_from), |x| format!("{x}"))));
+            }
+            Translate { dx, dy, edge, .. } => {
+                eased = true;
+                if let Some(e) = edge {
+                    out.push(("edge".into(), format!("{e:?}").to_lowercase()));
+                } else {
+                    if *dx != 0.0 {
+                        out.push(("dx".into(), format!("{dx}")));
+                    }
+                    if *dy != 0.0 {
+                        out.push(("dy".into(), format!("{dy}")));
+                    }
+                }
+            }
+            Wobble { spring, friction } => {
+                out.push(("spring".into(), spring.map_or_else(|| format!("{}", anim.wobble_spring), |x| format!("{x}"))));
+                out.push(("friction".into(), friction.map_or_else(|| format!("{}", anim.wobble_friction), |x| format!("{x}"))));
+            }
+            Wave { amplitude, wavelength, speed, duration, .. } => {
+                out.push(("amplitude".into(), amplitude.map_or_else(|| format!("{}", anim.wave_amplitude), |x| format!("{x}"))));
+                out.push(("wavelength".into(), wavelength.map_or_else(|| format!("{}", anim.wave_wavelength), |x| format!("{x}"))));
+                out.push(("speed".into(), speed.map_or_else(|| format!("{}", anim.wave_speed), |x| format!("{x}"))));
+                out.push(("duration".into(), duration.map_or_else(|| format!("{}", anim.wave_duration), |x| format!("{x}"))));
+            }
+            Ripple { amplitude, wavelength, speed, r0, duration } => {
+                out.push(("amplitude".into(), amplitude.map_or_else(|| format!("{}", anim.ripple_amplitude), |x| format!("{x}"))));
+                out.push(("wavelength".into(), wavelength.map_or_else(|| format!("{}", anim.ripple_wavelength), |x| format!("{x}"))));
+                out.push(("speed".into(), speed.map_or_else(|| format!("{}", anim.ripple_speed), |x| format!("{x}"))));
+                out.push(("r0".into(), r0.map_or_else(|| format!("{}", anim.ripple_r0), |x| format!("{x}"))));
+                out.push(("duration".into(), duration.map_or_else(|| format!("{}", anim.ripple_duration), |x| format!("{x}"))));
+            }
+            Spin { degrees, .. } => {
+                eased = true;
+                out.push(("degrees".into(), degrees.map_or_else(|| "360".to_string(), |x| format!("{x}"))));
+            }
+            Drain { turns, duration } => {
+                out.push(("turns".into(), turns.map_or_else(|| format!("{}", anim.drain_turns), |x| format!("{x}"))));
+                out.push(("duration".into(), duration.map_or_else(|| format!("{}", anim.drain_duration), |x| format!("{x}"))));
+            }
+            Burn => {} // burn draws from the `[burn]` section, not `[anim]`
+        }
+    }
+    // The category duration applies to eased blocks (opacity/scale/translate/spin);
+    // wave/ripple/drain carry their own `duration` already, above.
+    if eased {
+        out.insert(0, ("duration".into(), format!("{}", spec.duration.unwrap_or(anim.duration))));
+    }
+    out
+}
+
 /// Build a one-block [`AnimSpec`] from an effect name + `(key, value)` params — the
 /// live-`set`-with-params path. Maps the high-level names to their `Primitive` block
 /// (`pop`/`stretch`/`unroll` → `scale` with an implicit `axis`; `slide` → `translate`;

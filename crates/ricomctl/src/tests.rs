@@ -14,6 +14,7 @@ fn commands_map() {
     assert_eq!(cmd(&["ping"]), Command::Ping);
     assert_eq!(cmd(&["reload"]), Command::Reload);
     assert_eq!(cmd(&["list"]), Command::List);
+    assert_eq!(cmd(&["get"]), Command::GetAnim);
     assert_eq!(cmd(&["fps", "toggle"]), Command::FpsToggle);
     assert_eq!(cmd(&["fps", "auto"]), Command::FpsAutoMove { enable: None });
     assert_eq!(cmd(&["fps", "auto", "on"]), Command::FpsAutoMove { enable: Some(true) });
@@ -70,6 +71,15 @@ fn commands_map() {
 }
 
 #[test]
+fn fmt_effect_joins_params() {
+    assert_eq!(fmt_effect("fade", &[]), "fade");
+    assert_eq!(
+        fmt_effect("pop", &[("duration".into(), "0.2".into()), ("from".into(), "0.85".into())]),
+        "pop  duration=0.2 from=0.85"
+    );
+}
+
+#[test]
 fn globals_before_command() {
     let cli = parse(&["--json", "--socket", "/tmp/x.sock", "list"]).unwrap();
     assert!(cli.json);
@@ -98,6 +108,7 @@ fn errors_are_usage() {
     assert!(matches!(parse(&["inspect"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["inspect", "zz"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["list", "extra"]), Err(Exit::Usage(_))));
+    assert!(matches!(parse(&["get", "extra"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["quit", "x"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["--socket"]), Err(Exit::Usage(_))));
     assert!(matches!(parse(&["notify"]), Err(Exit::Usage(_))));

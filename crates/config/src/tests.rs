@@ -88,6 +88,32 @@ fn fps_auto_move_avoid_parse_and_validate() {
 }
 
 #[test]
+fn effective_params_resolve_from_anim_scalars() {
+    let anim = Anim::default();
+    // pop = opacity + scale → category duration + scale.from (from [anim] scale_from).
+    let pop = effective_params(&AnimSel::Preset("pop".into()), &anim);
+    assert_eq!(pop, vec![("duration".into(), "0.2".into()), ("from".into(), "0.85".into())]);
+    // f32 scalars format cleanly — no 0.85000001 widening artifact.
+    assert!(pop.iter().all(|(_, v)| !v.contains("0000")), "clean float formatting: {pop:?}");
+    // fade = opacity → just the category duration.
+    assert_eq!(
+        effective_params(&AnimSel::Preset("fade".into()), &anim),
+        vec![("duration".into(), "0.2".into())]
+    );
+    // wobble = spring-driven → spring + friction, no duration.
+    assert_eq!(
+        effective_params(&AnimSel::Preset("wobble".into()), &anim),
+        vec![("spring".into(), "350".into()), ("friction".into(), "14".into())]
+    );
+    // focus "none" → no params.
+    assert!(focus_params("none", &anim).is_empty());
+    // labels: preset name; a composed spec joins its block names.
+    assert_eq!(AnimSel::Preset("pop".into()).label(), "pop");
+    let spec = anim_spec_from("drain", &[("turns".into(), "3".into())]).unwrap();
+    assert_eq!(AnimSel::Spec(spec).label(), "drain");
+}
+
+#[test]
 fn full_toml_parses() {
     let t = r#"
 unredir = false
