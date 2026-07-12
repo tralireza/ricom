@@ -87,9 +87,9 @@ CLOSE ────────────────────────�
             │    │  →  │  │   →      ╲      slides off the bottom
             └────┘     └──┘           ˎ
 
-  drain     ┌────┐     ┌╮  ╭┐        ·      content whirlpools into a
-            │    │  →  │ ╲╱ │  →      ◌     vanishing point, then fades
-            └────┘     └╯  ╰┘               (close / hide)
+  drain     ┌────┐     ┌╮  ╭┐        ·      content whirlpools + shrinks
+            │    │  →  │ ╲╱ │  →      ◌     into a vanishing point (no
+            └────┘     └╯  ╰┘               self-fade; close / hide)
 
 MOVE ──────────────────────────────────────────────────────────────
 
@@ -183,8 +183,9 @@ Working today:
   **open/close "pop"**, **wobbly-windows** (a spring-mesh move/resize jelly on a dedicated GL mesh path),
   **slide/drop** (an eased translate), **directional stretch/unroll** (a centre line growing to full
   width/height), **spin** (a GPU rotate-about-centre), a **traveling wave** (per-pixel sinusoidal crest), a
-  **radial ripple** (per-pixel water-refraction — a "drop in a lake"), and a **whirlpool drain** close
-  (content spirals into a vanishing point + fades). All ride `use-damage`, so an animating window
+  **radial ripple** (per-pixel water-refraction — a "drop in a lake"), and a **whirlpool drain** — content
+  spirals + shrinks into a point (no self-fade), as a destructive close *or* a non-destructive `animate`
+  that drains a live window to a tiny point and holds. All ride `use-damage`, so an animating window
   repaints only its moving path, not the whole screen.
 - **On-demand FPS HUD** — a global hotkey (`Super+Shift+F` by default) toggles an overlay showing
   FPS, frame-time, and a rolling frame-time graph, drawn with a general **text engine**
@@ -470,8 +471,9 @@ ricomctl fps toggle           # flip the FPS HUD
 ricomctl unredir off          # force compositing at fullscreen (on|off|toggle; effects show on fullscreen)
 ricomctl reload               # re-read the config (same as SIGHUP)
 ricomctl notify "hello" 3     # on-screen toast for 3s (top-center; effect via [osd] open/close)
-ricomctl animate 0x1a00007 spin  # play a transform on one window (spin|pop|stretch|unroll|slide|wobble|wave|ripple)
+ricomctl animate 0x1a00007 spin  # play a transform on one window (spin|pop|stretch|unroll|slide|wobble|wave|ripple|drain|reset)
 ricomctl animate 0x1a00007 ripple amplitude=0.12 duration=4  # override effect params (key=value; keys mirror [anim])
+ricomctl animate 0x1a00007 drain depth=1  # drain a live window to a point and hold; `animate <win> reset` restores
 ricomctl set close drain turns=3   # live-select a transition's effect + params (session-only; reload reverts)
 ricomctl effects              # schematic (t=0 → ½ → 1) + params for every effect
 ricomctl ping                 # liveness + version banner
@@ -496,7 +498,7 @@ layered primitives (opacity / scale / translate / wobble / wave / ripple / spin 
 transition (open / close / move) by a named preset or explicit block spec, globally or per-rule: pop,
 slide/drop, boing (spring-mesh spawn), wobbly-windows, burn dissolve, directional stretch/unroll,
 minimize (shrink-to-point genie), a GPU spin (rotate-about-centre), a traveling wave, a radial ripple
-(per-pixel refraction), and a whirlpool drain close;
+(per-pixel refraction), and a whirlpool drain (a destructive close, or a non-destructive `animate` drain-to-a-point);
 and **inactive-window dimming** (unfocused windows dim; focus from `_NET_ACTIVE_WINDOW` or X
 FocusChange, per-rule exemptible); and a **Unix-socket control channel** (`ricomctl`) —
 live `list` / `inspect` / `animate` / `set` / `effects` / `fps toggle` / `unredir` / `reload` over a per-`$DISPLAY` socket.

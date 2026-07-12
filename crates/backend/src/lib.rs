@@ -139,8 +139,9 @@ pub struct WaveParams {
 
 /// Drain / whirlpool close parameters for [`DRAIN_FS`]. When a [`WindowDraw`] carries
 /// `Some`, the backend draws it through the drain program (per-pixel; no shadow / frost
-/// / corner). A close driver like burn: `progress` 0→1 spirals the content into a
-/// vanishing point at `center` and fades it out; the window is reaped at `1`.
+/// / corner). A close driver like burn: `progress` 0→1 spirals + shrinks the content
+/// into a vanishing point at `center` (no self-fade — the shrink + out-of-bounds mask
+/// carry it away); the window is reaped at `1`.
 #[derive(Debug, Clone, Copy)]
 pub struct DrainParams {
     /// Drain centre in UV (`[0.5, 0.5]` = window centre).
@@ -149,6 +150,9 @@ pub struct DrainParams {
     pub progress: f32,
     /// Swirl rotations at full progress.
     pub turns: f32,
+    /// Turbulence amount (`u_turb`): how strongly the seeded noise makes the vortex
+    /// arms rotate unevenly. `0.0` = a smooth, uniform, deterministic spiral.
+    pub turbulence: f32,
     /// Per-window seed so each drain's rate-turbulence differs.
     pub seed: f32,
 }

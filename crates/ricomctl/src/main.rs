@@ -38,7 +38,7 @@ COMMANDS:
     version           Show ricom's version (on-screen toast + stdout)
     quit              Ask the compositor to shut down cleanly (run teardown, exit)
     animate <win> <fx> [k=v …]  Play a transform on one window
-                      (fx: spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset;
+                      (fx: spin|pop|stretch|unroll|slide|wobble|wave|ripple|drain|reset;
                        params override [anim] defaults, e.g. amplitude=0.1 duration=3)
     set <cat> <fx> [k=v …]  Live-select a transition's effect (session-only; a
                       reload/SIGHUP reverts). cat: open|close|move|focus
@@ -53,6 +53,7 @@ EXAMPLES:
     ricomctl notify \"hello ricom\" 3
     ricomctl animate 0x1a00007 spin
     ricomctl animate 0x1a00007 ripple amplitude=0.12 duration=4
+    ricomctl animate 0x1a00007 drain turns=3
     ricomctl set close drain turns=3
     ricomctl effects
     ricomctl unredir off
@@ -169,7 +170,7 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
             let w = a.next().ok_or_else(|| Exit::Usage("animate needs a <win> id and an <effect>\n".into()))?;
             let fx = a
                 .next()
-                .ok_or_else(|| Exit::Usage("animate needs an <effect> (spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)\n".into()))?;
+                .ok_or_else(|| Exit::Usage("animate needs an <effect> (spin|pop|stretch|unroll|slide|wobble|wave|ripple|drain|reset)\n".into()))?;
             // Trailing tokens are per-effect `key=value` overrides. Drain them here
             // (via `by_ref`) so the generic "unexpected argument" guard below still
             // sees an exhausted iterator; the server types + validates each pair.

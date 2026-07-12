@@ -53,7 +53,10 @@ fn defaults_match_compiled_behaviour() {
         (c.anim.ripple_amplitude, c.anim.ripple_wavelength, c.anim.ripple_speed, c.anim.ripple_r0, c.anim.ripple_duration),
         (0.08, 0.18, 1.2, 0.12, 2.5)
     );
-    assert_eq!((c.anim.drain_turns, c.anim.drain_duration), (1.5, 0.6));
+    assert_eq!(
+        (c.anim.drain_turns, c.anim.drain_duration, c.anim.drain_turbulence, c.anim.drain_depth),
+        (1.5, 0.6, 0.45, 0.9)
+    );
     assert_eq!(c.anim.open, AnimSel::Preset("pop".into()));
     assert_eq!(c.anim.close, AnimSel::Preset("fade".into()));
     assert_eq!(c.anim.r#move, AnimSel::Preset("wobble".into()));
@@ -454,20 +457,20 @@ fn ripple_block_params_parse() {
 fn drain_preset_expands_to_a_drain_block() {
     assert_eq!(
         expand_sel(&AnimSel::Preset("drain".into())).blocks,
-        [Primitive::Drain { turns: None, duration: None }]
+        [Primitive::Drain { turns: None, duration: None, turbulence: None }]
     );
 }
 
 #[test]
 fn drain_block_params_parse() {
-    let t = "[anim.close]\nblocks = [ { block = \"drain\", turns = 2.0, duration = 0.8 } ]\n";
+    let t = "[anim.close]\nblocks = [ { block = \"drain\", turns = 2.0, duration = 0.8, turbulence = 0.0 } ]\n";
     let c: Config = toml::from_str(t).unwrap();
     let AnimSel::Spec(s) = &c.anim.close else { panic!("expected explicit spec") };
-    assert_eq!(s.blocks, [Primitive::Drain { turns: Some(2.0), duration: Some(0.8) }]);
+    assert_eq!(s.blocks, [Primitive::Drain { turns: Some(2.0), duration: Some(0.8), turbulence: Some(0.0) }]);
     // Omitted → None (fall back to [anim] drain_*).
     let c: Config = toml::from_str("[anim.close]\nblocks = [ { block = \"drain\" } ]\n").unwrap();
     let AnimSel::Spec(s) = &c.anim.close else { panic!("expected spec") };
-    assert_eq!(s.blocks, [Primitive::Drain { turns: None, duration: None }]);
+    assert_eq!(s.blocks, [Primitive::Drain { turns: None, duration: None, turbulence: None }]);
 }
 
 #[test]
@@ -475,7 +478,7 @@ fn anim_spec_from_maps_and_routes() {
     // per-pixel effect: name = block tag; duration stays on the block.
     let s = anim_spec_from("drain", &[("turns".into(), "3".into())]).unwrap();
     assert_eq!(s.duration, None);
-    assert_eq!(s.blocks, [Primitive::Drain { turns: Some(3.0), duration: None }]);
+    assert_eq!(s.blocks, [Primitive::Drain { turns: Some(3.0), duration: None, turbulence: None }]);
     let s = anim_spec_from("ripple", &[("amplitude".into(), "0.1".into()), ("duration".into(), "3".into())]).unwrap();
     assert_eq!(s.duration, None);
     assert!(matches!(&s.blocks[0], Primitive::Ripple { amplitude: Some(_), duration: Some(_), .. }));

@@ -460,13 +460,18 @@ pub enum Primitive {
     },
     /// Noise dissolve with ember front (close). Shader params from `[burn]`.
     Burn,
-    /// Whirlpool drain (close): content spirals into a vanishing point at the centre
-    /// and fades. Params fall back to the `[anim] drain_*` defaults.
+    /// Whirlpool drain (close): content spirals + shrinks into a vanishing point at the
+    /// centre (no self-fade — it vanishes geometrically). Params fall back to the
+    /// `[anim] drain_*` defaults.
     Drain {
         #[serde(default)]
         turns: Option<f32>,
         #[serde(default)]
         duration: Option<f32>,
+        /// Vortex randomness (uneven arms); `0.0` = a smooth uniform spiral.
+        /// Falls back to `[anim] drain_turbulence`.
+        #[serde(default)]
+        turbulence: Option<f32>,
     },
 }
 
@@ -544,7 +549,7 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
         }
         "boing" => vec![Wobble { spring: None, friction: None }],
         "burn" => vec![Burn],
-        "drain" => vec![Drain { turns: None, duration: None }],
+        "drain" => vec![Drain { turns: None, duration: None, turbulence: None }],
         "wobble" => vec![Wobble { spring: None, friction: None }],
         // Directional stretch: a centre line grows to full width (x) / height (y),
         // content shown squashed throughout. Opaque (no opacity block) by design.
@@ -667,9 +672,10 @@ fn spec_params(spec: &AnimSpec, anim: &Anim) -> Vec<(String, String)> {
                 eased = true;
                 out.push(("degrees".into(), degrees.map_or_else(|| "360".to_string(), |x| format!("{x}"))));
             }
-            Drain { turns, duration } => {
+            Drain { turns, duration, turbulence } => {
                 out.push(("turns".into(), turns.map_or_else(|| format!("{}", anim.drain_turns), |x| format!("{x}"))));
                 out.push(("duration".into(), duration.map_or_else(|| format!("{}", anim.drain_duration), |x| format!("{x}"))));
+                out.push(("turbulence".into(), turbulence.map_or_else(|| format!("{}", anim.drain_turbulence), |x| format!("{x}"))));
             }
             Burn => {} // burn draws from the `[burn]` section, not `[anim]`
         }
@@ -762,6 +768,14 @@ pub struct Anim {
     pub drain_turns: f32,
     /// Default `drain` close duration in seconds (progress 0→1, then reaped).
     pub drain_duration: f32,
+    /// `drain` whirlpool turbulence: how strongly seeded noise makes the vortex arms
+    /// rotate unevenly. `0.0` = a smooth, uniform, deterministic spiral (randomness
+    /// off); `0.45` (default) = the standard choppy whirlpool. Applies to every drain.
+    pub drain_turbulence: f32,
+    /// Default depth for `ricomctl animate drain`: how far the window drains before it
+    /// HOLDS, `0.0`..`1.0` (`1` ≈ a vanishing point). `0.9` (default) = a tiny point.
+    /// (`close = "drain"` always drains fully; this only affects the `animate` path.)
+    pub drain_depth: f32,
     /// Open animation (window mapped). Default preset `"pop"`.
     pub open: AnimSel,
     /// Close animation (window unmapped/destroyed). Default preset `"fade"`.
@@ -869,6 +883,8 @@ impl Default for Anim {
             ripple_duration: 2.5,
             drain_turns: 1.5,
             drain_duration: 0.6,
+            drain_turbulence: 0.45,
+            drain_depth: 0.9,
             open: AnimSel::Preset("pop".into()),
             close: AnimSel::Preset("fade".into()),
             r#move: AnimSel::Preset("wobble".into()),
@@ -1008,6 +1024,8 @@ impl Config {
         chg!("anim.ripple_duration", prev.anim.ripple_duration, self.anim.ripple_duration);
         chg!("anim.drain_turns", prev.anim.drain_turns, self.anim.drain_turns);
         chg!("anim.drain_duration", prev.anim.drain_duration, self.anim.drain_duration);
+        chg!("anim.drain_turbulence", prev.anim.drain_turbulence, self.anim.drain_turbulence);
+        chg!("anim.drain_depth", prev.anim.drain_depth, self.anim.drain_depth);
         chg!("anim.open", prev.anim.open, self.anim.open);
         chg!("anim.close", prev.anim.close, self.anim.close);
         chg!("anim.move", prev.anim.r#move, self.anim.r#move);

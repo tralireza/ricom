@@ -153,8 +153,9 @@ fn drain_close_reaps_at_full_progress() {
     let mut s = WindowStack::new();
     s.add_top(win(1, true));
     s.set_mapped(1, false); // unmapped (closing out)
-    // Whirlpool close: progress 0->1 over the duration; opacity untouched (the shader fades).
-    assert!(s.begin_drain(1, 0.2, 1.5, 0.5, true));
+    // Whirlpool close: progress 0->1 over the duration; opacity untouched (the drain
+    // geometry — spiral + shrink-to-a-point — drives the vanish, no fade).
+    assert!(s.begin_drain(1, 0.2, 1.5, 0.45, 0.5, true));
     assert!(s.get(1).unwrap().closing && s.get(1).unwrap().drain.is_some());
     assert_eq!(s.get(1).unwrap().fade.current(), 1.0); // opacity untouched — drain drives the vanish
     assert!(s.advance_anims(0.1)); // still draining
@@ -162,6 +163,27 @@ fn drain_close_reaps_at_full_progress() {
     assert!(!s.advance_anims(0.2)); // progress settles at 1
     // Completes via the drain progress (not a fade) and is marked for removal.
     assert_eq!(s.finished_fadeouts(), vec![(1, true)]);
+}
+
+#[test]
+fn drain_to_holds_and_is_nondestructive() {
+    let mut s = WindowStack::new();
+    s.add_top(win(1, true)); // a live, mapped window — not closing
+    // One-shot: drain to depth 0.9 over the duration, then HOLD (no close, no recover).
+    s.drain_to(1, 1.5, 0.45, 0.9, 0.4, 0.3);
+    let w = s.get(1).unwrap();
+    assert!(!w.closing, "animate drain never closes the window");
+    let d = w.drain.as_ref().expect("drain set");
+    assert!(d.progress.is_animating() && d.progress.current().abs() < 1e-6, "eases up from 0");
+    // Past the end: settles at depth and STAYS (not cleared, not reaped, not closing).
+    s.advance_anims(0.5);
+    let d = s.get(1).unwrap().drain.as_ref().expect("drain held, not cleared");
+    assert!(!d.progress.is_animating() && (d.progress.current() - 0.9).abs() < 1e-6, "holds at depth 0.9");
+    assert!(!s.get(1).unwrap().closing);
+    assert!(s.finished_fadeouts().is_empty(), "never reaped");
+    // reset_transforms restores the window.
+    s.reset_transforms(1);
+    assert!(s.get(1).unwrap().drain.is_none(), "reset undoes the held drain");
 }
 
 #[test]

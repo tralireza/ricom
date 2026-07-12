@@ -159,6 +159,7 @@ uniform vec2  u_center;     // drain centre in UV (0..1)
 uniform float u_progress;   // 0 intact .. 1 fully drained
 uniform float u_turns;      // swirl rotations at full progress
 uniform float u_seed;       // per-window seed → each drain's turbulence differs
+uniform float u_turb;       // turbulence amount: 0 = smooth uniform vortex, higher = uneven arms
 out vec4 frag;
 // Smooth value noise (hash + bilinear) for turbulent, per-region rotation rates.
 float dhash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
@@ -178,13 +179,13 @@ void main() {
     // Turbulence: a smooth seeded noise field varies the rotation RATE across the
     // vortex (uneven arms), while swirl(r) keeps the slower-outer/faster-inner curve.
     float n = dnoise(rel * 6.0 + vec2(u_seed * 3.1, u_seed * 1.7)) * 2.0 - 1.0; // ~[-1,1]
-    float theta = 6.2831853 * u_turns * u_progress * swirl * (1.0 + 0.45 * n);
+    float theta = 6.2831853 * u_turns * u_progress * swirl * (1.0 + u_turb * n);
     float c = cos(theta), s = sin(theta);
     vec2  rot = vec2(rel.x * c - rel.y * s, rel.x * s + rel.y * c);
     float scale = max(1.0 - u_progress, 1e-3);          // visible disk shrinks to a point
     vec2  src = u_center + vec2(rot.x / aspect, rot.y) / scale;
     float inb = step(0.0, src.x) * step(src.x, 1.0) * step(0.0, src.y) * step(src.y, 1.0);
-    float a = u_opacity * (1.0 - u_progress) * inb;     // fade out as it shrinks away
+    float a = u_opacity * inb;                          // no self-fade — the shrink-to-a-point + out-of-bounds mask carry it away
     frag = vec4(texture(u_tex, clamp(src, 0.0, 1.0)).rgb * a, a);
 }
 "#;
@@ -648,6 +649,7 @@ pub struct GlBackend {
     dr_progress: Option<glow::NativeUniformLocation>,
     dr_turns: Option<glow::NativeUniformLocation>,
     dr_seed: Option<glow::NativeUniformLocation>,
+    dr_turb: Option<glow::NativeUniformLocation>,
     blur: RefCell<Option<BlurChain>>,
     image_target: ImageTargetTexture2DOes,
     render: RenderParams,
@@ -830,7 +832,7 @@ impl GlBackend {
 
         // Drain program: BLIT_VS + DRAIN_FS, reuses the blit unit-quad VAO. Selected
         // per-window while a whirlpool close is in progress (per-pixel; close driver).
-        let (drain_program, dr_rect, dr_screen, dr_tex, dr_opacity, dr_center, dr_progress, dr_turns, dr_seed) = unsafe {
+        let (drain_program, dr_rect, dr_screen, dr_tex, dr_opacity, dr_center, dr_progress, dr_turns, dr_seed, dr_turb) = unsafe {
             let program = make_program(&gl, BLIT_VS, DRAIN_FS)?;
             (
                 program,
@@ -842,6 +844,7 @@ impl GlBackend {
                 gl.get_uniform_location(program, "u_progress"),
                 gl.get_uniform_location(program, "u_turns"),
                 gl.get_uniform_location(program, "u_seed"),
+                gl.get_uniform_location(program, "u_turb"),
             )
         };
 
@@ -984,7 +987,7 @@ impl GlBackend {
             spin_program, spin_vao, sp_rect, sp_screen, sp_tex, sp_opacity, sp_corner, sp_angle,
             ripple_program, rp_rect, rp_screen, rp_tex, rp_opacity, rp_center, rp_amp, rp_wavelength, rp_phase, rp_r0,
             wave_program, wv_rect, wv_screen, wv_tex, wv_opacity, wv_amp, wv_wavelength, wv_phase, wv_axis,
-            drain_program, dr_rect, dr_screen, dr_tex, dr_opacity, dr_center, dr_progress, dr_turns, dr_seed,
+            drain_program, dr_rect, dr_screen, dr_tex, dr_opacity, dr_center, dr_progress, dr_turns, dr_seed, dr_turb,
             blur: RefCell::new(None),
             image_target, render, text: None, font_size: 1.0,
             solid_program, sol_rect, sol_screen, sol_color, sol_radius,
@@ -1799,6 +1802,7 @@ impl GlBackend {
                     self.gl.uniform_1_f32(self.dr_progress.as_ref(), dr.progress);
                     self.gl.uniform_1_f32(self.dr_turns.as_ref(), dr.turns);
                     self.gl.uniform_1_f32(self.dr_seed.as_ref(), dr.seed);
+                    self.gl.uniform_1_f32(self.dr_turb.as_ref(), dr.turbulence);
                     self.gl.enable(glow::SCISSOR_TEST);
                     for r in clip {
                         self.gl.scissor(r.x1, screen_h - r.y2, r.width(), r.height());

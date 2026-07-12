@@ -30,13 +30,24 @@ pub struct BurnState {
     pub seed: f32,
 }
 
-/// Active drain/whirlpool close state. A close driver like [`BurnState`]: `progress`
-/// 0→1 spirals the window's content into a vanishing point + fades it, reaped at 1.
+/// Active drain/whirlpool state, driven by monotonic `progress` (0 = full window,
+/// 1 ≈ a vanishing point). Two uses, distinguished by the window's `closing` flag:
+/// - **close driver** (like [`BurnState`]): `progress` eases to 1, spiralling +
+///   shrinking the content into a point; the window is reaped at 1 (see
+///   [`begin_drain`](WindowStack::begin_drain)).
+/// - **one-shot `ricomctl animate drain`**: eases to a target `depth` (< 1) and HOLDS
+///   there — a non-destructive "drain to a tiny point and stay" (the window is NOT
+///   closing, never reaped; [`reset_transforms`](WindowStack::reset_transforms)
+///   restores it). See [`drain_to`](WindowStack::drain_to).
 #[derive(Debug, Clone, Copy)]
 pub struct Drain {
+    /// Drain progress: eased to 1 (close) or to a hold `depth` (animate).
     pub progress: Fade,
     /// Swirl rotations at full progress (captured from config/rule when the drain begins).
     pub turns: f32,
+    /// Turbulence amount (uneven vortex arms); `0.0` = a smooth uniform spiral. Captured
+    /// from config/param when the drain begins.
+    pub turbulence: f32,
     /// Per-window seed so each drain's rate-turbulence differs (see the renderer's DRAIN_FS).
     pub seed: f32,
 }
@@ -261,7 +272,7 @@ impl WindowStack {
     /// spirals into a vanishing point. `destroyed` marks it for removal (vs merely
     /// unmapped) on completion. Returns `true` if there is something still visible to
     /// drain, `false` if it can be dropped immediately.
-    pub fn begin_drain(&mut self, id: WindowId, duration: f64, turns: f32, seed: f32, destroyed: bool) -> bool {
+    pub fn begin_drain(&mut self, id: WindowId, duration: f64, turns: f32, turbulence: f32, seed: f32, destroyed: bool) -> bool {
         match self.wins.get_mut(&id) {
             Some(w) if w.fade.current() > 0.0 => {
                 w.closing = true;
@@ -269,11 +280,32 @@ impl WindowStack {
                 w.drain = Some(Drain {
                     progress: Fade::animating_eased(0.0, 1.0, duration, Easing::Linear),
                     turns,
+                    turbulence,
                     seed,
                 });
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Start a non-destructive one-shot drain (`ricomctl animate drain`): ease
+    /// `progress` from 0 to `depth` (`0.0`..`1.0`; `1` ≈ a vanishing point) over
+    /// `duration` seconds and HOLD there — the window drains to a tiny point and
+    /// stays (it is NOT closing, never reaped; [`reset_transforms`](Self::reset_transforms)
+    /// restores it). Takes the single per-window effect slot (clears wobble / wave /
+    /// ripple). No-op if untracked.
+    pub fn drain_to(&mut self, id: WindowId, turns: f32, turbulence: f32, depth: f32, duration: f64, seed: f32) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.wobble = None; // one effect slot: drain ⟂ wobble / wave / ripple
+            w.wave = None;
+            w.ripple = None;
+            w.drain = Some(Drain {
+                progress: Fade::animating_eased(0.0, f64::from(depth).clamp(0.0, 1.0), duration.max(0.05), Easing::EaseOut),
+                turns,
+                turbulence,
+                seed,
+            });
         }
     }
 
@@ -438,8 +470,11 @@ impl WindowStack {
         friction: f32,
     ) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.wave = None; // one effect slot: wobble ⟂ wave / ripple
+            w.wave = None; // one effect slot: wobble ⟂ wave / ripple / drain
             w.ripple = None;
+            if w.drain.is_some() && !w.closing {
+                w.drain = None; // drop a held animate-drain when another effect takes the slot
+            }
             match &mut w.wobble {
                 Some(wob) => wob.retarget(new),
                 None => {
@@ -457,8 +492,11 @@ impl WindowStack {
     /// wobble/ripple (one effect slot). No-op if untracked.
     pub fn wave_to(&mut self, id: WindowId, amp: f32, wavelength: f32, speed: f32, axis: Axis, duration: f32) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.wobble = None; // one effect slot: wave ⟂ wobble / ripple
+            w.wobble = None; // one effect slot: wave ⟂ wobble / ripple / drain
             w.ripple = None;
+            if w.drain.is_some() && !w.closing {
+                w.drain = None; // drop a held animate-drain when another effect takes the slot
+            }
             w.wave = Some(Wave::new(amp, wavelength, speed, axis, duration));
         }
     }
@@ -470,8 +508,11 @@ impl WindowStack {
     #[allow(clippy::too_many_arguments)]
     pub fn ripple_to(&mut self, id: WindowId, center: [f32; 2], amp: f32, wavelength: f32, speed: f32, r0: f32, duration: f32) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.wobble = None;
+            w.wobble = None; // one effect slot: ripple ⟂ wobble / wave / drain
             w.wave = None;
+            if w.drain.is_some() && !w.closing {
+                w.drain = None; // drop a held animate-drain when another effect takes the slot
+            }
             w.ripple = Some(Ripple::new(center, amp, wavelength, speed, r0, duration));
         }
     }
@@ -523,6 +564,9 @@ impl WindowStack {
             {
                 animating = true;
             }
+            // Drain: advance the monotonic progress. A close driver eases to 1 (reaped
+            // by `finished_fadeouts`); an animate `drain_to` eases to its hold `depth`
+            // and stays (never cleared here — restored only via `reset_transforms`).
             if let Some(d) = &mut w.drain
                 && d.progress.advance(dt)
             {

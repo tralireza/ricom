@@ -138,7 +138,9 @@ pub fn effect_params(effect: &str) -> Option<&'static [(&'static str, &'static s
         ],
         "drain" => &[
             ("turns", "swirl rotations at full progress"),
-            ("duration", "close seconds"),
+            ("duration", "seconds"),
+            ("turbulence", "vortex randomness (uneven arms); 0 = smooth uniform spiral"),
+            ("depth", "animate: drain this far then hold, 0..1 (1 = to a point)"),
         ],
         "reset" => &[],
         _ => return None,
@@ -184,7 +186,7 @@ pub fn effect_schematic(effect: &str) -> Option<(&'static str, &'static str)> {
             "┌────┐     ┌────┐     ┌────┐\n│ ·  │  →  │(())│  →  │(  )│\n└────┘     └────┘     └────┘",
         ),
         "drain" => (
-            "content whirlpools into a vanishing point, then fades",
+            "content whirlpools + shrinks into a vanishing point (no self-fade)",
             "┌────┐     ┌╮  ╭┐        ·\n│    │  →  │ ╲╱ │  →      ◌\n└────┘     └╯  ╰┘",
         ),
         _ => return None,

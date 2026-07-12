@@ -1420,13 +1420,26 @@ impl App {
                 let duration = param_f32(params, "duration")?.unwrap_or(self.config.anim.ripple_duration);
                 self.windows.ripple_to(win, [0.5, 0.5], amp, wl, speed, r0, duration);
             }
+            "drain" => {
+                check_keys(effect, params)?;
+                let turns = param_f32(params, "turns")?.unwrap_or(self.config.anim.drain_turns);
+                let turb = param_f32(params, "turbulence")?.unwrap_or(self.config.anim.drain_turbulence);
+                let depth = param_f32(params, "depth")?.unwrap_or(self.config.anim.drain_depth);
+                let dur = param_f32(params, "duration")?
+                    .map(f64::from)
+                    .unwrap_or(f64::from(self.config.anim.drain_duration));
+                // Non-destructive: drain to `depth` and HOLD there (shrink to a tiny
+                // point and stay) — unlike the close driver, which reaps the window.
+                // Restore with `ricomctl animate <win> reset`.
+                self.windows.drain_to(win, turns, turb, depth, dur, burn_seed(win));
+            }
             "reset" => {
                 check_keys(effect, params)?;
                 self.windows.reset_transforms(win);
             }
             _ => {
                 return Err(format!(
-                    "unknown effect '{effect}' (spin|pop|stretch|unroll|slide|wobble|wave|ripple|reset)"
+                    "unknown effect '{effect}' (spin|pop|stretch|unroll|slide|wobble|wave|ripple|drain|reset)"
                 ));
             }
         }
@@ -1824,11 +1837,12 @@ impl App {
                         Primitive::Burn => {
                             started |= self.windows.begin_burn(id, dur, burn_seed(id), destroyed);
                         }
-                        Primitive::Drain { turns, duration } => {
+                        Primitive::Drain { turns, duration, turbulence } => {
                             started |= self.windows.begin_drain(
                                 id,
                                 duration.map(f64::from).unwrap_or(f64::from(self.config.anim.drain_duration)),
                                 turns.unwrap_or(self.config.anim.drain_turns),
+                                turbulence.unwrap_or(self.config.anim.drain_turbulence),
                                 burn_seed(id),
                                 destroyed,
                             );
@@ -1865,9 +1879,10 @@ impl App {
                         Primitive::Opacity { .. } | Primitive::Wobble { .. } => {}
                     }
                 }
-                // Exactly one completion driver + the closing flag: burn (begun above)
-                // dissolves; a scale-to-0 collapses while staying opaque; otherwise
-                // fade to transparent (which also carries scale/translate ride-alongs).
+                // Exactly one completion driver + the closing flag: burn dissolves and
+                // drain spirals+shrinks away (both begun above, both self-complete at
+                // progress 1 — no fade); a scale-to-0 collapses while staying opaque;
+                // otherwise fade to transparent (carrying scale/translate ride-alongs).
                 if !has_burn && !has_drain {
                     if collapses {
                         started |= self.windows.begin_collapse(id, destroyed);
@@ -2300,8 +2315,9 @@ impl App {
                 // Drain params for the shader: centre + progress (0→1) + swirl turns.
                 let drain = w.drain.as_ref().map(|d| DrainParams {
                     center: [0.5, 0.5],
-                    progress: d.progress.current() as f32,
+                    progress: d.progress.current() as f32, // close ramp, or an animate hold
                     turns: d.turns,
+                    turbulence: d.turbulence,
                     seed: d.seed,
                 });
                 items.push((
