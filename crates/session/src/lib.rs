@@ -295,9 +295,10 @@ fn move_corner(corner: HudCorner, dir: Move) -> HudCorner {
     }
 }
 
-/// HUD auto-hop animation: the corner the HUD is sliding FROM → TO, with linear
-/// progress `t` (0→1) over `dur` seconds. Position easing + the opacity dip are
-/// applied when building the `Hud` (see `composite`).
+/// HUD auto-hop animation: the corner the HUD hops FROM → TO, with linear
+/// progress `t` (0→1) over `dur` seconds. The hop is an in-place fade — the HUD
+/// fades out at `from` over the first half, then fades in at `to` over the second
+/// (see [`hop_view`], applied when building the `Hud` in `composite`).
 struct HudMove {
     from: HudCorner,
     to: HudCorner,
@@ -313,15 +314,23 @@ impl HudMove {
     }
 }
 
-/// Smoothstep ease-in-out for the glide (0→1).
+/// Smoothstep ease-in-out (0→1).
 fn ease_in_out(t: f64) -> f64 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
-/// HUD opacity floor at mid-hop — it fades to this (not fully invisible), so the
-/// glide stays visible as it crosses the screen.
-const HUD_FADE_FLOOR: f64 = 0.2;
+/// One frame of an in-place hop: fade OUT at `from` over the first half of `t`,
+/// then fade IN at `to` over the second half. Returns the corner to anchor the
+/// HUD to and its (eased) whole-HUD opacity. The panel never moves — it hides
+/// where it is and shows at the destination.
+fn hop_view(from: HudCorner, to: HudCorner, t: f64) -> (HudCorner, f32) {
+    if t < 0.5 {
+        (from, ease_in_out(1.0 - t / 0.5) as f32) // 1 → 0 at the old corner
+    } else {
+        (to, ease_in_out((t - 0.5) / 0.5) as f32) // 0 → 1 at the new corner
+    }
+}
 
 /// One xorshift64 step — a tiny inline PRNG (no `rand` dependency).
 fn xorshift64(state: &mut u64) -> u64 {
@@ -2347,15 +2356,11 @@ impl App {
         draws.reverse(); // restore bottom-to-top for correct layering
         tracing::trace!(windows = items.len(), drawn = draws.len(), "composite");
         let hud = if self.show_fps {
-            // While auto-hopping, draw toward the destination corner with an eased
-            // slide (transition) and a mid-hop opacity dip (fade); static otherwise.
-            let (corner, transition, opacity) = match &self.hud_move {
-                Some(m) => {
-                    let te = ease_in_out(m.t) as f32;
-                    let fade = 1.0 - (1.0 - HUD_FADE_FLOOR) * (std::f64::consts::PI * m.t).sin();
-                    (m.to, Some((m.from, te)), fade as f32)
-                }
-                None => (self.hud_corner, None, 1.0),
+            // While auto-hopping, fade out at the current corner then fade in at the
+            // destination — an in-place hide/show, no slide; static otherwise.
+            let (corner, opacity) = match &self.hud_move {
+                Some(m) => hop_view(m.from, m.to, m.t),
+                None => (self.hud_corner, 1.0),
             };
             Some(Hud {
                 fps: self.fps_meter.fps(),
@@ -2365,7 +2370,6 @@ impl App {
                 refresh_hz: self.refresh_hz as f32,
                 load: hud_load,
                 outline: self.config.fps.outline,
-                transition,
                 opacity,
             })
         } else {

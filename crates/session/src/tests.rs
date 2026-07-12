@@ -85,3 +85,30 @@ fn random_corner_none_when_no_corner_is_free() {
     // Current is the only non-avoided corner → stays put.
     assert!(random_corner(TopRight, &[TopLeft, BottomLeft, BottomRight], &mut rng).is_none());
 }
+
+#[test]
+fn hop_view_hides_at_from_then_shows_at_to() {
+    use HudCorner::*;
+    // Start: fully visible at the old corner.
+    let (c, o) = hop_view(TopRight, BottomLeft, 0.0);
+    assert_eq!(c, TopRight);
+    assert!((o - 1.0).abs() < 1e-6, "opaque at t=0, got {o}");
+    // Just before the midpoint: still the old corner, faded to ~0.
+    let (c, o) = hop_view(TopRight, BottomLeft, 0.499);
+    assert_eq!(c, TopRight, "still hiding at the old corner before the swap");
+    assert!(o < 0.05, "nearly hidden before the swap, got {o}");
+    // Midpoint: swapped to the new corner, still ~0 (invisible during the swap).
+    let (c, o) = hop_view(TopRight, BottomLeft, 0.5);
+    assert_eq!(c, BottomLeft, "swaps to the new corner at the midpoint");
+    assert!(o < 1e-6, "invisible at the swap, got {o}");
+    // End: fully visible at the new corner.
+    let (c, o) = hop_view(TopRight, BottomLeft, 1.0);
+    assert_eq!(c, BottomLeft);
+    assert!((o - 1.0).abs() < 1e-6, "opaque at t=1, got {o}");
+    // Opacity stays within [0, 1] across the whole hop.
+    for i in 0..=100 {
+        let t = i as f64 / 100.0;
+        let (_, o) = hop_view(TopRight, BottomLeft, t);
+        assert!((0.0..=1.0).contains(&o), "opacity {o} out of range at t={t}");
+    }
+}

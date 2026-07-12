@@ -1424,22 +1424,15 @@ impl GlBackend {
         let panel_w = content_w + pad * 2.0;
         let panel_h = th + graph_gap + graph_h + load_block_h + pad * 2.0;
         let a = hud.opacity;
-        // Anchor the panel to a corner; while auto-hopping, lerp between the from/to
-        // corner anchors by the (already-eased) transition progress.
+        // Anchor the panel to its corner. Auto-hops are an in-place fade (opacity
+        // only), so there is no cross-corner slide to interpolate here.
         let anchor = |c: HudCorner| match c {
             HudCorner::TopLeft => (margin, margin),
             HudCorner::TopRight => (sw as f32 - margin - panel_w, margin),
             HudCorner::BottomLeft => (margin, sh as f32 - margin - panel_h),
             HudCorner::BottomRight => (sw as f32 - margin - panel_w, sh as f32 - margin - panel_h),
         };
-        let (px, py) = match hud.transition {
-            None => anchor(hud.corner),
-            Some((from, t)) => {
-                let (fx, fy) = anchor(from);
-                let (tx, ty) = anchor(hud.corner);
-                (fx + (tx - fx) * t, fy + (ty - fy) * t)
-            }
-        };
+        let (px, py) = anchor(hud.corner);
         // Panel background.
         self.fill_rect(px, py, panel_w, panel_h, radius, [0.05, 0.05, 0.07, 0.72 * a], sw, sh);
         // Render-time graph: one bar per composite, full height = one refresh budget.
