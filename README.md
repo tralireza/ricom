@@ -132,7 +132,9 @@ EFFECTS ────────────────────────
 ```
 
 > Every preset above is configurable — set it per-window or globally under `[anim]`, or compose the
-> underlying primitives by hand. See [`ricom.toml.example`](ricom.toml.example) for the full schema.
+> underlying primitives by hand. See [`ricom.toml.example`](ricom.toml.example) for the full schema,
+> and [`Transition.md`](Transition.md) for how effects *compose* — parallel folds vs. the single
+> exclusive effect slot, and what cascading (time-sequenced) transitions would take.
 
 ## Screenshots
 
@@ -334,9 +336,10 @@ ricom             workspace root + binary (event-loop wiring, CLI)
    ├─ region      pure-Rust pixman-style rectangle regions (damage maths)
    ├─ xconn       x11rb wrapper: connection, extensions, atoms, overlay/redirect, pixmap/damage/focus
    ├─ wm          window model + bottom-to-top stacking + per-window animation state (fade/scale/translate/spin/wobble)
-   ├─ backend-gl  EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/mesh/spin/SDF-text shaders, present
+   ├─ backend     neutral render seam: the `Backend` trait + descriptor types (WindowDraw/Quad/Hud/Osd/RenderParams), no EGL/GL/X
+   ├─ backend-gl  the GL renderer: EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/mesh/spin/text shaders — impls `Backend`
    ├─ config      TOML: settings, window rules, and composable animation/effect specs (parse/resolve/diff for live reload)
-   ├─ session     the compositor: owns X + wm + backend + config, runs the calloop event loop
+   ├─ session     the compositor: owns X + wm + config + a `Box<dyn Backend>`, runs the calloop event loop
    ├─ proto       control-channel wire types (NDJSON Command/Reply), shared by session + ricomctl
    └─ ricomctl    thin control client: connects to the per-DISPLAY socket, sends one command, prints the reply
 ```

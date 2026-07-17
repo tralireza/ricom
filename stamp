@@ -1,0 +1,26 @@
+#!/bin/sh
+# Regenerate build.info — the version stamp baked into the binary via include_str!.
+#
+# Run this OUT-OF-BAND on the Mac (the source of truth) whenever you want the
+# stamp to reflect the current tree — typically right before syncing to i7. The
+# generated build.info is gitignored and travels to i7 as an ordinary file in the
+# rsync/scp, so both hosts compile the *same* stamp into `--version`. There is no
+# build.rs and no git on the i7 build path — i7 never re-derives the stamp, it just
+# bakes the file it received.
+#
+# Format: "<short-hash>[-dirty] <commit-YYMMDD> <build-HH:MM:SS>"
+#   e.g.  "0124be1-dirty 260712 15:12:33"
+#   -dirty   = tracked files differ from HEAD (untracked scratch is ignored, so
+#              this gitignored file does not itself trigger it).
+#   YYMMDD   = HEAD commit date (the code's age).
+#   HH:MM:SS = local wall-clock time this stamp was generated (the build moment) —
+#              disambiguates successive rebuilds of the same (often -dirty) tree,
+#              the role the old per-checkout build number used to play.
+set -eu
+cd "$(dirname "$0")"
+hash=$(git rev-parse --short HEAD)
+git diff-index --quiet HEAD -- || hash="${hash}-dirty"
+cdate=$(git show -s --format=%cd --date=format:%y%m%d HEAD)
+btime=$(date +%H:%M:%S)
+printf '%s %s %s\n' "$hash" "$cdate" "$btime" > build.info
+echo "build.info -> $hash $cdate $btime"

@@ -555,14 +555,16 @@ struct OsdState {
     color: [f32; 3],
 }
 
-/// Map a config OSD effect to the backend's rendering effect.
-fn osd_effect(e: OsdEffect) -> backend_gl::OsdEffect {
+/// Map a config OSD effect to the backend's rendering effect. `OsdEffect` (the
+/// param) is `config::OsdEffect`; the return type is the neutral `backend::OsdEffect`
+/// — named through `backend::`, not the GL crate's re-export, so the seam holds.
+fn osd_effect(e: OsdEffect) -> backend::OsdEffect {
     match e {
-        OsdEffect::Fade => backend_gl::OsdEffect::Fade,
-        OsdEffect::Slide => backend_gl::OsdEffect::Slide,
-        OsdEffect::Pop => backend_gl::OsdEffect::Pop,
-        OsdEffect::Unroll => backend_gl::OsdEffect::Unroll,
-        OsdEffect::Stretch => backend_gl::OsdEffect::Stretch,
+        OsdEffect::Fade => backend::OsdEffect::Fade,
+        OsdEffect::Slide => backend::OsdEffect::Slide,
+        OsdEffect::Pop => backend::OsdEffect::Pop,
+        OsdEffect::Unroll => backend::OsdEffect::Unroll,
+        OsdEffect::Stretch => backend::OsdEffect::Stretch,
     }
 }
 

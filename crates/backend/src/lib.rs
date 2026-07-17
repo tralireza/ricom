@@ -11,7 +11,7 @@ use anyhow::Result;
 pub use region::Rect;
 
 /// Runtime render parameters (from the config file): set when the backend is
-/// created and swapped in on config reload via [`GlBackend::set_render_params`].
+/// created and swapped in on config reload via [`Backend::set_render_params`].
 /// Defaults reproduce the previously compiled-in constants.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderParams {
@@ -94,7 +94,7 @@ pub struct Quad {
 }
 
 /// Per-window burn/dissolve state for the close animation. When a [`WindowDraw`]
-/// carries `Some`, the backend draws it through [`BURN_FS`] instead of the plain
+/// carries `Some`, the backend draws it through the burn/dissolve program instead of the plain
 /// blit (no shadow / frost / corner rounding, like the wobble-mesh path).
 #[derive(Debug, Clone, Copy)]
 pub struct Burn {
@@ -104,7 +104,7 @@ pub struct Burn {
     pub seed: f32,
 }
 
-/// Radial-ripple (water refraction) parameters for [`RIPPLE_FS`]. When a
+/// Radial-ripple (water refraction) parameters for the ripple program. When a
 /// [`WindowDraw`] carries `Some`, the backend draws it through the ripple program
 /// (per-pixel UV warp; no shadow / frost / corner — like the mesh / spin paths).
 #[derive(Debug, Clone, Copy)]
@@ -121,7 +121,7 @@ pub struct RippleParams {
     pub r0: f32,
 }
 
-/// Traveling-wave (content refraction) parameters for [`WAVE_FS`]. When a
+/// Traveling-wave (content refraction) parameters for the wave program. When a
 /// [`WindowDraw`] carries `Some`, the backend draws it through the wave program
 /// (per-pixel UV warp; no shadow / frost / corner — like the ripple path). Replaces
 /// the old mesh-based wave, so it's smooth at any amplitude.
@@ -137,7 +137,7 @@ pub struct WaveParams {
     pub axis: u32,
 }
 
-/// Drain / whirlpool close parameters for [`DRAIN_FS`]. When a [`WindowDraw`] carries
+/// Drain / whirlpool close parameters for the drain program. When a [`WindowDraw`] carries
 /// `Some`, the backend draws it through the drain program (per-pixel; no shadow / frost
 /// / corner). A close driver like burn: `progress` 0→1 spirals + shrinks the content
 /// into a vanishing point at `center` (no self-fade — the shrink + out-of-bounds mask
@@ -158,7 +158,7 @@ pub struct DrainParams {
 }
 
 /// A window to composite plus the screen-space rectangles it's actually visible
-/// in (region-level occlusion): [`GlBackend::present_windows`] scissors each of
+/// in (region-level occlusion): [`Backend::present_windows`] scissors each of
 /// the quad's draws to `clip`, so pixels covered by an opaque window on top are
 /// never shaded. An empty `clip` is a fully-occluded window (callers omit those).
 pub struct WindowDraw {
@@ -170,20 +170,20 @@ pub struct WindowDraw {
     /// → the normal quad path. `quad.x/y/w/h` still give the un-deformed rect (for
     /// texture binding and, when settled, the quad path).
     pub mesh: Option<Vec<[f32; 4]>>,
-    /// Burn/dissolve close effect. `Some` → draw via [`BURN_FS`] at this progress
+    /// Burn/dissolve close effect. `Some` → draw via the burn/dissolve program at this progress
     /// (mutually exclusive with `mesh`; a closing window doesn't wobble).
     pub burn: Option<Burn>,
     /// Rotation about the window centre (radians) for the `spin` primitive. `Some`
-    /// → draw via [`SPIN_VS`] (no shadow/frost; corners suppressed), mutually
+    /// → draw via the spin program (no shadow/frost; corners suppressed), mutually
     /// exclusive with `mesh`/`burn`. `None` → the normal quad path.
     pub spin: Option<f32>,
-    /// Radial water-refraction ripple. `Some` → draw via [`RIPPLE_FS`] (per-pixel UV
+    /// Radial water-refraction ripple. `Some` → draw via the ripple program (per-pixel UV
     /// warp; no shadow / frost / corner), mutually exclusive with `mesh`/`burn`/`spin`.
     pub ripple: Option<RippleParams>,
-    /// Traveling wave (content refraction). `Some` → draw via [`WAVE_FS`] (per-pixel UV
+    /// Traveling wave (content refraction). `Some` → draw via the wave program (per-pixel UV
     /// warp; no shadow / frost / corner), mutually exclusive with `mesh`/`burn`/`spin`/`ripple`.
     pub wave: Option<WaveParams>,
-    /// Drain / whirlpool close. `Some` → draw via [`DRAIN_FS`] (per-pixel; no shadow /
+    /// Drain / whirlpool close. `Some` → draw via the drain program (per-pixel; no shadow /
     /// frost / corner), mutually exclusive with `mesh`/`burn`/`spin`/`ripple`/`wave`.
     pub drain: Option<DrainParams>,
 }
@@ -230,7 +230,7 @@ pub struct HudLoad {
     pub render_ms: [Option<f32>; 3],
 }
 
-/// One frame's HUD data, drawn by [`GlBackend::present_windows`] when `Some`. The
+/// One frame's HUD data, drawn by [`Backend::present_windows`] when `Some`. The
 /// graph itself is fed by the backend's own GPU render-time samples.
 pub struct Hud {
     /// Present rate (frames composited in the last second).
@@ -289,6 +289,13 @@ pub struct Osd {
 pub trait Backend {
     /// Composite the window stack for one frame and present it. `clear` is the
     /// region cleared first (partial-repaint aware); `hud`/`osd` draw on top.
+    ///
+    /// Takes `&self` (this is the frame-time method, unlike the config-time
+    /// `&mut self` setters) so the caller can hold the backend by shared borrow
+    /// across a whole composite pass while it reads other state. The cost of that
+    /// choice is a contract: an implementor that mutates per-frame GPU caches
+    /// (blur pyramid, GPU-timer ring, render-time samples) must do so through
+    /// interior mutability (`Cell`/`RefCell`) — as the GL backend does.
     fn present_windows(
         &self,
         items: &[WindowDraw],

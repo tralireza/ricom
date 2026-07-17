@@ -1,10 +1,10 @@
 //! GL (EGL) rendering backend. Mirrors picom's `src/backend/gl/egl.c`.
 //!
 //! - [`first_light`]: headless pbuffer smoke test (validates EGL + glow + GL).
-//! - [`GlBackend`]: an EGL **window** surface on the composite overlay, with a
-//!   textured-quad blit program and [`GlBackend::present_window_pixmap`] —
-//!   bind an X window's pixmap as a GL texture (EGLImage) and draw it. This is
-//!   the heart of compositing; the renderer drives it over the window stack.
+//! - [`GlBackend`]: an EGL **window** surface on the composite overlay. Its
+//!   [`GlBackend::present_windows`] binds each window's X pixmap as a GL texture
+//!   (EGLImage) and blits it over the stack — the heart of compositing, driven
+//!   once per frame by `session::composite`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -1056,66 +1056,6 @@ impl GlBackend {
         self.egl
             .swap_buffers(self.display, self.surface)
             .map_err(|e| anyhow!("eglSwapBuffers: {e:?}"))?;
-        Ok(())
-    }
-
-    /// Bind an X window's pixmap as a GL texture and blit it at `(x,y,w,h)` over
-    /// a cleared overlay, then present. (Single-window path; the renderer will
-    /// loop this over the stack without clearing between windows.)
-    #[allow(clippy::too_many_arguments)]
-    pub fn present_window_pixmap(
-        &self,
-        pixmap: u32,
-        x: i32, y: i32, w: i32, h: i32,
-        screen_w: i32, screen_h: i32,
-    ) -> Result<()> {
-        let buffer = unsafe { egl::ClientBuffer::from_ptr((pixmap as usize) as egl::EGLClientBuffer) };
-        let no_ctx = unsafe { egl::Context::from_ptr(egl::NO_CONTEXT) };
-        let attribs = [egl::IMAGE_PRESERVED as egl::Attrib, 1, egl::ATTRIB_NONE];
-        let image = self
-            .egl
-            .create_image(self.display, no_ctx, EGL_NATIVE_PIXMAP_KHR, buffer, &attribs)
-            .map_err(|e| anyhow!("eglCreateImage(pixmap 0x{pixmap:x}): {e:?}"))?;
-
-        let (e_bind, e_draw) = unsafe {
-            let tex = self.gl.create_texture().map_err(|e| anyhow!("create_texture: {e}"))?;
-            self.gl.active_texture(glow::TEXTURE0);
-            self.gl.bind_texture(glow::TEXTURE_2D, Some(tex));
-            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MIN_FILTER, glow::NEAREST as i32);
-            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_MAG_FILTER, glow::NEAREST as i32);
-            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_S, glow::CLAMP_TO_EDGE as i32);
-            self.gl.tex_parameter_i32(glow::TEXTURE_2D, glow::TEXTURE_WRAP_T, glow::CLAMP_TO_EDGE as i32);
-            (self.image_target)(glow::TEXTURE_2D, image.as_ptr() as *const c_void);
-            let e_bind = self.gl.get_error();
-
-            self.gl.viewport(0, 0, screen_w, screen_h);
-            let bg = self.render.background;
-            self.gl.clear_color(bg[0], bg[1], bg[2], 1.0);
-            self.gl.clear(glow::COLOR_BUFFER_BIT);
-
-            self.gl.use_program(Some(self.program));
-            self.gl.uniform_4_f32(self.u_rect.as_ref(), x as f32, y as f32, w as f32, h as f32);
-            self.gl.uniform_2_f32(self.u_screen.as_ref(), screen_w as f32, screen_h as f32);
-            self.gl.uniform_1_i32(self.u_tex.as_ref(), 0);
-            self.gl.uniform_1_f32(self.u_opacity.as_ref(), 1.0);
-            self.gl.uniform_1_f32(self.u_corner.as_ref(), 0.0);
-            self.gl.bind_vertex_array(Some(self.vao));
-            self.gl.draw_arrays(glow::TRIANGLE_STRIP, 0, 4);
-            self.gl.bind_vertex_array(None);
-            let e_draw = self.gl.get_error();
-
-            self.gl.delete_texture(tex);
-            (e_bind, e_draw)
-        };
-        if e_bind != glow::NO_ERROR || e_draw != glow::NO_ERROR {
-            tracing::warn!("GL errors: after image-bind=0x{e_bind:04x}, after draw=0x{e_draw:04x}");
-        } else {
-            tracing::info!("blit GL ok (no errors)");
-        }
-        self.egl
-            .swap_buffers(self.display, self.surface)
-            .map_err(|e| anyhow!("eglSwapBuffers: {e:?}"))?;
-        let _ = self.egl.destroy_image(self.display, image);
         Ok(())
     }
 

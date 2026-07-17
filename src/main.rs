@@ -47,21 +47,16 @@ _NET_WM_CM_S0.
 ";
 
 /// Version line for `--version` and the startup log, e.g.
-/// `ricom 0.1.0 (39d0212 260703 #42)` — short git hash + commit date (YYMMDD) +
-/// monotonic per-checkout build number, baked at build time by `build.rs`. The
-/// hash/date each degrade gracefully (e.g. `ricom 0.1.0 (#42)` with no git info);
-/// the build number is always present and disambiguates same-hash rebuilds.
+/// `ricom 0.1.0 (0124be1-dirty 260712 22:38:48)` — the contents of `build.info`
+/// (git short hash [+ `-dirty`] · HEAD commit date YYMMDD · local build time),
+/// baked in at compile time via `include_str!`. `build.info` is regenerated
+/// out-of-band by `./stamp` on the Mac (the source of truth) and synced to i7 as
+/// an ordinary file, so both hosts bake an identical stamp — no `build.rs`, and no
+/// git on the build path. Changing `build.info` re-triggers this crate's rebuild
+/// (cargo tracks `include_str!` inputs, verified).
 fn version_string() -> String {
     let base = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
-    let hash = option_env!("RICOM_GIT_HASH").unwrap_or("unknown");
-    let date = option_env!("RICOM_GIT_DATE").unwrap_or("");
-    let build = option_env!("RICOM_BUILD_NUMBER").unwrap_or("0");
-    let stamp = match (hash, date) {
-        ("unknown", _) => format!("#{build}"),
-        (hash, "") => format!("{hash} #{build}"),
-        (hash, date) => format!("{hash} {date} #{build}"),
-    };
-    format!("{base} ({stamp})")
+    format!("{base} ({})", include_str!("../build.info").trim())
 }
 
 fn main() -> Result<()> {
