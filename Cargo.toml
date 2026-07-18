@@ -14,4 +14,4 @@ xconn = { version = "0.1.0", path = "crates/xconn" }
 
 [workspace]
 resolver = "2"
-members = ["crates/session", "crates/xconn", "crates/region", "crates/wm", "crates/backend", "crates/backend-gl", "crates/config", "crates/proto", "crates/ricomctl"]
+members = ["crates/session", "crates/xconn", "crates/region", "crates/wm", "crates/backend", "crates/backend-gl", "crates/backend-xrender", "crates/config", "crates/proto", "crates/ricomctl"]

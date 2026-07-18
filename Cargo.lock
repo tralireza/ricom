@@ -46,6 +46,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-xrender"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "backend",
+ "region",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -492,6 +503,7 @@ dependencies = [
  "anyhow",
  "backend",
  "backend-gl",
+ "backend-xrender",
  "calloop",
  "config",
  "proto",

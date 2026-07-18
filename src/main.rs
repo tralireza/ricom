@@ -226,7 +226,10 @@ fn composite_windows_test(opacity: f32) -> Result<()> {
     tracing::info!(count = items.len(), opacity, "compositing mapped windows");
     x.flush()?;
     {
-        let backend = backend_gl::GlBackend::new(overlay, visual, backend_gl::RenderParams::default())?;
+        // Route through the factory so --blit-test/--opacity-test exercise the backend
+        // selected by the default config (e.g. `backend = "xrender"`), not always GL.
+        let cfg = config::Config::load(None).unwrap_or_default();
+        let backend = session::make_backend(&cfg, overlay, visual)?;
         // No occlusion in the diagnostic path: draw every window in full.
         let draws: Vec<backend_gl::WindowDraw> =
             items.iter().map(|&q| backend_gl::WindowDraw::whole(q)).collect();

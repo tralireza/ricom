@@ -167,13 +167,15 @@ pub enum FocusSource {
     X11,
 }
 
-/// Which render backend the compositor uses. `Gl` (EGL + OpenGL) is the only one
-/// today; `xrender` / `glx` are roadmap alternatives. An unknown value is a load error.
+/// Which render backend the compositor uses. `gl` (EGL + OpenGL) is the default;
+/// `xrender` is a shaderless server-side backend (no GL — effects fade-fall-back).
+/// `glx` is a roadmap alternative. An unknown value is a load error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendKind {
     #[default]
     Gl,
+    Xrender,
 }
 
 /// Inactive-window dimming: unfocused windows fade toward transparent so the

@@ -28,6 +28,7 @@ use backend::{
     RippleParams, WaveParams, WindowDraw,
 };
 use backend_gl::GlBackend;
+use backend_xrender::XrenderBackend;
 use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
@@ -69,9 +70,12 @@ fn render_params(cfg: &Config) -> RenderParams {
 /// Build the render backend named by the config (`backend = …`). Only the GL backend
 /// exists today; a future xrender/glx backend slots in as another match arm. Returns
 /// a `Box<dyn Backend>` so `session` never names a concrete backend past this point.
-fn make_backend(config: &Config, window: Window, visual: u32) -> Result<Box<dyn Backend>> {
+pub fn make_backend(config: &Config, window: Window, visual: u32) -> Result<Box<dyn Backend>> {
     match config.backend {
         BackendKind::Gl => Ok(Box::new(GlBackend::new(window, visual, render_params(config))?)),
+        BackendKind::Xrender => {
+            Ok(Box::new(XrenderBackend::new(window, visual, render_params(config))?))
+        }
     }
 }
 
