@@ -154,6 +154,33 @@ fn caps_allow(caps: BackendCaps, block: &Primitive) -> bool {
     }
 }
 
+/// The region to repaint this frame, given the backend's `buffer_age`.
+///
+/// `own_full` forces a whole-screen repaint — a structural change queued `force_full`,
+/// damage tracking is off (`!use_damage`), or the HUD/OSD is up and must redraw every
+/// frame. Otherwise, with a usable age `N`, the buffer we're drawing into is `N` frames
+/// stale, so the repaint is this frame's damage unioned with the previous `N-1` frames'
+/// damage, clipped to the screen. An unusable age — `<= 0` (sentinel: backend can't
+/// report one), or older than the history we keep — also forces full.
+fn paint_region(
+    own_full: bool,
+    age: i32,
+    frame_damage: &Region,
+    damage_history: &VecDeque<Region>,
+    screen: Rect,
+) -> Region {
+    if own_full || age <= 0 || age as usize > damage_history.len() + 1 {
+        Region::from_rect(screen)
+    } else {
+        let mut p = frame_damage.clone();
+        for h in damage_history.iter().take(age as usize - 1) {
+            p.union(h);
+        }
+        p.intersect_rect(&screen);
+        p
+    }
+}
+
 // ── `ricomctl animate` param overrides ────────────────────────────────────────
 // Effects take optional `key=value` overrides on the CLI (empty ⇒ configured
 // defaults). These free fns type + validate them; [`App::apply_effect`] applies.
@@ -2471,16 +2498,7 @@ impl App {
         let age = backend.buffer_age();
         let own_full =
             self.force_full || !self.config.use_damage || self.show_fps || self.osd.is_some();
-        let paint = if own_full || age <= 0 || age as usize > self.damage_history.len() + 1 {
-            Region::from_rect(screen)
-        } else {
-            let mut p = self.frame_damage.clone();
-            for h in self.damage_history.iter().take(age as usize - 1) {
-                p.union(h);
-            }
-            p.intersect_rect(&screen);
-            p
-        };
+        let paint = paint_region(own_full, age, &self.frame_damage, &self.damage_history, screen);
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());

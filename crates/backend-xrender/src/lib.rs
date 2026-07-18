@@ -65,6 +65,34 @@ fn find_format(formats: &[Pictforminfo], depth: u8, want_alpha: bool) -> Option<
         .map(|f| f.id)
 }
 
+/// Map a slice of compositor rects to X `Rectangle`s (see [`to_rect`]) — used for both
+/// the background-clear rects and each window's clip.
+fn rects(clip: &[region::Rect]) -> Vec<Rectangle> {
+    clip.iter().map(to_rect).collect()
+}
+
+/// A window contributes nothing this frame — no area, or no visible/damaged clip rects
+/// (a fully-occluded window has an empty clip). Skip it: no source Picture, no damage.
+fn should_skip(it: &WindowDraw) -> bool {
+    it.quad.w <= 0 || it.quad.h <= 0 || it.clip.is_empty()
+}
+
+/// Quantize a `0.0..=1.0` opacity (fade × inactive-dim, folded upstream) to 8-bit alpha
+/// for the cached constant-alpha mask.
+fn quantize_opacity(opacity: f32) -> u8 {
+    (opacity.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
+/// Scale a `0.0..=1.0` colour channel to RENDER's 16-bit range.
+fn scale_channel(c: f32) -> u16 {
+    (c.clamp(0.0, 1.0) * 65535.0) as u16
+}
+
+/// Expand an 8-bit alpha to RENDER's 16-bit range (`a/255 · 65535`, i.e. `a · 257`).
+fn alpha16(a: u8) -> u16 {
+    a as u16 * 257
+}
+
 /// Offscreen back-buffer: the whole frame is composited here, then copied to the
 /// overlay in one `Composite` — so the visible overlay only ever shows a *complete*
 /// frame (no clear-then-blit tearing/flicker). Recreated on a screen-size change.
@@ -213,7 +241,7 @@ impl XrenderBackend {
             return p;
         }
         let Ok(pid) = self.conn.generate_id() else { return x11rb::NONE };
-        let color = Color { red: 0, green: 0, blue: 0, alpha: (a as u16) * 257 };
+        let color = Color { red: 0, green: 0, blue: 0, alpha: alpha16(a) };
         if self.conn.render_create_solid_fill(pid, color).is_err() {
             return x11rb::NONE;
         }
@@ -224,9 +252,9 @@ impl XrenderBackend {
     /// The configured background colour as an opaque RENDER `Color`.
     fn bg_color(&self) -> Color {
         Color {
-            red: (self.render.background[0].clamp(0.0, 1.0) * 65535.0) as u16,
-            green: (self.render.background[1].clamp(0.0, 1.0) * 65535.0) as u16,
-            blue: (self.render.background[2].clamp(0.0, 1.0) * 65535.0) as u16,
+            red: scale_channel(self.render.background[0]),
+            green: scale_channel(self.render.background[1]),
+            blue: scale_channel(self.render.background[2]),
             alpha: 65535,
         }
     }
@@ -258,7 +286,7 @@ impl backend::Backend for XrenderBackend {
         self.conn.render_set_picture_clip_rectangles(back, 0, 0, &[full])?;
         // The total region that changed this frame (bg clears ∪ window updates); copied to
         // the overlay at the end (the rest of the overlay retains the previous frame).
-        let mut damage: Vec<Rectangle> = clear.iter().map(to_rect).collect();
+        let mut damage: Vec<Rectangle> = rects(clear);
         if !damage.is_empty() {
             self.conn.render_fill_rectangles(PictOp::SRC, back, bg, &damage)?;
         }
@@ -275,7 +303,7 @@ impl backend::Backend for XrenderBackend {
                     && it.drain.is_none(),
                 "xrender: caps-gating should have zeroed all shader/mesh effect fields"
             );
-            if q.w <= 0 || q.h <= 0 || it.clip.is_empty() {
+            if should_skip(it) {
                 continue;
             }
             let depth = self.pixmap_depth(q.pixmap);
@@ -286,12 +314,12 @@ impl backend::Backend for XrenderBackend {
             }
             // Clip this window's draws to its visible + damaged rects; those rects are also
             // part of the region copied to the overlay below.
-            let clip: Vec<Rectangle> = it.clip.iter().map(to_rect).collect();
+            let clip = rects(&it.clip);
             damage.extend_from_slice(&clip);
             let _ = self.conn.render_set_picture_clip_rectangles(back, 0, 0, &clip);
             // Per-window opacity (fade × inactive-dim, already folded upstream) via a
             // cached constant-alpha mask; `NONE` = fully opaque.
-            let a = (q.opacity.clamp(0.0, 1.0) * 255.0).round() as u8;
+            let a = quantize_opacity(q.opacity);
             let mask = self.alpha_mask(a);
             let _ = self.conn.render_composite(
                 PictOp::OVER,
@@ -382,3 +410,6 @@ impl Drop for XrenderBackend {
         let _ = self.conn.flush();
     }
 }
+
+#[cfg(test)]
+mod tests;

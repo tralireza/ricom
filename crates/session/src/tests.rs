@@ -112,3 +112,77 @@ fn hop_view_hides_at_from_then_shows_at_to() {
         assert!((0.0..=1.0).contains(&o), "opacity {o} out of range at t={t}");
     }
 }
+
+// ── paint_region: the buffer-age partial-repaint decision ──────────────────────
+// The pure region math extracted from `App::composite` (the rest of composite is
+// X/GL-bound and only runs on i7; this decision does not, so it's Mac-testable).
+
+/// A single-rect `Region` for terse fixtures.
+fn reg(x: i32, y: i32, w: i32, h: i32) -> Region {
+    Region::from_rect(Rect::from_xywh(x, y, w, h))
+}
+
+/// The screen rect used across these fixtures.
+fn screen() -> Rect {
+    Rect::from_xywh(0, 0, 100, 100)
+}
+
+#[test]
+fn paint_region_own_full_overrides_age() {
+    let hist: VecDeque<Region> = VecDeque::new();
+    let dmg = reg(10, 10, 5, 5);
+    // own_full forces a whole-screen repaint even with an otherwise-usable age.
+    let p = paint_region(true, 1, &dmg, &hist, screen());
+    assert_eq!(p.rects(), Region::from_rect(screen()).rects());
+}
+
+#[test]
+fn paint_region_unusable_age_is_full() {
+    let hist: VecDeque<Region> = VecDeque::new(); // no history retained
+    let dmg = reg(10, 10, 5, 5);
+    let full = Region::from_rect(screen());
+    // age <= 0 is the sentinel "backend can't report an age" → full.
+    assert_eq!(paint_region(false, 0, &dmg, &hist, screen()).rects(), full.rects());
+    assert_eq!(paint_region(false, -1, &dmg, &hist, screen()).rects(), full.rects());
+    // age older than history+1 (here > 1, with 0 history) can't be reconstructed → full.
+    assert_eq!(paint_region(false, 2, &dmg, &hist, screen()).rects(), full.rects());
+}
+
+#[test]
+fn paint_region_age1_is_this_frames_damage() {
+    let hist: VecDeque<Region> = VecDeque::new();
+    let dmg = reg(10, 10, 5, 5);
+    // age 1: the buffer holds last frame → repaint only this frame's damage (no history).
+    let p = paint_region(false, 1, &dmg, &hist, screen());
+    assert_eq!(p.rects(), dmg.rects());
+}
+
+#[test]
+fn paint_region_age2_unions_previous_frame() {
+    let mut hist: VecDeque<Region> = VecDeque::new();
+    hist.push_front(reg(50, 50, 5, 5)); // previous frame's damage (most-recent at front)
+    let dmg = reg(10, 10, 5, 5);
+    // age 2: this frame's damage ∪ the previous frame's (take(age-1) = take(1)).
+    let p = paint_region(false, 2, &dmg, &hist, screen());
+    let mut want = reg(10, 10, 5, 5);
+    want.union(&reg(50, 50, 5, 5));
+    assert_eq!(p.rects(), want.rects());
+    // and it does NOT reach back further than age-1 allows:
+    let mut hist3 = hist.clone();
+    hist3.push_back(reg(80, 80, 5, 5)); // an older frame that age 2 must NOT include
+    let p2 = paint_region(false, 2, &dmg, &hist3, screen());
+    assert_eq!(p2.rects(), want.rects());
+}
+
+#[test]
+fn paint_region_clips_to_screen() {
+    let hist: VecDeque<Region> = VecDeque::new();
+    let dmg = reg(90, 90, 50, 50); // pokes past the 100×100 screen edge
+    let p = paint_region(false, 1, &dmg, &hist, screen());
+    let mut want = reg(90, 90, 50, 50);
+    want.intersect_rect(&screen());
+    assert_eq!(p.rects(), want.rects());
+    for r in p.rects() {
+        assert!(r.x1 >= 0 && r.y1 >= 0 && r.x2 <= 100 && r.y2 <= 100, "rect {r:?} escaped screen");
+    }
+}
