@@ -12,20 +12,26 @@
 //! therefore only ever receives plain quads (enforced by `debug_assert!`s below), and
 //! drop-shadow / rounded-corners / blur are forced off upstream too.
 //!
-//! Minimal-correct first cut: textured blit + per-window opacity + occlusion/damage
-//! clip + inactive dim (free — dim is folded into `Quad.opacity` upstream). Deferred to
-//! Phase 2: drop shadow, rounded corners, backdrop blur, HUD/OSD text, affine
-//! spin/drain via `SetPictureTransform`, and a back-buffer for tear-free present (this
-//! cut draws straight to the overlay — a single persistent buffer, so it may tear).
+//! Textured blit + per-window opacity + occlusion/damage clip + inactive dim (free — dim
+//! is folded into `Quad.opacity` upstream). Tear-free present: the frame is composited to
+//! an offscreen back-buffer, then only the damaged region is shown via the **Present**
+//! extension in force-COPY mode — a vblank-synced copy that never flips, so the buffer
+//! retains its contents and `buffer_age()==1` stays valid for partial repaint. If Present
+//! / XFixes are unavailable (or `RICOM_XRENDER_NO_PRESENT` is set) it falls back to a
+//! direct RENDER copy (which can tear under motion). Still deferred: drop shadow, rounded
+//! corners, backdrop blur, HUD/OSD text, and affine spin/drain via `SetPictureTransform`.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use anyhow::{anyhow, Context, Result};
 use x11rb::connection::Connection as _;
+use x11rb::protocol::Event;
+use x11rb::protocol::present::{self, ConnectionExt as _};
 use x11rb::protocol::render::{
     Color, ConnectionExt as _, CreatePictureAux, PictOp, PictType, Pictforminfo, Pictformat, Picture,
 };
+use x11rb::protocol::xfixes::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::{ConnectionExt as _, Rectangle};
 use x11rb::rust_connection::RustConnection;
 
@@ -103,6 +109,17 @@ struct BackBuffer {
     h: i32,
 }
 
+/// Present-extension state for tear-free (vblank-synced) presentation. `None` on the
+/// backend when Present/XFixes are unavailable or `RICOM_XRENDER_NO_PRESENT` is set → the
+/// direct RENDER-copy fallback runs instead. (The Present event-context id is allocated in
+/// `setup_present` and freed on connection close, so it isn't kept here.)
+struct PresentState {
+    /// Reusable XFixes region holding this frame's update (damage) rects.
+    update_region: xfixes::Region,
+    /// Monotonic present serial, matched against `IdleNotify` to pace to vblank.
+    serial: Cell<u32>,
+}
+
 /// The GL-less render backend. Owns its **own** `RustConnection`: X resource ids are
 /// server-global, so the overlay window and the per-window named pixmaps created on
 /// `session`'s connection are valid here, and the `make_backend(config, window, visual)`
@@ -128,6 +145,8 @@ pub struct XrenderBackend {
     alpha_cache: RefCell<HashMap<u8, Picture>>,
     /// Offscreen back-buffer, (re)built lazily to the screen size (kills tearing).
     back: RefCell<Option<BackBuffer>>,
+    /// Present-extension state for vblank-synced presentation; `None` → direct-copy fallback.
+    present: Option<PresentState>,
 }
 
 impl XrenderBackend {
@@ -164,7 +183,16 @@ impl XrenderBackend {
             .context("xrender: create target Picture")?;
         conn.flush().ok();
 
-        tracing::info!(overlay = window, depth = odepth, "xrender backend up (pure x11rb, no EGL)");
+        // Bring up Present + XFixes for tear-free vblank-synced presentation (best-effort;
+        // falls back to a direct RENDER copy if unavailable).
+        let present = Self::setup_present(&conn, window);
+
+        tracing::info!(
+            overlay = window,
+            depth = odepth,
+            present = present.is_some(),
+            "xrender backend up (pure x11rb, no EGL)"
+        );
         Ok(XrenderBackend {
             conn,
             overlay: window,
@@ -176,6 +204,7 @@ impl XrenderBackend {
             depth_cache: RefCell::new(HashMap::new()),
             alpha_cache: RefCell::new(HashMap::new()),
             back: RefCell::new(None),
+            present,
         })
     }
 
@@ -258,6 +287,85 @@ impl XrenderBackend {
             alpha: 65535,
         }
     }
+
+    /// Try to bring up Present + XFixes for tear-free vblank-synced presentation on
+    /// `overlay`. Returns `None` (→ direct-copy fallback) if either extension is missing
+    /// or `RICOM_XRENDER_NO_PRESENT` is set. Best-effort: any failure degrades gracefully.
+    fn setup_present(conn: &RustConnection, overlay: u32) -> Option<PresentState> {
+        if std::env::var_os("RICOM_XRENDER_NO_PRESENT").is_some() {
+            tracing::info!("xrender: Present disabled via RICOM_XRENDER_NO_PRESENT → direct-copy present");
+            return None;
+        }
+        conn.present_query_version(1, 0).ok()?.reply().ok()?;
+        conn.xfixes_query_version(5, 0).ok()?.reply().ok()?;
+        // Select Complete/Idle notifies on the overlay. The event-context id is freed on
+        // connection close (backend lifetime == session), so we don't retain it.
+        let eid = conn.generate_id().ok()?;
+        conn.present_select_input(
+            eid,
+            overlay,
+            present::EventMask::COMPLETE_NOTIFY | present::EventMask::IDLE_NOTIFY,
+        )
+        .ok()?;
+        let update_region = conn.generate_id().ok()?;
+        conn.xfixes_create_region(update_region, &[]).ok()?;
+        conn.flush().ok();
+        tracing::info!("xrender: Present up (vblank-synced force-COPY, single retained back-buffer)");
+        Some(PresentState { update_region, serial: Cell::new(0) })
+    }
+
+    /// Show the back-buffer's damaged region on the overlay via Present in **force-COPY**
+    /// mode: a vblank-synced copy that never flips, so the back-buffer keeps its contents
+    /// and `buffer_age()==1` stays valid. Blocks until the matching `IdleNotify` — the
+    /// buffer is then safe to redraw next frame, and this paces us to the refresh rate
+    /// (like `eglSwapBuffers`). Bounded so a missing notify can't wedge the compositor.
+    fn present_frame(&self, p: &PresentState, damage: &[Rectangle]) -> Result<()> {
+        let Some(back_pixmap) = self.back.borrow().as_ref().map(|b| b.pixmap) else {
+            return Ok(());
+        };
+        self.conn.xfixes_set_region(p.update_region, damage)?;
+        let serial = p.serial.get().wrapping_add(1);
+        p.serial.set(serial);
+        self.conn.present_pixmap(
+            self.overlay,
+            back_pixmap,
+            serial,
+            x11rb::NONE,                      // valid: whole pixmap is valid
+            p.update_region,                  // update: only the damaged region (implies copy)
+            0,
+            0,                                // x_off, y_off
+            x11rb::NONE,                      // target_crtc: any
+            x11rb::NONE,                      // wait_fence
+            x11rb::NONE,                      // idle_fence
+            u32::from(present::Option::COPY), // force COPY — never flip → buffer_age stays 1
+            0,                                // target_msc: next frame
+            0,                                // divisor
+            0,                                // remainder
+            &[],                              // notifies
+        )?;
+        self.conn.flush().ok();
+        // Wait (bounded) for this present's IdleNotify — the buffer is then safe to redraw
+        // next frame. The server does the copy at vblank (COPY, not ASYNC), so tear-freeness
+        // is already guaranteed; this wait only prevents redrawing a buffer still being read.
+        // Poll + brief sleeps with a hard deadline so a missing notify degrades to a skipped
+        // pace, NEVER a frozen compositor (the overlay is always mapped on a real server, so
+        // idle normally arrives within a frame).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        loop {
+            match self.conn.poll_for_event() {
+                Ok(Some(Event::PresentIdleNotify(e))) if e.serial == serial => break,
+                Ok(Some(_)) => continue, // discard CompleteNotify / stale notifies
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+                Err(_) => break,
+            }
+        }
+        Ok(())
+    }
 }
 
 impl backend::Backend for XrenderBackend {
@@ -338,29 +446,39 @@ impl backend::Backend for XrenderBackend {
             let _ = self.conn.render_free_picture(src);
         }
 
-        // Present: copy ONLY the damaged region from the persistent back-buffer to the
-        // overlay (the rest retains the previous frame). Nothing changed -> nothing to do.
+        // Present ONLY the damaged region from the persistent back-buffer (the rest of the
+        // overlay retains the previous frame). Nothing changed -> nothing to do.
         if damage.is_empty() {
             self.conn.flush().ok();
             return Ok(());
         }
-        self.conn.render_set_picture_clip_rectangles(back, 0, 0, &[full])?; // read back fully as source
-        self.conn.render_set_picture_clip_rectangles(self.target, 0, 0, &damage)?;
-        self.conn.render_composite(
-            PictOp::SRC,
-            back,
-            x11rb::NONE,
-            self.target,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            screen_w.max(0) as u16,
-            screen_h.max(0) as u16,
-        )?;
-        self.conn.flush().ok();
+        if let Some(p) = &self.present {
+            // Tear-free path: hand the back-buffer to Present in force-COPY mode (vblank-
+            // synced, never flips → the buffer retains content, so buffer_age()==1 holds),
+            // updating only the damaged region.
+            self.present_frame(p, &damage)?;
+        } else {
+            // Fallback (Present/XFixes unavailable, or RICOM_XRENDER_NO_PRESENT): copy the
+            // damaged region straight from the back-buffer to the overlay — no vblank sync,
+            // so this can tear under heavy motion.
+            self.conn.render_set_picture_clip_rectangles(back, 0, 0, &[full])?; // read back fully
+            self.conn.render_set_picture_clip_rectangles(self.target, 0, 0, &damage)?;
+            self.conn.render_composite(
+                PictOp::SRC,
+                back,
+                x11rb::NONE,
+                self.target,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                screen_w.max(0) as u16,
+                screen_h.max(0) as u16,
+            )?;
+            self.conn.flush().ok();
+        }
         Ok(())
     }
 
@@ -406,6 +524,9 @@ impl Drop for XrenderBackend {
         if let Some(b) = self.back.borrow_mut().take() {
             let _ = self.conn.render_free_picture(b.pic);
             let _ = self.conn.free_pixmap(b.pixmap);
+        }
+        if let Some(p) = &self.present {
+            let _ = self.conn.xfixes_destroy_region(p.update_region);
         }
         let _ = self.conn.flush();
     }
