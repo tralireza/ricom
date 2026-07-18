@@ -171,6 +171,11 @@ impl XrenderBackend {
                 .render_create_picture(pic, pixmap, bfmt, &CreatePictureAux::new())
                 .context("xrender: create back Picture")?;
             *back = Some(BackBuffer { pixmap, pic, w, h });
+            // Clear the fresh buffer fully so undamaged areas aren't garbage before a
+            // force-full frame paints them (with buffer_age()==1 we only repaint damage).
+            let fr = Rectangle { x: 0, y: 0, width: w.max(1) as u16, height: h.max(1) as u16 };
+            let _ = self.conn.render_set_picture_clip_rectangles(pic, 0, 0, &[fr]);
+            let _ = self.conn.render_fill_rectangles(PictOp::SRC, pic, self.bg_color(), &[fr]);
         }
         Ok(back.as_ref().unwrap().pic)
     }
@@ -215,6 +220,16 @@ impl XrenderBackend {
         self.alpha_cache.borrow_mut().insert(a, pid);
         pid
     }
+
+    /// The configured background colour as an opaque RENDER `Color`.
+    fn bg_color(&self) -> Color {
+        Color {
+            red: (self.render.background[0].clamp(0.0, 1.0) * 65535.0) as u16,
+            green: (self.render.background[1].clamp(0.0, 1.0) * 65535.0) as u16,
+            blue: (self.render.background[2].clamp(0.0, 1.0) * 65535.0) as u16,
+            alpha: 65535,
+        }
+    }
 }
 
 impl backend::Backend for XrenderBackend {
@@ -225,14 +240,9 @@ impl backend::Backend for XrenderBackend {
         screen_h: i32,
         _hud: Option<&Hud>,
         _osd: Option<&Osd>,
-        _clear: &[Rect], // whole frame is recomposited each present (buffer_age()==0)
+        clear: &[Rect], // buffer_age()==1: only the damaged region is repainted each present
     ) -> Result<()> {
-        let bg = Color {
-            red: (self.render.background[0].clamp(0.0, 1.0) * 65535.0) as u16,
-            green: (self.render.background[1].clamp(0.0, 1.0) * 65535.0) as u16,
-            blue: (self.render.background[2].clamp(0.0, 1.0) * 65535.0) as u16,
-            alpha: 65535,
-        };
+        let bg = self.bg_color();
         let full = Rectangle {
             x: 0,
             y: 0,
@@ -240,15 +250,20 @@ impl backend::Backend for XrenderBackend {
             height: screen_h.max(0) as u16,
         };
 
-        // Compose the ENTIRE frame into the offscreen back-buffer, then copy it to the
-        // overlay in one op — so the visible overlay never shows a half-painted (cleared
-        // but not-yet-blitted) frame. Drawing straight to the overlay tears badly.
+        // Partial repaint: the back-buffer PERSISTS (holds last frame; buffer_age()==1), so
+        // update only the damaged region — clear the damaged background rects, composite the
+        // (already damage-clipped) windows, then copy just the damage to the overlay. Reset
+        // the back clip to full first so a leftover per-window clip doesn't restrict the fill.
         let back = self.ensure_back(screen_w, screen_h)?;
-        // Fresh frame: clear the whole back-buffer to the background colour.
         self.conn.render_set_picture_clip_rectangles(back, 0, 0, &[full])?;
-        self.conn.render_fill_rectangles(PictOp::SRC, back, bg, &[full])?;
+        // The total region that changed this frame (bg clears ∪ window updates); copied to
+        // the overlay at the end (the rest of the overlay retains the previous frame).
+        let mut damage: Vec<Rectangle> = clear.iter().map(to_rect).collect();
+        if !damage.is_empty() {
+            self.conn.render_fill_rectangles(PictOp::SRC, back, bg, &damage)?;
+        }
 
-        // Composite each window bottom-to-top (session already ordered `items`) onto the back-buffer.
+        // Composite each window bottom-to-top (session already ordered + damage-clipped `items`).
         for it in items {
             let q = &it.quad;
             debug_assert!(
@@ -269,8 +284,10 @@ impl backend::Backend for XrenderBackend {
             if self.conn.render_create_picture(src, q.pixmap, fmt, &CreatePictureAux::new()).is_err() {
                 continue;
             }
-            // Clip this window's draws to its visible + damaged rects.
+            // Clip this window's draws to its visible + damaged rects; those rects are also
+            // part of the region copied to the overlay below.
             let clip: Vec<Rectangle> = it.clip.iter().map(to_rect).collect();
+            damage.extend_from_slice(&clip);
             let _ = self.conn.render_set_picture_clip_rectangles(back, 0, 0, &clip);
             // Per-window opacity (fade × inactive-dim, already folded upstream) via a
             // cached constant-alpha mask; `NONE` = fully opaque.
@@ -293,9 +310,14 @@ impl backend::Backend for XrenderBackend {
             let _ = self.conn.render_free_picture(src);
         }
 
-        // Present: copy the finished back-buffer to the overlay in a single Composite
-        // (SRC = overwrite the whole screen). One op ⇒ no clear-then-blit banding.
-        self.conn.render_set_picture_clip_rectangles(self.target, 0, 0, &[full])?;
+        // Present: copy ONLY the damaged region from the persistent back-buffer to the
+        // overlay (the rest retains the previous frame). Nothing changed -> nothing to do.
+        if damage.is_empty() {
+            self.conn.flush().ok();
+            return Ok(());
+        }
+        self.conn.render_set_picture_clip_rectangles(back, 0, 0, &[full])?; // read back fully as source
+        self.conn.render_set_picture_clip_rectangles(self.target, 0, 0, &damage)?;
         self.conn.render_composite(
             PictOp::SRC,
             back,
@@ -331,7 +353,7 @@ impl backend::Backend for XrenderBackend {
     }
 
     fn buffer_age(&self) -> i32 {
-        0 // no buffer-age; session repaints full each frame
+        1 // single persistent back-buffer holds last frame -> session damage-clips (partial repaint)
     }
 
     fn caps(&self) -> BackendCaps {
