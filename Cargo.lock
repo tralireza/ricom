@@ -32,6 +32,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "backend-factory"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "backend",
+ "backend-gl",
+ "backend-xrender",
+ "config",
+]
+
+[[package]]
 name = "backend-gl"
 version = "0.1.0"
 dependencies = [
@@ -502,8 +513,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "backend",
- "backend-gl",
- "backend-xrender",
+ "backend-factory",
  "calloop",
  "config",
  "proto",

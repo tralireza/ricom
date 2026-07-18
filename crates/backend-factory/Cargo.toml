@@ -1,0 +1,11 @@
+[package]
+name = "backend-factory"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.103"
+backend = { version = "0.1.0", path = "../backend" }
+backend-gl = { version = "0.1.0", path = "../backend-gl" }
+backend-xrender = { version = "0.1.0", path = "../backend-xrender" }
+config = { version = "0.1.0", path = "../config" }

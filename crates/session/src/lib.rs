@@ -24,11 +24,10 @@ use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
 use backend::{
-    Backend, BackendCaps, Burn, DrainParams, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams,
-    RippleParams, WaveParams, WindowDraw,
+    Backend, BackendCaps, Burn, DrainParams, Hud, HudCorner, HudLoad, Osd, Quad, RippleParams,
+    WaveParams, WindowDraw,
 };
-use backend_gl::GlBackend;
-use backend_xrender::XrenderBackend;
+pub use backend_factory::make_backend;
 use region::{Rect, Region};
 
 /// Max frames of damage history kept for EGL buffer-age partial repaint.
@@ -38,46 +37,12 @@ const MAX_BUFFER_AGE: usize = 4;
 const WOBBLE_PAD: f32 = 8.0;
 /// Default `spin` rotation in degrees when a `Spin` block sets none (a full turn).
 const SPIN_DEFAULT_DEG: f64 = 360.0;
-use config::{Axis, BackendKind, Category, Config, Edge, FocusSource, OsdEffect, Primitive, RuleResult, WindowMatch};
+use config::{Axis, Category, Config, Edge, FocusSource, OsdEffect, Primitive, RuleResult, WindowMatch};
 use wm::anim::Fade;
 use wm::{Win, WindowId, WindowStack};
 use xconn::XConn;
 
 mod hotkey;
-
-/// Build the GL backend's render parameters from the config.
-fn render_params(cfg: &Config) -> RenderParams {
-    RenderParams {
-        shadow_radius: cfg.shadow.radius,
-        shadow_strength: cfg.shadow.strength,
-        background: cfg.background,
-        corner_radius: cfg.corner_radius,
-        blur_enabled: cfg.blur.enabled,
-        blur_passes: cfg.blur.passes,
-        blur_radius: cfg.blur.radius,
-        burn_seg_scale: cfg.burn.seg_scale,
-        burn_ember: cfg.burn.ember_width,
-        burn_ember_cool: cfg.burn.ember_cool,
-        burn_ember_hot: cfg.burn.ember_hot,
-        text_outline: cfg.font.outline_width,
-        text_outline_color: cfg.font.outline_color,
-        text_shadow: cfg.font.shadow_offset,
-        text_shadow_color: cfg.font.shadow_color,
-        text_outline_drop: cfg.font.outline_style.eq_ignore_ascii_case("drop"),
-    }
-}
-
-/// Build the render backend named by the config (`backend = …`). Only the GL backend
-/// exists today; a future xrender/glx backend slots in as another match arm. Returns
-/// a `Box<dyn Backend>` so `session` never names a concrete backend past this point.
-pub fn make_backend(config: &Config, window: Window, visual: u32) -> Result<Box<dyn Backend>> {
-    match config.backend {
-        BackendKind::Gl => Ok(Box::new(GlBackend::new(window, visual, render_params(config))?)),
-        BackendKind::Xrender => {
-            Ok(Box::new(XrenderBackend::new(window, visual, render_params(config))?))
-        }
-    }
-}
 
 /// Log any non-fatal config problems (unknown animation presets, blocks used in a
 /// category they don't fit). Parsing already rejects typos/unknown keys; these are
@@ -887,7 +852,7 @@ impl App {
                 self.config = cfg;
                 log_config_warnings(&self.config);
                 if let Some(b) = self.backend.as_mut() {
-                    b.set_render_params(render_params(&self.config));
+                    b.set_render_params(backend_factory::render_params(&self.config));
                     // Re-rasterise glyphs from the new font (or disable text) live.
                     if font_changed {
                         b.set_font(&self.config.font.path, self.config.font.size);

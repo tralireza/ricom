@@ -14,5 +14,4 @@ x11rb = { version = "0.13.2", features = ["all-extensions"] }
 xconn = { version = "0.1.0", path = "../xconn" }
 wm = { version = "0.1.0", path = "../wm" }
 backend = { version = "0.1.0", path = "../backend" }
-backend-gl = { version = "0.1.0", path = "../backend-gl" }
-backend-xrender = { version = "0.1.0", path = "../backend-xrender" }
+backend-factory = { version = "0.1.0", path = "../backend-factory" }
