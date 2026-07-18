@@ -21,6 +21,8 @@ OPTIONS:
                     Like --blit-test but draw every window at opacity FRAC
                     (0.0..1.0, default 0.5) — exercises the alpha-blend path.
     --config <PATH> Use this config file instead of the default location.
+    --backend gl|xrender
+                    Override the config's render backend for this run (A/B testing).
     --print-config  Print the effective config as TOML and exit (no X needed).
     --fps           Start with the FPS HUD visible (toggle live with its hotkey).
     -h, --help      Print this help and exit.
@@ -74,7 +76,7 @@ fn main() -> Result<()> {
     // Reject unknown flags so a typo doesn't silently launch the compositor.
     const FLAGS: &[&str] = &[
         "--gl-check", "--paint-test", "--blit-test", "--opacity-test", "--burn-test", "--config",
-        "--print-config", "--fps",
+        "--print-config", "--fps", "--backend",
     ];
     if let Some(bad) = args[1..]
         .iter()
@@ -140,6 +142,20 @@ fn main() -> Result<()> {
     // `--fps` starts with the HUD visible (still toggleable via its hotkey).
     if args.iter().any(|a| a == "--fps") {
         cfg.fps.enabled = true;
+    }
+
+    // `--backend gl|xrender` overrides the config's render backend for this run —
+    // handy for A/B testing a backend without editing ricom.toml. Applied before
+    // --print-config so the dump reflects the override.
+    if let Some(pos) = args.iter().position(|a| a == "--backend") {
+        match args.get(pos + 1).map(String::as_str) {
+            Some("gl") => cfg.backend = config::BackendKind::Gl,
+            Some("xrender") => cfg.backend = config::BackendKind::Xrender,
+            other => {
+                eprintln!("ricom: --backend needs 'gl' or 'xrender' (got {other:?})");
+                std::process::exit(2);
+            }
+        }
     }
 
     // `ricom --print-config` dumps the effective settings as TOML and exits.
