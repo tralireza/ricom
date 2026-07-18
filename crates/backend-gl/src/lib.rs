@@ -1862,4 +1862,8 @@ impl backend::Backend for GlBackend {
     fn buffer_age(&self) -> i32 {
         GlBackend::buffer_age(self)
     }
+    fn caps(&self) -> BackendCaps {
+        // GL does every effect ricom has — shaders, mesh, blur, shadow, corners.
+        BackendCaps::all()
+    }
 }

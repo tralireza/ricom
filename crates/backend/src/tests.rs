@@ -31,6 +31,10 @@ impl Backend for FakeBackend {
     fn buffer_age(&self) -> i32 {
         0
     }
+    fn caps(&self) -> BackendCaps {
+        // Model a reduced-capability backend (like XRender): no shaders/mesh/blur.
+        BackendCaps { shaders: false, mesh: false, blur: false, shadow: false, rounded_corners: false }
+    }
 }
 
 #[test]
@@ -44,4 +48,8 @@ fn backend_is_object_safe_and_swappable() {
     assert_eq!(b.buffer_age(), 0);
     assert_eq!(b.render_ms(), 0.0);
     b.present_windows(&[], 1920, 1080, None, None, &[]).unwrap();
+    // Capabilities flow through the vtable; the reduced fake advertises no shaders,
+    // while the full-featured default (GL) is all-true.
+    assert!(!b.caps().shaders);
+    assert_eq!(BackendCaps::all(), BackendCaps { shaders: true, mesh: true, blur: true, shadow: true, rounded_corners: true });
 }

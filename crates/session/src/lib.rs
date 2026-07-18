@@ -24,8 +24,8 @@ use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
 use backend::{
-    Backend, Burn, DrainParams, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams, RippleParams,
-    WaveParams, WindowDraw,
+    Backend, BackendCaps, Burn, DrainParams, Hud, HudCorner, HudLoad, Osd, Quad, RenderParams,
+    RippleParams, WaveParams, WindowDraw,
 };
 use backend_gl::GlBackend;
 use region::{Rect, Region};
@@ -129,6 +129,24 @@ fn map_axis(a: Axis) -> wm::anim::Axis {
         Axis::Both => wm::anim::Axis::Both,
         Axis::X => wm::anim::Axis::X,
         Axis::Y => wm::anim::Axis::Y,
+    }
+}
+
+/// Whether the active backend can render an animation primitive. Opacity/Scale/
+/// Translate are pure alpha/geometry — always available; the shader effects
+/// (Spin/Wave/Ripple/Burn/Drain) need `caps.shaders` and Wobble needs `caps.mesh`.
+/// When this is false, `start_anim` skips the primitive and falls back to a fade —
+/// see the close arm, where burn/drain must reroute to `begin_fade_out` so the
+/// window still reaps (they are close *drivers*, not decorations).
+fn caps_allow(caps: BackendCaps, block: &Primitive) -> bool {
+    match block {
+        Primitive::Opacity { .. } | Primitive::Scale { .. } | Primitive::Translate { .. } => true,
+        Primitive::Wobble { .. } => caps.mesh,
+        Primitive::Spin { .. }
+        | Primitive::Wave { .. }
+        | Primitive::Ripple { .. }
+        | Primitive::Burn
+        | Primitive::Drain { .. } => caps.shaders,
     }
 }
 
@@ -573,6 +591,9 @@ pub struct App {
     windows: WindowStack,
     overlay: Window,
     backend: Option<Box<dyn Backend>>,
+    /// What the active backend can render (cached from `backend.caps()` at build).
+    /// `session` gates shader-only effects to fade when a cap is missing.
+    caps: BackendCaps,
     gfx: HashMap<WindowId, WinGfx>,
     /// Cached per-window identity (WM_CLASS / type / title) for rule matching.
     identities: HashMap<WindowId, WinIdentity>,
@@ -712,6 +733,7 @@ impl App {
             windows: WindowStack::new(),
             overlay: 0,
             backend: None,
+            caps: BackendCaps::all(), // replaced with the real caps when the backend is built
             gfx: HashMap::new(),
             identities: HashMap::new(),
             active_window: None,
@@ -918,7 +940,9 @@ impl App {
         let visual = self.x.window_visual(self.overlay)?;
         self.x.redirect_subwindows()?;
         self.redirected = true;
-        self.backend = Some(make_backend(&self.config, self.overlay, visual)?);
+        let backend = make_backend(&self.config, self.overlay, visual)?;
+        self.caps = backend.caps(); // cache once; constant for a live backend
+        self.backend = Some(backend);
         // Load the on-screen-text font (HUD/OSD/notify). A missing/invalid font just
         // disables text; the compositor runs regardless.
         if let Some(b) = self.backend.as_mut() {
@@ -1362,6 +1386,17 @@ impl App {
         use std::f64::consts::{PI, TAU};
         use wm::anim::{Axis, Easing};
         const DUR: f64 = 0.6;
+        // Reject effects the active backend can't render (e.g. shader effects on XRender),
+        // so `ricomctl animate` reports it rather than silently arming a transform the
+        // compositor would drop. pop/stretch/unroll/slide/reset are pure geometry — always ok.
+        let (renderable, needs) = match effect {
+            "spin" | "wave" | "ripple" | "drain" => (self.caps.shaders, "a shader-capable"),
+            "wobble" => (self.caps.mesh, "a mesh-capable"),
+            _ => (true, ""),
+        };
+        if !renderable {
+            return Err(format!("effect '{effect}' needs {needs} backend (the active backend can't render it)"));
+        }
         match effect {
             "spin" => {
                 check_keys(effect, params)?;
@@ -1479,6 +1514,14 @@ impl App {
                 return proto::Reply::Error(format!(
                     "unknown focus effect '{effect}' (valid: {})",
                     config::FOCUS_EFFECTS.join(", ")
+                ));
+            }
+            // Reject a focus effect the active backend can't render (wobble→mesh; the
+            // rest are shader effects). On a full-caps backend this never triggers.
+            let renderable = if effect == "wobble" { self.caps.mesh } else { self.caps.shaders };
+            if !renderable {
+                return proto::Reply::Error(format!(
+                    "focus effect '{effect}' needs a shader/mesh-capable backend (the active backend can't render it)"
                 ));
             }
             self.config.anim.focus = effect.to_string();
@@ -1755,14 +1798,30 @@ impl App {
                 // at rest (a window re-mapped after fading/sliding out).
                 self.windows.reset_transforms(id);
                 let o = self.read_opacity(id);
-                if spec.blocks.iter().any(|b| matches!(b, Primitive::Opacity { .. })) {
+                let has_opacity = spec.blocks.iter().any(|b| matches!(b, Primitive::Opacity { .. }));
+                // Open-time motion primitives (all but the fade + close-only drivers), and
+                // whether ANY survive the backend's caps. If the spec wanted motion but the
+                // backend gated it all away, fall back to a fade so the window animates in
+                // rather than popping straight to full opacity.
+                let is_open_motion = |b: &Primitive| {
+                    matches!(b, Primitive::Scale { .. } | Primitive::Translate { .. }
+                        | Primitive::Wobble { .. } | Primitive::Spin { .. }
+                        | Primitive::Wave { .. } | Primitive::Ripple { .. })
+                };
+                let wants_motion = spec.blocks.iter().any(&is_open_motion);
+                let has_renderable_motion =
+                    spec.blocks.iter().any(|b| is_open_motion(b) && caps_allow(self.caps, b));
+                if has_opacity || (wants_motion && !has_renderable_motion) {
                     self.windows.fade_in(id, o, dur); // 0 -> target; clears closing
                 } else {
-                    // No fade block -> appear at full opacity, not mid-close.
+                    // No fade block -> appear at full opacity, not mid-close (motion carries it).
                     self.windows.set_opacity_settled(id, o);
                     self.windows.clear_closing(id);
                 }
                 for block in &spec.blocks {
+                    if !caps_allow(self.caps, block) {
+                        continue; // backend can't render this primitive; the fade above covers it
+                    }
                     match block {
                         Primitive::Scale { from, axis, easing } => {
                             let from = from.unwrap_or(self.config.anim.scale_from);
@@ -1817,8 +1876,13 @@ impl App {
                 if spec.blocks.is_empty() {
                     return false; // "none" -> instant close, nothing to animate
                 }
-                let has_burn = spec.blocks.iter().any(|b| matches!(b, Primitive::Burn));
-                let has_drain = spec.blocks.iter().any(|b| matches!(b, Primitive::Drain { .. }));
+                // Gate close drivers on caps: a shaderless backend can't run burn/drain, so
+                // treat them as absent → the fade/collapse driver below runs and still reaps
+                // the window. (Merely dropping the WindowDraw field would hold it opaque for
+                // the whole close, then pop — burn/drain OWN the reap, they aren't decoration.)
+                let has_burn = self.caps.shaders && spec.blocks.iter().any(|b| matches!(b, Primitive::Burn));
+                let has_drain =
+                    self.caps.shaders && spec.blocks.iter().any(|b| matches!(b, Primitive::Drain { .. }));
                 // A scale block targeting ~0 collapses the window to a line — that
                 // drives it invisible on its own, so no opacity fade is needed.
                 let collapses = spec.blocks.iter().any(|b| {
@@ -1827,6 +1891,9 @@ impl App {
                 });
                 let mut started = false;
                 for block in &spec.blocks {
+                    if !caps_allow(self.caps, block) {
+                        continue; // backend can't render this; fade/collapse (below) carries the close
+                    }
                     match block {
                         Primitive::Scale { from, axis, easing } => {
                             let to = from.unwrap_or(self.config.anim.scale_from);
@@ -2322,6 +2389,16 @@ impl App {
                     turbulence: d.turbulence,
                     seed: d.seed,
                 });
+                // Caps backstop (defense-in-depth): never hand an effect to a backend that
+                // can't render it. Arming is already caps-gated in start_anim/apply_effect;
+                // this guarantees safety if any arming path is missed or a new primitive is
+                // added without its gate. Inert on a full-caps backend (GL).
+                let mesh = if self.caps.mesh { mesh } else { None };
+                let (burn, spin, ripple, wave, drain) = if self.caps.shaders {
+                    (burn, spin, ripple, wave, drain)
+                } else {
+                    (None, None, None, None, None)
+                };
                 items.push((
                     Quad {
                         pixmap: pm,
@@ -2336,7 +2413,8 @@ impl App {
                         // Drop the shadow the instant a window starts closing (so it
                         // disappears on close rather than lingering through the fade)
                         // or while it wobbles. Size test uses the un-scaled rect.
-                        shadow: !wobbling
+                        shadow: self.caps.shadow
+                            && !wobbling
                             && !directional
                             && spin.is_none()
                             && !per_pixel
@@ -2346,11 +2424,17 @@ impl App {
                             && !w.closing,
                         // Frost the backdrop only for translucent windows (opaque
                         // ones hide their backdrop); never while wobbling.
-                        blur: !wobbling
+                        blur: self.caps.blur
+                            && !wobbling
                             && !per_pixel
                             && rr.blur.unwrap_or(self.config.blur.enabled)
                             && w.fade.current() < 1.0,
-                        corner_radius: if wobbling || directional || spin.is_some() || per_pixel {
+                        corner_radius: if !self.caps.rounded_corners
+                            || wobbling
+                            || directional
+                            || spin.is_some()
+                            || per_pixel
+                        {
                             0.0
                         } else {
                             rr.corner_radius.unwrap_or(self.config.corner_radius)
@@ -2731,6 +2815,7 @@ impl App {
                     (new_rect != old_rect).then_some((old_rect, new_rect))
                 });
                 if self.redirected
+                    && self.caps.mesh // a mesh-less backend (XRender) can't wobble; skip (window just moves)
                     && let Some((spring, friction)) = wobble
                     && let Some((old_rect, new_rect)) = mv
                 {

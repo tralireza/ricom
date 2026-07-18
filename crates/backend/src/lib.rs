@@ -213,6 +213,34 @@ pub struct GlInfo {
     pub version: String,
 }
 
+/// What a render backend can do — so `session` can gate shader-only effects and fall
+/// back to fade on a backend that lacks them (e.g. XRender has no programmable
+/// shaders). Queried once via [`Backend::caps`] and cached by the caller (it is
+/// constant for a live backend). Deliberately *small*: `gpu-timing` and
+/// `partial-repaint` need no flag — `render_ms() == 0.0` and `buffer_age() == 0`
+/// already act as "unsupported" sentinels; inactive-window dim rides `Quad.opacity`
+/// and on-screen text is gated by [`Backend::has_text`], so neither needs a cap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendCaps {
+    /// Per-pixel / per-vertex shader programs: `spin`, `ripple`, `wave`, `burn`, `drain`.
+    pub shaders: bool,
+    /// Deformable vertex mesh: the `wobble` primitive.
+    pub mesh: bool,
+    /// Backdrop blur (frost behind translucent windows).
+    pub blur: bool,
+    /// Drop shadows behind windows.
+    pub shadow: bool,
+    /// Rounded window corners.
+    pub rounded_corners: bool,
+}
+
+impl BackendCaps {
+    /// Everything supported — the full-featured (GL) default.
+    pub const fn all() -> Self {
+        BackendCaps { shaders: true, mesh: true, blur: true, shadow: true, rounded_corners: true }
+    }
+}
+
 /// Which screen corner the FPS HUD anchors to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HudCorner {
@@ -320,6 +348,10 @@ pub trait Backend {
 
     /// Back-buffer age for partial repaint; `0` = undefined / unsupported (repaint full).
     fn buffer_age(&self) -> i32;
+
+    /// What this backend can render. `session` caches this and gates unsupported
+    /// effects to fade; constant for a live backend, so don't call it per frame.
+    fn caps(&self) -> BackendCaps;
 }
 
 #[cfg(test)]
