@@ -125,6 +125,74 @@ fn alpha16(a: u8) -> u16 {
     a as u16 * 257
 }
 
+/// The flip swapchain's `buffer_age()` for a present count: a buffer is reused every `POOL_N`
+/// presents, so its content is `POOL_N` frames old once every buffer has been drawn once
+/// (`count >= POOL_N`); before that, `0` = full repaint. (Copy fallback returns 1 separately.)
+fn pool_buffer_age(count: u64) -> i32 {
+    if count >= POOL_N as u64 {
+        POOL_N as i32
+    } else {
+        0
+    }
+}
+
+/// Bytes per row for an A8 `PutImage`: X pads ZPixmap scanlines to the 32-bit boundary, so a
+/// `w`-wide row of 8-bit coverage occupies `(w + 3) & !3` bytes.
+fn a8_stride(w: usize) -> usize {
+    (w + 3) & !3
+}
+
+/// Premultiply straight `rgba` (0..1) into a RENDER 16-bit `Color`, so `PictOp::OVER` blends
+/// text + translucent panels correctly.
+fn premul_color(rgba: [f32; 4]) -> Color {
+    let a = rgba[3].clamp(0.0, 1.0);
+    Color {
+        red: scale_channel(rgba[0] * a),
+        green: scale_channel(rgba[1] * a),
+        blue: scale_channel(rgba[2] * a),
+        alpha: scale_channel(a),
+    }
+}
+
+/// Cache key for a straight `rgba` colour fill: packed RGBA8 (`0xAARRGGBB`).
+fn color_key(rgba: [f32; 4]) -> u32 {
+    let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
+    (q(rgba[3]) << 24) | (q(rgba[0]) << 16) | (q(rgba[1]) << 8) | q(rgba[2])
+}
+
+/// Frame-time graph bar colour (straight RGBA, before the whole-HUD opacity multiply): green
+/// with ≥½ budget headroom, amber to 85%, red at/over the vblank budget (a missed frame).
+fn graph_bar_color(ms: f32, budget: f32) -> [f32; 4] {
+    if ms <= budget * 0.5 {
+        [0.40, 0.90, 0.50, 0.90]
+    } else if ms <= budget * 0.85 {
+        [0.95, 0.80, 0.30, 0.90]
+    } else {
+        [0.95, 0.40, 0.35, 0.90]
+    }
+}
+
+/// Outline tap offsets (px) for the multi-draw text outline: a full 8-tap ring for an
+/// all-around outline, or 3 taps toward the bottom-right for a drop-shadow-style outline.
+fn outline_ring(r: f32, drop: bool) -> Vec<(f32, f32)> {
+    let h = r * std::f32::consts::FRAC_1_SQRT_2; // diagonal ring taps
+    if drop {
+        vec![(r, 0.0), (0.0, r), (h, h)]
+    } else {
+        vec![(r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r), (h, h), (-h, -h), (h, -h), (-h, h)]
+    }
+}
+
+/// HUD panel top-left for a corner anchor, inset by `margin` from the screen edge.
+fn hud_anchor(corner: HudCorner, sw: f32, sh: f32, panel_w: f32, panel_h: f32, margin: f32) -> (f32, f32) {
+    match corner {
+        HudCorner::TopLeft => (margin, margin),
+        HudCorner::TopRight => (sw - margin - panel_w, margin),
+        HudCorner::BottomLeft => (margin, sh - margin - panel_h),
+        HudCorner::BottomRight => (sw - margin - panel_w, sh - margin - panel_h),
+    }
+}
+
 /// Number of buffers in the flip swapchain. 2 = classic double-buffer (front on screen +
 /// back being drawn); each buffer is reused every `POOL_N` frames → `buffer_age() == POOL_N`.
 const POOL_N: usize = 2;
@@ -487,18 +555,11 @@ impl XrenderBackend {
     /// A **premultiplied** solid-fill Picture for straight `rgba` (0..1), cached by packed
     /// RGBA8. Premultiplied so `PictOp::OVER` blends text/translucent panels correctly.
     fn solid(&self, rgba: [f32; 4]) -> Picture {
-        let q = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
-        let key = (q(rgba[3]) << 24) | (q(rgba[0]) << 16) | (q(rgba[1]) << 8) | q(rgba[2]);
+        let key = color_key(rgba);
         if let Some(&p) = self.color_cache.borrow().get(&key) {
             return p;
         }
-        let af = rgba[3].clamp(0.0, 1.0);
-        let color = Color {
-            red: scale_channel(rgba[0] * af),
-            green: scale_channel(rgba[1] * af),
-            blue: scale_channel(rgba[2] * af),
-            alpha: scale_channel(af),
-        };
+        let color = premul_color(rgba);
         let Ok(pid) = self.conn.generate_id() else { return x11rb::NONE };
         if self.conn.render_create_solid_fill(pid, color).is_err() {
             return x11rb::NONE;
@@ -511,7 +572,7 @@ impl XrenderBackend {
     /// are padded to the X 32-bit boundary (ZPixmap requirement). `None` on any X failure.
     fn upload_glyph(&self, gr: &text::GlyphRaster) -> Option<GlyphPic> {
         let (w, h) = (gr.w.max(1) as u16, gr.h.max(1) as u16);
-        let stride = (gr.w + 3) & !3; // pad each row to 32 bits
+        let stride = a8_stride(gr.w); // pad each row to the 32-bit scanline boundary
         let mut buf = vec![0u8; stride * gr.h];
         for row in 0..gr.h {
             let (src, dst) = (row * gr.w, row * stride);
@@ -575,13 +636,7 @@ impl XrenderBackend {
         }
         let full = Rectangle { x: 0, y: 0, width: sw.max(0) as u16, height: sh.max(0) as u16 };
         let _ = self.conn.render_set_picture_clip_rectangles(back, 0, 0, &[full]);
-        let af = rgba[3].clamp(0.0, 1.0);
-        let c = Color {
-            red: scale_channel(rgba[0] * af),
-            green: scale_channel(rgba[1] * af),
-            blue: scale_channel(rgba[2] * af),
-            alpha: scale_channel(af),
-        };
+        let c = premul_color(rgba);
         let rect = Rectangle {
             x: x.round() as i16,
             y: y.round() as i16,
@@ -638,14 +693,7 @@ impl XrenderBackend {
             self.draw_run(back, sw, sh, x + style.shadow_px, y + style.shadow_px, px, style.shadow_color, s);
         }
         if style.outline_px > 0.0 && style.outline_color[3] > 0.0 {
-            let r = style.outline_px;
-            let h = r * std::f32::consts::FRAC_1_SQRT_2; // diagonal ring taps
-            let ring: &[(f32, f32)] = if style.outline_drop {
-                &[(r, 0.0), (0.0, r), (h, h)] // band toward bottom-right only
-            } else {
-                &[(r, 0.0), (-r, 0.0), (0.0, r), (0.0, -r), (h, h), (-h, -h), (h, -h), (-h, h)]
-            };
-            for &(dx, dy) in ring {
+            for (dx, dy) in outline_ring(style.outline_px, style.outline_drop) {
                 self.draw_run(back, sw, sh, x + dx, y + dy, px, style.outline_color, s);
             }
         }
@@ -691,12 +739,7 @@ impl XrenderBackend {
         let panel_w = content_w + pad * 2.0;
         let panel_h = th + graph_gap + graph_h + load_block_h + pad * 2.0;
         let a = hud.opacity;
-        let (px, py) = match hud.corner {
-            HudCorner::TopLeft => (margin, margin),
-            HudCorner::TopRight => (sw as f32 - margin - panel_w, margin),
-            HudCorner::BottomLeft => (margin, sh as f32 - margin - panel_h),
-            HudCorner::BottomRight => (sw as f32 - margin - panel_w, sh as f32 - margin - panel_h),
-        };
+        let (px, py) = hud_anchor(hud.corner, sw as f32, sh as f32, panel_w, panel_h, margin);
         self.fill_rect(back, sw, sh, px, py, panel_w, panel_h, [0.05, 0.05, 0.07, 0.72 * a]);
         if hud.graph {
             let samples = self.render_samples.borrow();
@@ -710,13 +753,7 @@ impl XrenderBackend {
                     }
                     let norm = (ms / budget).clamp(0.0, 1.0);
                     let bh = (norm * graph_h).max(1.0);
-                    let mut col = if ms <= budget * 0.5 {
-                        [0.40, 0.90, 0.50, 0.90]
-                    } else if ms <= budget * 0.85 {
-                        [0.95, 0.80, 0.30, 0.90]
-                    } else {
-                        [0.95, 0.40, 0.35, 0.90]
-                    };
+                    let mut col = graph_bar_color(ms, budget);
                     col[3] *= a;
                     self.fill_rect(back, sw, sh, bx, gy + (graph_h - bh), (bar_w - 0.5 * s).max(1.0), bh, col);
                 }
@@ -1052,8 +1089,8 @@ impl backend::Backend for XrenderBackend {
         // pool yet → 0. (Resize resets `count`; session force-fulls that frame regardless.)
         self.drain_present_events();
         match self.pool.borrow().as_ref() {
-            Some(p) if p.count >= POOL_N as u64 => POOL_N as i32,
-            _ => 0,
+            Some(p) => pool_buffer_age(p.count),
+            None => 0,
         }
     }
 
