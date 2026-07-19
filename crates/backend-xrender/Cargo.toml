@@ -10,3 +10,5 @@ tracing = "0.1.44"
 x11rb = { version = "0.13.2", features = ["all-extensions"] }
 region = { version = "0.1.0", path = "../region" }
 backend = { version = "0.1.0", path = "../backend" }
+# Runtime TrueType rasterisation for HUD/OSD text (pure Rust, no C deps) — same as backend-gl.
+fontdue = "0.9"
