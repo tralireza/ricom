@@ -5,7 +5,7 @@
 //! and composites `Composite(OVER, colour_fill, glyph_A8_mask, back)` at the pen — the
 //! RENDER analogue of a coverage blit. This module owns only the *pure* half: the font,
 //! the metric caches, and the per-glyph coverage raster (mirrors the fontdue half of
-//! `backend-gl/src/text.rs`, minus the GL atlas). Being X-free, it unit-tests on the Mac.
+//! `backend-gl/src/text.rs`, minus the GL atlas). Being X-free, it unit-tests anywhere.
 //!
 //! Layout is one glyph per codepoint, left to right by advance width; sizes round to the
 //! nearest integer px (the cache key). No shaping/hinting (fontdue is unhinted) — the

@@ -1,8 +1,8 @@
 //! Pure-helper tests for `backend-xrender` — the geometry / colour / opacity / text / flip
 //! math behind each frame: damage rects, per-window blend, A8 glyph padding, premultiplied
 //! colour fills, the flip swapchain's buffer-age, and HUD layout (anchor / graph / outline).
-//! No X connection, so these run on the Mac; the RENDER side effects in `present_windows`
-//! (`ensure_pool`, per-window composites, the Present page-flip) need a live server → i7 only.
+//! No X connection, so these run anywhere; the RENDER side effects in `present_windows`
+//! (`ensure_pool`, per-window composites, the Present page-flip) need a live X server.
 
 use super::*;
 use x11rb::protocol::render::Directformat;

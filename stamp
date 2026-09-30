@@ -1,12 +1,13 @@
 #!/bin/sh
 # Regenerate build.info — the version stamp baked into the binary via include_str!.
 #
-# Run this OUT-OF-BAND on the Mac (the source of truth) whenever you want the
-# stamp to reflect the current tree — typically right before syncing to i7. The
-# generated build.info is gitignored and travels to i7 as an ordinary file in the
-# rsync/scp, so both hosts compile the *same* stamp into `--version`. There is no
-# build.rs and no git on the i7 build path — i7 never re-derives the stamp, it just
-# bakes the file it received.
+# Run this OUT-OF-BAND whenever you want the stamp to reflect the current tree —
+# and once before the first build, since a fresh clone has no build.info and the
+# include_str! fails without it. The generated build.info is gitignored but is an
+# ordinary file, so it travels with the sources when you copy them to another
+# build host, and every host compiles the *same* stamp into `--version`. There is
+# no build.rs and no git on the build path — the build never re-derives the
+# stamp, it just bakes the file it finds.
 #
 # Format: "<short-hash>[-dirty] <commit-YYMMDD> <build-HH:MM:SS>"
 #   e.g.  "0124be1-dirty 260712 15:12:33"

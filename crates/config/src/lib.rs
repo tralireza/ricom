@@ -839,7 +839,7 @@ impl Default for Config {
 
 impl Default for Font {
     fn default() -> Self {
-        // A commonly-present monospace TTF; on i7 this is the same face the old
+        // A commonly-present monospace TTF — the same face the old
         // baked atlas used. Point it at any `.ttf` you like, or clear it to disable
         // on-screen text. A missing/invalid path degrades to "text disabled".
         Font {

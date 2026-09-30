@@ -1,6 +1,6 @@
 //! Proof the render seam is usable without any GL: a no-op `Backend` held behind
 //! `Box<dyn Backend>`. This is the concrete win the abstraction buys — the seam is
-//! now exercisable on the Mac (and by any future test double), not only on i7.
+//! now exercisable anywhere (and by any future test double), not only on a live X server.
 
 use super::*;
 

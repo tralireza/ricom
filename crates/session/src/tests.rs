@@ -1,5 +1,5 @@
 //! Pure-helper tests for `session` — the `ricomctl animate` param parsing +
-//! validation. No X / GL / socket, so these run on the Mac (unlike the rest of the
+//! validation. No X / GL / socket, so these run anywhere (unlike the rest of the
 //! crate, which only *runs* on Linux).
 
 use super::*;
@@ -115,7 +115,7 @@ fn hop_view_hides_at_from_then_shows_at_to() {
 
 // ── paint_region: the buffer-age partial-repaint decision ──────────────────────
 // The pure region math extracted from `App::composite` (the rest of composite is
-// X/GL-bound and only runs on i7; this decision does not, so it's Mac-testable).
+// X/GL-bound and needs a live X server; this decision doesn't, so it unit-tests anywhere).
 
 /// A single-rect `Region` for terse fixtures.
 fn reg(x: i32, y: i32, w: i32, h: i32) -> Region {

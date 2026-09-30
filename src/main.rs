@@ -52,8 +52,8 @@ _NET_WM_CM_S0.
 /// `ricom 0.1.0 (0124be1-dirty 260712 22:38:48)` — the contents of `build.info`
 /// (git short hash [+ `-dirty`] · HEAD commit date YYMMDD · local build time),
 /// baked in at compile time via `include_str!`. `build.info` is regenerated
-/// out-of-band by `./stamp` on the Mac (the source of truth) and synced to i7 as
-/// an ordinary file, so both hosts bake an identical stamp — no `build.rs`, and no
+/// out-of-band by `./stamp` and travels with the sources as an ordinary file, so
+/// every build host bakes an identical stamp — no `build.rs`, and no
 /// git on the build path. Changing `build.info` re-triggers this crate's rebuild
 /// (cargo tracks `include_str!` inputs, verified).
 fn version_string() -> String {

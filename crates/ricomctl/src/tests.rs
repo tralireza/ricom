@@ -1,4 +1,4 @@
-//! Arg-parsing tests for `ricomctl` — pure (no socket / env / X), Mac-runnable.
+//! Arg-parsing tests for `ricomctl` — pure (no socket / env / X), runnable anywhere.
 
 use super::*;
 
