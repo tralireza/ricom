@@ -435,6 +435,30 @@ impl XConn {
         Ok(reply.value32().and_then(|mut it| it.next()).filter(|&w| w != 0))
     }
 
+    /// The wallpaper a root-pixmap setter (xwallpaper, feh, hsetroot, …) published in
+    /// `_XROOTPMAP_ID` — or the older `ESETROOT_PMAP_ID` — as `(pixmap, width, height)`.
+    /// `None` when neither is set (`0` = unset) or its pixmap is gone: a setter may free
+    /// the previous one when replacing it, so `GetGeometry` both validates and sizes it.
+    pub fn get_root_pixmap(&self) -> Result<Option<(u32, u16, u16)>> {
+        for name in ["_XROOTPMAP_ID", "ESETROOT_PMAP_ID"] {
+            let prop = self.atom(name)?;
+            let reply = self
+                .conn
+                .get_property(false, self.root, prop, AtomEnum::ANY, 0, 1)
+                .with_context(|| format!("get_property({name})"))?
+                .reply()
+                .with_context(|| format!("get_property({name}) reply"))?;
+            let Some(pixmap) = reply.value32().and_then(|mut it| it.next()).filter(|&p| p != 0)
+            else {
+                continue;
+            };
+            if let Ok(g) = self.conn.get_geometry(pixmap).context("get_geometry(root pixmap)")?.reply() {
+                return Ok(Some((pixmap, g.width, g.height)));
+            }
+        }
+        Ok(None)
+    }
+
     /// The name of an interned atom (reverse of [`atom`](Self::atom)).
     pub fn atom_name(&self, atom: Atom) -> Result<String> {
         let reply = self

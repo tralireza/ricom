@@ -33,7 +33,7 @@ https://github.com/user-attachments/assets/051b89cc-22a2-4cf1-8b9a-7aa63c9bef39
 - **A HUD it draws itself.** On-demand FPS / frame-time / loadavg overlay, rendered by a
   hand-rolled text engine (per-size native glyph cache, crisp from a configurable TrueType font), hotkey-toggled
   and movable between corners live.
-- **All hand-rolled.** Eight small Rust crates, pure-Rust deps only (`x11rb`, `calloop`, `glow`,
+- **All hand-rolled.** Eleven small Rust crates, pure-Rust deps only (`x11rb`, `calloop`, `glow`,
   `khronos-egl`, `fontdue`) — the Composite / Damage / Render / Present / RandR plumbing is written from
   scratch, no compositing toolkit.
 
@@ -164,11 +164,20 @@ Working today:
 - **GL backend** — an EGL context on the composite overlay, **texture-from-pixmap**
   (`EGLImage` → `glEGLImageTargetTexture2DOES`), a GLSL blit, and `eglSwapBuffers` with
   `swap_interval(1)` for vsync.
+- **A second render backend** — besides the default GL renderer, a pure-**x11rb XRender**
+  backend (RENDER + XFIXES, tear-free via the **Present** extension, buffer-age partial
+  repaint; no EGL/GL) ships behind the same `Backend` trait, chosen with `backend = "xrender"`
+  or `--backend xrender`. It advertises reduced **capabilities**, and the compositor
+  **caps-gates** each effect it can't render — shaders, mesh, scaling, blur, shadow, rounded
+  corners — down to a fade, so animations still play and close animations still reap their window.
 - **Renderer** — composite the visible window stack (mapped + fading-out) back-to-front with
   per-window opacity and drop shadows; **damage-driven**, plus a frame clock while anything animates.
   **Region-level occlusion culling** paints each window only where it isn't hidden behind an opaque
   one, and **`use-damage` partial repaint** (EGL buffer-age) redraws only the region that changed —
   so a static screen with one updating window repaints just that window, not the whole surface.
+- **Wallpaper** — draws the root pixmap a wallpaper setter publishes (`_XROOTPMAP_ID` /
+  `ESETROOT_PMAP_ID` — xwallpaper, feh, hsetroot, …) as the bottom layer, under every window, and
+  follows it live when the setter replaces it.
 - **Resolution changes** — follows RandR screen-size changes (`xrandr`) and re-composites at the new size.
 - **unredir-if-possible** — when one window covers the whole screen (e.g. fullscreen video), ricom
   unredirects and steps aside so it page-flips straight to the display (compositor cost → ~0); it drops
@@ -210,7 +219,7 @@ Working today:
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** the xrender/glx backends.
+**Not yet implemented:** the `glx` backend (the `xrender` backend has since landed — see above).
 See [Roadmap](#roadmap).
 
 ## How it works
@@ -328,20 +337,22 @@ the overlay-over-video case stays tear-free.
 ## Architecture
 
 A Cargo workspace whose root package is the `ricom` binary; the crates live under `crates/`
-(seven libraries + the `ricomctl` client binary):
+(ten libraries + the `ricomctl` client binary):
 
 ```
-ricom             workspace root + binary (event-loop wiring, CLI)
+ricom                 workspace root + binary (event-loop wiring, CLI)
 └─ crates/
-   ├─ region      pure-Rust pixman-style rectangle regions (damage maths)
-   ├─ xconn       x11rb wrapper: connection, extensions, atoms, overlay/redirect, pixmap/damage/focus
-   ├─ wm          window model + bottom-to-top stacking + per-window animation state (fade/scale/translate/spin/wobble)
-   ├─ backend     neutral render seam: the `Backend` trait + descriptor types (WindowDraw/Quad/Hud/Osd/RenderParams), no EGL/GL/X
-   ├─ backend-gl  the GL renderer: EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/mesh/spin/text shaders — impls `Backend`
-   ├─ config      TOML: settings, window rules, and composable animation/effect specs (parse/resolve/diff for live reload)
-   ├─ session     the compositor: owns X + wm + config + a `Box<dyn Backend>`, runs the calloop event loop
-   ├─ proto       control-channel wire types (NDJSON Command/Reply), shared by session + ricomctl
-   └─ ricomctl    thin control client: connects to the per-DISPLAY socket, sends one command, prints the reply
+   ├─ region          pure-Rust pixman-style rectangle regions (damage maths)
+   ├─ xconn           x11rb wrapper: connection, extensions, atoms, overlay/redirect, pixmap/damage/focus
+   ├─ wm              window model + bottom-to-top stacking + per-window animation state (fade/scale/translate/spin/wobble)
+   ├─ backend         neutral render seam: the `Backend` trait + descriptor types (WindowDraw/Quad/Hud/Osd/RenderParams/BackendCaps), no EGL/GL/X
+   ├─ backend-gl      the GL renderer: EGL context on the overlay, texture-from-pixmap, blit/shadow/blur/mesh/spin/text shaders — impls `Backend`
+   ├─ backend-xrender a pure-x11rb XRender renderer (RENDER + XFIXES + Present, no GL) — also impls `Backend`
+   ├─ backend-factory builds the `Box<dyn Backend>` from `config.backend`; the only crate that names both concrete backends
+   ├─ config          TOML: settings, window rules, and composable animation/effect specs (parse/resolve/diff for live reload)
+   ├─ session         the compositor: owns X + wm + config + a `Box<dyn Backend>`, runs the calloop event loop
+   ├─ proto           control-channel wire types (NDJSON Command/Reply), shared by session + ricomctl
+   └─ ricomctl        thin control client: connects to the per-DISPLAY socket, sends one command, prints the reply
 ```
 
 Dependencies are pure-Rust: [`x11rb`](https://github.com/psychon/x11rb) (XCB protocol),
@@ -389,7 +400,7 @@ ricom)`** to reload live — no restart. Every key is optional and falls back to
 
 ```toml
 unredir = true                  # false = always composite, even a lone fullscreen window
-background = [0.05, 0.05, 0.07]  # composite background colour (RGB, seen where no window covers)
+background = [0.05, 0.05, 0.07]  # composite background colour (RGB, seen where no window or wallpaper covers)
 corner_radius = 0.0             # window corner radius in px (0 = square)
 default_opacity = 1.0           # opacity for windows with no _NET_WM_WINDOW_OPACITY and no rule
 

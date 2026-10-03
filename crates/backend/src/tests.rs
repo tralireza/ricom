@@ -32,8 +32,15 @@ impl Backend for FakeBackend {
         0
     }
     fn caps(&self) -> BackendCaps {
-        // Model a reduced-capability backend (like XRender): no shaders/mesh/blur.
-        BackendCaps { shaders: false, mesh: false, blur: false, shadow: false, rounded_corners: false }
+        // Model a reduced-capability backend (like XRender): no shaders/mesh/scale/blur.
+        BackendCaps {
+            shaders: false,
+            mesh: false,
+            scale: false,
+            blur: false,
+            shadow: false,
+            rounded_corners: false,
+        }
     }
 }
 
@@ -51,5 +58,15 @@ fn backend_is_object_safe_and_swappable() {
     // Capabilities flow through the vtable; the reduced fake advertises no shaders,
     // while the full-featured default (GL) is all-true.
     assert!(!b.caps().shaders);
-    assert_eq!(BackendCaps::all(), BackendCaps { shaders: true, mesh: true, blur: true, shadow: true, rounded_corners: true });
+    assert_eq!(
+        BackendCaps::all(),
+        BackendCaps {
+            shaders: true,
+            mesh: true,
+            scale: true,
+            blur: true,
+            shadow: true,
+            rounded_corners: true,
+        }
+    );
 }

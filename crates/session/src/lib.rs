@@ -103,13 +103,16 @@ fn map_axis(a: Axis) -> wm::anim::Axis {
 
 /// Whether the active backend can render an animation primitive. Opacity/Scale/
 /// Translate are pure alpha/geometry — always available; the shader effects
-/// (Spin/Wave/Ripple/Burn/Drain) need `caps.shaders` and Wobble needs `caps.mesh`.
-/// When this is false, `start_anim` skips the primitive and falls back to a fade —
-/// see the close arm, where burn/drain must reroute to `begin_fade_out` so the
-/// window still reaps (they are close *drivers*, not decorations).
+/// (Spin/Wave/Ripple/Burn/Drain) need `caps.shaders`, Wobble needs `caps.mesh`, and
+/// Scale (pop/stretch/unroll) needs `caps.scale`. When this is false, `start_anim`
+/// skips the primitive and falls back to a fade — see the close arm, where burn/drain
+/// must reroute to `begin_fade_out` so the window still reaps (they are close *drivers*,
+/// not decorations). Opacity/Translate are backend-agnostic (a fade and a dest-rect
+/// move), so they are always allowed.
 fn caps_allow(caps: BackendCaps, block: &Primitive) -> bool {
     match block {
-        Primitive::Opacity { .. } | Primitive::Scale { .. } | Primitive::Translate { .. } => true,
+        Primitive::Opacity { .. } | Primitive::Translate { .. } => true,
+        Primitive::Scale { .. } => caps.scale,
         Primitive::Wobble { .. } => caps.mesh,
         Primitive::Spin { .. }
         | Primitive::Wave { .. }
@@ -144,6 +147,43 @@ fn paint_region(
         p.intersect_rect(&screen);
         p
     }
+}
+
+/// The wallpaper as the frame's bottom draw: a `(pixmap, width, height)` root pixmap
+/// shown at the origin wherever no opaque window `covered` it, within this frame's
+/// `paint` region. `None` when none of it is visible. Past the pixmap's extent (one
+/// smaller than the screen) the backend's background clear shows through.
+fn wallpaper_draw(
+    (pixmap, w, h): (u32, u16, u16),
+    screen: Rect,
+    covered: &Region,
+    paint: &Region,
+) -> Option<WindowDraw> {
+    let (w, h) = (i32::from(w), i32::from(h));
+    let mut visible = Region::from_xywh(0, 0, w, h);
+    visible.intersect_rect(&screen);
+    visible.subtract(covered);
+    visible.intersect(paint);
+    (!visible.is_empty()).then(|| WindowDraw {
+        quad: Quad {
+            pixmap,
+            x: 0,
+            y: 0,
+            w,
+            h,
+            opacity: 1.0,
+            shadow: false,
+            blur: false,
+            corner_radius: 0.0,
+        },
+        clip: visible.rects().to_vec(),
+        mesh: None,
+        burn: None,
+        spin: None,
+        ripple: None,
+        wave: None,
+        drain: None,
+    })
 }
 
 // ── `ricomctl animate` param overrides ────────────────────────────────────────
@@ -596,6 +636,10 @@ pub struct App {
     /// The EWMH active (focused) window (`_NET_ACTIVE_WINDOW`), for inactive-dim.
     /// `None` if no EWMH WM sets it → dimming stays inert.
     active_window: Option<WindowId>,
+    /// The wallpaper — the root pixmap a setter (xwallpaper, feh, …) published in
+    /// `_XROOTPMAP_ID` — as `(pixmap, width, height)`, composited as the bottom layer.
+    /// `None` → the uncovered screen shows the `background` colour.
+    wallpaper: Option<(u32, u16, u16)>,
     dirty: bool,
     /// Damage accumulated for the next composite (screen coords) — the paint region
     /// unless a structural change forces a full repaint.
@@ -733,6 +777,7 @@ impl App {
             gfx: HashMap::new(),
             identities: HashMap::new(),
             active_window: None,
+            wallpaper: None,
             dirty: true,
             frame_damage: Region::new(),
             force_full: true,
@@ -944,6 +989,9 @@ impl App {
         if let Some(b) = self.backend.as_mut() {
             b.set_font(&self.config.font.path, self.config.font.size);
         }
+        // Pick up a wallpaper already set; later changes arrive as root PropertyNotify
+        // (root events are selected above, so none can slip in between).
+        self.refresh_wallpaper();
 
         // Seed the stack + per-window resources from the current tree.
         for w in self.x.list_tree()? {
@@ -1384,10 +1432,13 @@ impl App {
         const DUR: f64 = 0.6;
         // Reject effects the active backend can't render (e.g. shader effects on XRender),
         // so `ricomctl animate` reports it rather than silently arming a transform the
-        // compositor would drop. pop/stretch/unroll/slide/reset are pure geometry — always ok.
+        // compositor would drop. slide/reset are backend-agnostic (a dest-rect move / an
+        // identity reset) — always ok; pop/stretch/unroll are scale-based, so they need a
+        // scaling backend (GL scales; XRender would crop, so it advertises caps.scale=false).
         let (renderable, needs) = match effect {
             "spin" | "wave" | "ripple" | "drain" => (self.caps.shaders, "a shader-capable"),
             "wobble" => (self.caps.mesh, "a mesh-capable"),
+            "pop" | "stretch" | "unroll" => (self.caps.scale, "a scaling"),
             _ => (true, ""),
         };
         if !renderable {
@@ -1880,11 +1931,15 @@ impl App {
                 let has_drain =
                     self.caps.shaders && spec.blocks.iter().any(|b| matches!(b, Primitive::Drain { .. }));
                 // A scale block targeting ~0 collapses the window to a line — that
-                // drives it invisible on its own, so no opacity fade is needed.
-                let collapses = spec.blocks.iter().any(|b| {
-                    matches!(b, Primitive::Scale { from, .. }
-                        if from.unwrap_or(self.config.anim.scale_from) <= 1e-3)
-                });
+                // drives it invisible on its own, so no opacity fade is needed. Gated on
+                // caps.scale: a backend that can't scale would crop rather than collapse,
+                // so treat it as non-collapsing → the fade fallback below carries the close
+                // (and still reaps the window).
+                let collapses = self.caps.scale
+                    && spec.blocks.iter().any(|b| {
+                        matches!(b, Primitive::Scale { from, .. }
+                            if from.unwrap_or(self.config.anim.scale_from) <= 1e-3)
+                    });
                 let mut started = false;
                 for block in &spec.blocks {
                     if !caps_allow(self.caps, block) {
@@ -2261,6 +2316,25 @@ impl App {
         self.dirty = true;
     }
 
+    /// (Re-)read the wallpaper root pixmap and repaint the whole screen with it — at
+    /// startup, and whenever a setter replaces it (root `_XROOTPMAP_ID` change).
+    fn refresh_wallpaper(&mut self) {
+        let new = self.x.get_root_pixmap().unwrap_or_else(|e| {
+            tracing::warn!("wallpaper: {e:#}");
+            None
+        });
+        if new != self.wallpaper {
+            match new {
+                Some((p, w, h)) => tracing::info!("wallpaper: root pixmap 0x{p:x} ({w}x{h})"),
+                None => tracing::info!("wallpaper: none — uncovered screen shows the background colour"),
+            }
+        }
+        self.wallpaper = new;
+        // Repaint even when the id is unchanged: a setter may redraw the same pixmap
+        // and re-announce it.
+        self.damage_full();
+    }
+
     /// Mark a window's on-screen rect for repaint; falls back to full if unknown.
     fn damage_window(&mut self, win: WindowId) {
         match self.windows.get(win) {
@@ -2331,7 +2405,11 @@ impl App {
                     wm::anim::Axis::X => (s, 1.0),
                     wm::anim::Axis::Y => (1.0, s),
                 };
-                let scaling = !wobbling && !burning && (s - 1.0).abs() > f64::EPSILON;
+                // caps.scale backstop (defense-in-depth): a scaleless backend (XRender) would
+                // crop the source into the smaller dest rect, so never emit scaled dims to it —
+                // arming is already caps-gated in start_anim/apply_effect; this is the safety net.
+                let scaling =
+                    self.caps.scale && !wobbling && !burning && (s - 1.0).abs() > f64::EPSILON;
                 // A directional stretch skips corner rounding + shadow while active (a
                 // rounded/shadowed 1-px sliver looks wrong); they return once settled.
                 let directional = scaling && !matches!(w.scale_axis, wm::anim::Axis::Both);
@@ -2515,6 +2593,11 @@ impl App {
                     covered.union(&occ);
                 }
             }
+        }
+        // The wallpaper is the bottom layer, under every window: pushed last onto this
+        // top-to-bottom list, so the reverse below makes it the first draw.
+        if let Some(wp) = self.wallpaper {
+            draws.extend(wallpaper_draw(wp, screen, &covered, &paint));
         }
         draws.reverse(); // restore bottom-to-top for correct layering
         tracing::trace!(windows = items.len(), drawn = draws.len(), "composite");
@@ -2861,6 +2944,13 @@ impl App {
                 {
                     let new = self.x.get_active_window().ok().flatten();
                     self.set_active_window(new);
+                }
+                // A setter published a new wallpaper (root pixmap) → re-read + repaint.
+                if ["_XROOTPMAP_ID", "ESETROOT_PMAP_ID"]
+                    .iter()
+                    .any(|n| self.x.atom(n).is_ok_and(|a| a == e.atom))
+                {
+                    self.refresh_wallpaper();
                 }
             }
             Event::PropertyNotify(e) => {

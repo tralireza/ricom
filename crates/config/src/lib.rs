@@ -34,8 +34,8 @@ pub struct Config {
     /// Repaint only the damaged region each frame (buffer-age partial repaint)
     /// instead of the whole screen. `true` (default); `false` forces full repaints.
     pub use_damage: bool,
-    /// Render backend: `"gl"` (EGL + OpenGL) — the only one today, chosen at startup.
-    /// `xrender` / `glx` are the roadmap alternatives.
+    /// Render backend, chosen at startup: `"gl"` (EGL + OpenGL, the default) or
+    /// `"xrender"` (pure x11rb RENDER, no GL). `glx` is the remaining roadmap alternative.
     pub backend: BackendKind,
     /// Composite background colour (RGB, `0.0..=1.0`), seen where no window covers.
     pub background: [f32; 3],

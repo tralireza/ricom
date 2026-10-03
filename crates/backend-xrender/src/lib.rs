@@ -1095,11 +1095,14 @@ impl backend::Backend for XrenderBackend {
     }
 
     fn caps(&self) -> BackendCaps {
-        // Shaderless, meshless, no blur/shadow/rounded-corners in the first cut → session
-        // fade-falls-back every effect it can't render (see the module docs).
+        // Shaderless, meshless, no scale-blit/blur/shadow/rounded-corners in the first cut →
+        // session fade-falls-back every effect it can't render (see the module docs). No
+        // `SetPictureTransform` yet, so `scale` is false: pop/stretch/unroll degrade to a fade
+        // rather than cropping the source pixmap into a smaller dest rect.
         BackendCaps {
             shaders: false,
             mesh: false,
+            scale: false,
             blur: false,
             shadow: false,
             rounded_corners: false,

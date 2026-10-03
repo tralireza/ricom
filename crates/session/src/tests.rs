@@ -10,6 +10,35 @@ fn p(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 }
 
 #[test]
+fn caps_allow_gates_scale_shader_mesh() {
+    // The seam invariant behind the XRender backend: session must not arm a primitive
+    // the active backend can't render. A scaleless backend (XRender: no SetPictureTransform)
+    // gates Scale off so it degrades to a fade instead of cropping the source pixmap.
+    let scale = Primitive::Scale { from: None, axis: Default::default(), easing: Default::default() };
+    let opacity = Primitive::Opacity { from: None, easing: Default::default() };
+    let translate = Primitive::Translate { dx: 0.0, dy: 0.0, edge: None, easing: Default::default() };
+    let spin = Primitive::Spin { degrees: None, easing: Default::default() };
+    let wobble = Primitive::Wobble { spring: None, friction: None };
+    let burn = Primitive::Burn;
+
+    // Full-caps backend (GL): every primitive is renderable.
+    let gl = BackendCaps::all();
+    for b in [&scale, &opacity, &translate, &spin, &wobble, &burn] {
+        assert!(caps_allow(gl, b), "a full-caps backend renders every primitive");
+    }
+
+    // XRender-like: no shaders / mesh / scale-blit. Scale, spin, and wobble gate off;
+    // opacity + translate (a fade and a dest-rect move) stay on for any backend.
+    let xr = BackendCaps { scale: false, shaders: false, mesh: false, ..BackendCaps::all() };
+    assert!(!caps_allow(xr, &scale), "scaleless backend must gate Scale (else it crops)");
+    assert!(!caps_allow(xr, &spin), "shaderless backend gates Spin");
+    assert!(!caps_allow(xr, &wobble), "meshless backend gates Wobble");
+    assert!(!caps_allow(xr, &burn), "shaderless backend gates Burn");
+    assert!(caps_allow(xr, &opacity), "opacity is backend-agnostic — always allowed");
+    assert!(caps_allow(xr, &translate), "translate is backend-agnostic — always allowed");
+}
+
+#[test]
 fn param_f32_absent_present_bad() {
     let ps = p(&[("amplitude", "0.12"), ("duration", "abc")]);
     assert_eq!(param_f32(&ps, "amplitude").unwrap(), Some(0.12));
@@ -185,4 +214,48 @@ fn paint_region_clips_to_screen() {
     for r in p.rects() {
         assert!(r.x1 >= 0 && r.y1 >= 0 && r.x2 <= 100 && r.y2 <= 100, "rect {r:?} escaped screen");
     }
+}
+
+// ── wallpaper_draw: the root pixmap as the frame's bottom layer ────────────────
+
+/// The pixels a draw's clip covers, as a `Region` (its rects are disjoint).
+fn clip_of(d: &WindowDraw) -> Region {
+    let mut g = Region::new();
+    for r in &d.clip {
+        g.add_rect(*r);
+    }
+    g
+}
+
+#[test]
+fn wallpaper_draw_bottom_layer_clips() {
+    let (full, none) = (Region::from_rect(screen()), Region::new());
+    // Uncovered + whole screen painted → one plain opaque quad at the origin, sized to
+    // the pixmap, clipped to the whole screen, no effect.
+    let d = wallpaper_draw((0xc0, 100, 100), screen(), &none, &full).expect("visible");
+    let q = d.quad;
+    assert_eq!((q.pixmap, q.x, q.y, q.w, q.h), (0xc0, 0, 0, 100, 100));
+    assert!(q.opacity == 1.0 && !q.shadow && !q.blur && q.corner_radius == 0.0);
+    assert!(d.mesh.is_none() && d.burn.is_none() && d.spin.is_none());
+    assert!(d.ripple.is_none() && d.wave.is_none() && d.drain.is_none());
+    assert_eq!(clip_of(&d).area(), 100 * 100);
+    // An opaque window over the left half → only the right half shows.
+    let d = wallpaper_draw((0xc0, 100, 100), screen(), &reg(0, 0, 50, 100), &full).expect("visible");
+    let c = clip_of(&d);
+    assert_eq!(c.area(), 50 * 100);
+    assert!(c.contains_point(75, 50) && !c.contains_point(25, 50));
+    // Fully covered, or nothing to repaint this frame → no draw at all.
+    assert!(wallpaper_draw((0xc0, 100, 100), screen(), &full, &full).is_none());
+    assert!(wallpaper_draw((0xc0, 100, 100), screen(), &none, &none).is_none());
+    // Partial repaint → only the damaged part.
+    let d = wallpaper_draw((0xc0, 100, 100), screen(), &none, &reg(10, 10, 5, 5)).expect("visible");
+    assert_eq!(clip_of(&d).rects(), reg(10, 10, 5, 5).rects());
+    // A pixmap smaller than the screen draws only its own extent (the background clear
+    // shows past it); a bigger one is clipped to the screen.
+    let d = wallpaper_draw((0xc0, 40, 30), screen(), &none, &full).expect("visible");
+    assert_eq!((d.quad.w, d.quad.h), (40, 30));
+    assert_eq!(clip_of(&d).area(), 40 * 30);
+    let d = wallpaper_draw((0xc0, 300, 200), screen(), &none, &full).expect("visible");
+    assert_eq!((d.quad.w, d.quad.h), (300, 200));
+    assert_eq!(clip_of(&d).area(), 100 * 100);
 }

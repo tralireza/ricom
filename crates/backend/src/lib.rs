@@ -226,6 +226,11 @@ pub struct BackendCaps {
     pub shaders: bool,
     /// Deformable vertex mesh: the `wobble` primitive.
     pub mesh: bool,
+    /// Content scaling — the `Scale` primitive (pop / stretch / unroll open, collapse
+    /// close). GL scales via texture-mapped UVs; a backend that can only 1:1-blit its
+    /// source (XRender, no `SetPictureTransform`) reports `false`, and `session` falls
+    /// the scale back to a plain fade rather than cropping the content.
+    pub scale: bool,
     /// Backdrop blur (frost behind translucent windows).
     pub blur: bool,
     /// Drop shadows behind windows.
@@ -237,7 +242,14 @@ pub struct BackendCaps {
 impl BackendCaps {
     /// Everything supported — the full-featured (GL) default.
     pub const fn all() -> Self {
-        BackendCaps { shaders: true, mesh: true, blur: true, shadow: true, rounded_corners: true }
+        BackendCaps {
+            shaders: true,
+            mesh: true,
+            scale: true,
+            blur: true,
+            shadow: true,
+            rounded_corners: true,
+        }
     }
 }
 
