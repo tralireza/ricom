@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # So a panicking test says where, rather than just exiting 101.
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, nightly]
+    # Linux is the one platform ricom supports, and a stock image is enough:
+    # x11rb is pure Rust and EGL/Xlib are dlopen'd at runtime, so nothing needs
+    # apt-installing to build, and no test opens an X connection, so nothing
+    # needs Xvfb to run them either.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # build.info is gitignored, but src/main.rs include_str!s it, so a fresh
+      # checkout does not compile at all until ./stamp has written one.
+      - run: ./stamp
+      # --workspace on every command: the root manifest is itself a package, so
+      # a bare cargo command selects only `ricom` — its dependencies compile,
+      # but none of their tests run, `ricomctl` is never built, and the run
+      # still finishes green.
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # The one step that links the real binaries: clippy stops short of
+      # codegen, and `cargo test` builds each bin as a test harness instead.
+      - run: cargo build --workspace
+      # No --all-targets here, unlike clippy: it would drop the doctests, which
+      # plain `cargo test` runs.
+      - run: cargo test --workspace
