@@ -502,10 +502,11 @@ ricomctl reload               # re-read the config (same as SIGHUP)
 ricomctl notify "hello" 3     # on-screen toast for 3s (top-center; effect via [osd] open/close)
 ricomctl animate 0x1a00007 spin  # play a transform on one window (spin|pop|stretch|unroll|slide|wobble|wave|ripple|drain|reset)
 ricomctl animate 0x1a00007 ripple amplitude=0.12 duration=4  # override effect params (key=value; keys mirror [anim])
+ricomctl animate 0x1a00007 slide edge=bottom-right  # fly in from just off-screen (default: top-left corner, ease-in, 0.3s)
 ricomctl animate 0x1a00007 drain depth=1  # drain a live window to a point and hold; `animate <win> reset` restores
 ricomctl set close drain turns=3   # live-select a transition's effect + params (session-only; reload reverts)
 ricomctl effects              # schematic (t=0 → ½ → 1) + params for every effect
-ricomctl ping                 # liveness + version banner
+ricomctl ping                 # liveness + version banner, incl. the running build's stamp (`version` adds a toast)
 ricomctl --json list          # machine-readable reply
 ```
 

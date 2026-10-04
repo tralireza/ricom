@@ -492,6 +492,12 @@ fn anim_spec_from_maps_and_routes() {
     // stretch → scale(x); slide → translate.
     assert!(matches!(&anim_spec_from("stretch", &[]).unwrap().blocks[0], Primitive::Scale { axis: Axis::X, .. }));
     assert!(matches!(&anim_spec_from("slide", &[("dx".into(), "40".into())]).unwrap().blocks[0], Primitive::Translate { .. }));
+    // slide's edge: sides keep their one-word names, corners are kebab-case.
+    for (v, want) in [("left", Edge::Left), ("top-left", Edge::TopLeft), ("bottom-right", Edge::BottomRight)] {
+        let s = anim_spec_from("slide", &[("edge".into(), v.into())]).unwrap();
+        assert!(matches!(s.blocks[0], Primitive::Translate { edge: Some(e), .. } if e == want), "edge={v}");
+    }
+    assert!(anim_spec_from("slide", &[("edge".into(), "topleft".into())]).is_err());
     // bad value type → Err.
     assert!(anim_spec_from("ripple", &[("amplitude".into(), "abc".into())]).is_err());
 }

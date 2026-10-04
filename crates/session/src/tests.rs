@@ -39,6 +39,40 @@ fn caps_allow_gates_scale_shader_mesh() {
 }
 
 #[test]
+fn missing_cap_gates_animate_and_set_focus() {
+    // `animate` and `set focus` share this gate. A full-caps backend renders every effect;
+    // a capless one (XRender) names the cap each shader/mesh/scale effect lacks, but still
+    // takes slide/reset/none — the old focus gate refused all but wobble as "shader".
+    let gl = BackendCaps::all();
+    for e in config::FOCUS_EFFECTS.iter().copied().chain(["drain"]) {
+        assert_eq!(missing_cap(gl, e), None, "a full-caps backend renders '{e}'");
+    }
+    let xr = BackendCaps { scale: false, shaders: false, mesh: false, ..BackendCaps::all() };
+    for e in ["spin", "wave", "ripple", "drain"] {
+        assert_eq!(missing_cap(xr, e), Some("a shader-capable"), "'{e}' is a shader effect");
+    }
+    assert_eq!(missing_cap(xr, "wobble"), Some("a mesh-capable"));
+    for e in ["pop", "stretch", "unroll"] {
+        assert_eq!(missing_cap(xr, e), Some("a scaling"), "'{e}' is a scale blit");
+    }
+    for e in ["none", "slide", "reset"] {
+        assert_eq!(missing_cap(xr, e), None, "'{e}' is backend-agnostic");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn version_banner_carries_build_stamp() {
+    let (ver, wire) = (env!("CARGO_PKG_VERSION"), proto::PROTOCOL_VERSION);
+    assert_eq!(
+        version_banner("119521d-dirty 261004 21:30:00"),
+        format!("ricom {ver} (119521d-dirty 261004 21:30:00; control v{wire})")
+    );
+    // No stamp (an embedder without `build.info`) → the plain release banner.
+    assert_eq!(version_banner(""), format!("ricom {ver} (control v{wire})"));
+}
+
+#[test]
 fn param_f32_absent_present_bad() {
     let ps = p(&[("amplitude", "0.12"), ("duration", "abc")]);
     assert_eq!(param_f32(&ps, "amplitude").unwrap(), Some(0.12));
@@ -56,6 +90,33 @@ fn param_axis_and_easing() {
 }
 
 #[test]
+fn param_edge_sides_and_corners() {
+    assert!(matches!(param_edge(&p(&[("edge", "left")])).unwrap(), Some(Edge::Left)));
+    assert!(matches!(param_edge(&p(&[("edge", "top-left")])).unwrap(), Some(Edge::TopLeft)));
+    assert!(param_edge(&p(&[])).unwrap().is_none());
+    assert!(param_edge(&p(&[("edge", "topleft")])).is_err());
+}
+
+#[test]
+fn resolve_offset_sides_and_corners() {
+    let (rect, scr) = ([100.0, 50.0, 400.0, 300.0], (1920, 1080));
+    // No edge → the explicit dx/dy, untouched.
+    assert_eq!(resolve_offset(-160.0, 0.0, None, rect, scr), [-160.0, 0.0]);
+    // A side clears the screen on one axis; a corner on both (a diagonal).
+    assert_eq!(resolve_offset(0.0, 0.0, Some(Edge::Left), rect, scr), [-500.0, 0.0]);
+    assert_eq!(resolve_offset(0.0, 0.0, Some(Edge::Bottom), rect, scr), [0.0, 1030.0]);
+    assert_eq!(resolve_offset(0.0, 0.0, Some(Edge::TopLeft), rect, scr), [-500.0, -350.0]);
+    assert_eq!(resolve_offset(0.0, 0.0, Some(Edge::TopRight), rect, scr), [1820.0, -350.0]);
+    assert_eq!(resolve_offset(0.0, 0.0, Some(Edge::BottomLeft), rect, scr), [-500.0, 1030.0]);
+    assert_eq!(resolve_offset(0.0, 0.0, Some(Edge::BottomRight), rect, scr), [1820.0, 1030.0]);
+    // `animate slide`'s default on a full-screen window: one whole screen up-left, at any
+    // resolution (1080p → the hand-tuned dx=-1920 dy=-1080).
+    let full = |w: f32, h: f32| resolve_offset(0.0, 0.0, Some(Edge::TopLeft), [0.0, 0.0, w, h], (w as i32, h as i32));
+    assert_eq!(full(1920.0, 1080.0), [-1920.0, -1080.0]);
+    assert_eq!(full(3840.0, 2160.0), [-3840.0, -2160.0]);
+}
+
+#[test]
 fn check_keys_strict() {
     // valid keys come from the shared proto::effect_params schema (single source).
     assert!(check_keys("ripple", &p(&[("amplitude", "0.1"), ("duration", "3")])).is_ok());
@@ -65,6 +126,10 @@ fn check_keys_strict() {
     // reset takes no params
     assert!(check_keys("reset", &p(&[("x", "1")])).is_err());
     assert!(check_keys("reset", &p(&[])).is_ok());
+    // slide moves by an edge *or* dx/dy: both at once is rejected, either alone is fine.
+    assert!(check_keys("slide", &p(&[("edge", "top-left"), ("dx", "5")])).is_err());
+    assert!(check_keys("slide", &p(&[("edge", "top-left"), ("duration", "0.5")])).is_ok());
+    assert!(check_keys("slide", &p(&[("dx", "-1920"), ("dy", "-1080")])).is_ok());
 }
 
 #[test]

@@ -58,7 +58,13 @@ _NET_WM_CM_S0.
 /// (cargo tracks `include_str!` inputs, verified).
 fn version_string() -> String {
     let base = concat!(env!("CARGO_PKG_NAME"), " ", env!("CARGO_PKG_VERSION"));
-    format!("{base} ({})", include_str!("../build.info").trim())
+    format!("{base} ({})", build_stamp())
+}
+
+/// The bare `build.info` stamp (see [`version_string`]) — also handed to the session,
+/// so the `ricomctl ping` / `version` banner names the build that is actually running.
+fn build_stamp() -> &'static str {
+    include_str!("../build.info").trim()
 }
 
 fn main() -> Result<()> {
@@ -165,7 +171,7 @@ fn main() -> Result<()> {
     }
 
     tracing::info!("{} starting", version_string());
-    let mut app = session::App::new(cfg, config_path)?;
+    let mut app = session::App::new(cfg, config_path, build_stamp())?;
     app.run()?;
     Ok(())
 }

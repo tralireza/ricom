@@ -20,3 +20,13 @@ fn mode_refresh_matches_xrandr() {
     assert_eq!(mode_refresh(&mode(0, 2200, 1125, ModeFlag::default())), None);
     assert_eq!(mode_refresh(&mode(148_500_000, 0, 0, ModeFlag::default())), None);
 }
+
+#[test]
+fn composited_skips_input_only() {
+    // Only a viewable InputOutput window has pixels to composite; an InputOnly one is
+    // never "mapped" for ricom, even when the server reports it viewable.
+    assert!(composited(MapState::VIEWABLE, WindowClass::INPUT_OUTPUT));
+    assert!(!composited(MapState::VIEWABLE, WindowClass::INPUT_ONLY));
+    assert!(!composited(MapState::UNVIEWABLE, WindowClass::INPUT_OUTPUT));
+    assert!(!composited(MapState::UNMAPPED, WindowClass::INPUT_OUTPUT));
+}

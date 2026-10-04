@@ -122,6 +122,22 @@ fn caps_allow(caps: BackendCaps, block: &Primitive) -> bool {
     }
 }
 
+/// The capability an in-place effect needs that `caps` lacks, phrased for the error
+/// ("needs {it} backend") — `None` when it's renderable. The one gate behind both
+/// `ricomctl animate` and `ricomctl set focus`: spin/wave/ripple/drain are shader
+/// programs, wobble is the mesh, pop/stretch/unroll are scale blits (XRender would crop,
+/// so it advertises `caps.scale = false`); slide (a dest-rect move), reset (an identity
+/// snap) and `none` need nothing.
+fn missing_cap(caps: BackendCaps, effect: &str) -> Option<&'static str> {
+    let (renderable, needs) = match effect {
+        "spin" | "wave" | "ripple" | "drain" => (caps.shaders, "a shader-capable"),
+        "wobble" => (caps.mesh, "a mesh-capable"),
+        "pop" | "stretch" | "unroll" => (caps.scale, "a scaling"),
+        _ => return None,
+    };
+    (!renderable).then_some(needs)
+}
+
 /// The region to repaint this frame, given the backend's `buffer_age`.
 ///
 /// `own_full` forces a whole-screen repaint — a structural change queued `force_full`,
@@ -228,9 +244,31 @@ fn param_easing(params: &[(String, String)]) -> Result<Option<wm::anim::Easing>,
     }
 }
 
+/// An `edge=` override — a side (`left`/`right`/`top`/`bottom`) or a corner
+/// (`top-left`/`top-right`/`bottom-left`/`bottom-right`). `Ok(None)` if absent.
+fn param_edge(params: &[(String, String)]) -> Result<Option<Edge>, String> {
+    match params.iter().find(|(k, _)| k == "edge") {
+        None => Ok(None),
+        Some((_, v)) => match v.as_str() {
+            "left" => Ok(Some(Edge::Left)),
+            "right" => Ok(Some(Edge::Right)),
+            "top" => Ok(Some(Edge::Top)),
+            "bottom" => Ok(Some(Edge::Bottom)),
+            "top-left" => Ok(Some(Edge::TopLeft)),
+            "top-right" => Ok(Some(Edge::TopRight)),
+            "bottom-left" => Ok(Some(Edge::BottomLeft)),
+            "bottom-right" => Ok(Some(Edge::BottomRight)),
+            _ => Err(format!(
+                "param 'edge' wants left|right|top|bottom|top-left|top-right|bottom-left|bottom-right, got '{v}'"
+            )),
+        },
+    }
+}
+
 /// Reject any provided key not valid for `effect` (strict), so a typo like `amplitud=`
-/// is flagged instead of silently ignored. Valid keys come from the shared
-/// [`proto::effect_params`] schema — the one source used by `animate`, `set`, and help.
+/// is flagged instead of silently ignored — likewise `slide`'s `edge` alongside
+/// `dx`/`dy`. Valid keys come from the shared [`proto::effect_params`] schema — the one
+/// source used by `animate`, `set`, and help.
 fn check_keys(effect: &str, params: &[(String, String)]) -> Result<(), String> {
     let valid = proto::effect_params(effect).unwrap_or(&[]);
     for (k, _) in params {
@@ -243,24 +281,36 @@ fn check_keys(effect: &str, params: &[(String, String)]) -> Result<(), String> {
             return Err(format!("effect '{effect}' has no param '{k}' (valid: {list})"));
         }
     }
+    // `slide` moves by an `edge` *or* by `dx`/`dy`: a translate with an edge ignores
+    // dx/dy, so taking both would silently drop one.
+    let has = |key: &str| params.iter().any(|(k, _)| k == key);
+    if effect == "slide" && has("edge") && (has("dx") || has("dy")) {
+        return Err("effect 'slide' takes edge or dx/dy, not both".into());
+    }
     Ok(())
 }
 
 /// The pixel offset for a `translate` block: explicit `dx`/`dy`, or — if an
 /// `edge` is given — the offset that moves the window's outer `rect`
-/// (`[x, y, w, h]`) fully off that screen edge (`screen` = root w×h). This is the
-/// away-from-rest offset: the window slides *in from* it on open, *out to* it on close.
+/// (`[x, y, w, h]`) fully off that screen edge (`screen` = root w×h); a corner
+/// combines its two edges' offsets (a diagonal). This is the away-from-rest offset:
+/// the window slides *in from* it on open, *out to* it on close.
 fn resolve_offset(dx: f32, dy: f32, edge: Option<Edge>, rect: [f32; 4], screen: (i32, i32)) -> [f32; 2] {
     let Some(edge) = edge else {
         return [dx, dy];
     };
     let [x, y, w, h] = rect;
     let (sw, sh) = (screen.0 as f32, screen.1 as f32);
+    let (left, right, top, bottom) = (-(x + w), sw - x, -(y + h), sh - y);
     match edge {
-        Edge::Left => [-(x + w), 0.0],
-        Edge::Right => [sw - x, 0.0],
-        Edge::Top => [0.0, -(y + h)],
-        Edge::Bottom => [0.0, sh - y],
+        Edge::Left => [left, 0.0],
+        Edge::Right => [right, 0.0],
+        Edge::Top => [0.0, top],
+        Edge::Bottom => [0.0, bottom],
+        Edge::TopLeft => [left, top],
+        Edge::TopRight => [right, top],
+        Edge::BottomLeft => [left, bottom],
+        Edge::BottomRight => [right, bottom],
     }
 }
 
@@ -677,6 +727,10 @@ pub struct App {
     /// Only consulted by the Linux-only reload path.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     config_path: Option<PathBuf>,
+    /// The binary's build stamp (`build.info`: hash · commit date · build time), for
+    /// the `ping` / `version` banner.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    build: &'static str,
     /// Whether the on-demand FPS HUD is currently visible (toggled by the hotkey).
     show_fps: bool,
     /// The resolved FPS-toggle hotkey as `(keycode, modifier_mask)`, or `None`
@@ -731,6 +785,19 @@ fn win_info(w: &Win, id: Option<&WinIdentity>) -> proto::WinInfo {
     }
 }
 
+/// The `ping` / `version` reply: crate version, the running binary's build stamp
+/// (`build.info`, handed over by the `ricom` bin — so a client sees *which* build is
+/// live, not just the release) and the control-protocol version.
+#[cfg(unix)]
+fn version_banner(build: &str) -> String {
+    let (ver, wire) = (env!("CARGO_PKG_VERSION"), proto::PROTOCOL_VERSION);
+    if build.is_empty() {
+        format!("ricom {ver} (control v{wire})")
+    } else {
+        format!("ricom {ver} ({build}; control v{wire})")
+    }
+}
+
 /// Read one `\n`-terminated line into `buf` (newline excluded), erroring past
 /// `cap` bytes so a client can't make us buffer unboundedly.
 #[cfg(unix)]
@@ -766,8 +833,9 @@ impl Drop for App {
 
 impl App {
     /// Connect to X and negotiate the extensions we depend on. `config` holds the
-    /// effect settings; `config_path` is remembered for `SIGHUP` reloads.
-    pub fn new(config: Config, config_path: Option<PathBuf>) -> Result<Self> {
+    /// effect settings; `config_path` is remembered for `SIGHUP` reloads; `build` is
+    /// the binary's build stamp, echoed by `ping` / `version`.
+    pub fn new(config: Config, config_path: Option<PathBuf>, build: &'static str) -> Result<Self> {
         let x = XConn::connect()?;
         x.setup_extensions()?;
         // Not named `display`: tracing's macros import `field::display`, which would shadow it.
@@ -798,6 +866,7 @@ impl App {
             hud_corner: hud_corner(&config.fps.corner),
             config,
             config_path,
+            build,
             fps_key: None,
             move_keys: Vec::new(),
             hud_move: None,
@@ -1229,11 +1298,7 @@ impl App {
                 if self.config.osd.enabled && self.config.osd.ack {
                     self.show_osd(">> pong!".into(), self.config.osd.duration.min(1.2), OSD_ACK);
                 }
-                Reply::Text(format!(
-                    "ricom {} (control v{})",
-                    env!("CARGO_PKG_VERSION"),
-                    proto::PROTOCOL_VERSION
-                ))
+                Reply::Text(version_banner(self.build))
             }
             C::Reload => {
                 #[cfg(target_os = "linux")]
@@ -1329,11 +1394,7 @@ impl App {
                 Reply::Ok
             }
             C::Version => {
-                let banner = format!(
-                    "ricom {} (control v{})",
-                    env!("CARGO_PKG_VERSION"),
-                    proto::PROTOCOL_VERSION
-                );
+                let banner = version_banner(self.build);
                 if self.config.osd.enabled {
                     self.show_osd(format!("_.* {banner} *._"), self.config.osd.duration, OSD_COOL);
                 }
@@ -1439,16 +1500,8 @@ impl App {
         const DUR: f64 = 0.6;
         // Reject effects the active backend can't render (e.g. shader effects on XRender),
         // so `ricomctl animate` reports it rather than silently arming a transform the
-        // compositor would drop. slide/reset are backend-agnostic (a dest-rect move / an
-        // identity reset) — always ok; pop/stretch/unroll are scale-based, so they need a
-        // scaling backend (GL scales; XRender would crop, so it advertises caps.scale=false).
-        let (renderable, needs) = match effect {
-            "spin" | "wave" | "ripple" | "drain" => (self.caps.shaders, "a shader-capable"),
-            "wobble" => (self.caps.mesh, "a mesh-capable"),
-            "pop" | "stretch" | "unroll" => (self.caps.scale, "a scaling"),
-            _ => (true, ""),
-        };
-        if !renderable {
+        // compositor would drop. `missing_cap` holds the table, shared with `set focus`.
+        if let Some(needs) = missing_cap(self.caps, effect) {
             return Err(format!("effect '{effect}' needs {needs} backend (the active backend can't render it)"));
         }
         match effect {
@@ -1473,11 +1526,19 @@ impl App {
             }
             "slide" => {
                 check_keys(effect, params)?;
-                let dx = param_f32(params, "dx")?.unwrap_or(-160.0);
-                let dy = param_f32(params, "dy")?.unwrap_or(0.0);
-                let dur = param_f32(params, "duration")?.map(f64::from).unwrap_or(DUR);
-                let ease = param_easing(params)?.unwrap_or(Easing::EaseOut);
-                self.windows.translate_in(win, [dx, dy], dur, ease);
+                // Explicit dx/dy = that pixel offset (a missing one is 0); else an `edge`
+                // sized to start the window just off-screen — by default the top-left
+                // corner, a diagonal fly-in that scales with the window and resolution.
+                let (dx, dy) = (param_f32(params, "dx")?, param_f32(params, "dy")?);
+                let edge = match param_edge(params)? {
+                    None if dx.is_none() && dy.is_none() => Some(Edge::TopLeft),
+                    e => e,
+                };
+                let rect = self.outer_rect_of(win);
+                let off = resolve_offset(dx.unwrap_or(0.0), dy.unwrap_or(0.0), edge, rect, self.screen());
+                let dur = param_f32(params, "duration")?.map(f64::from).unwrap_or(0.3);
+                let ease = param_easing(params)?.unwrap_or(Easing::EaseIn);
+                self.windows.translate_in(win, off, dur, ease);
             }
             "wobble" => {
                 check_keys(effect, params)?;
@@ -1570,12 +1631,12 @@ impl App {
                     config::FOCUS_EFFECTS.join(", ")
                 ));
             }
-            // Reject a focus effect the active backend can't render (wobble→mesh; the
-            // rest are shader effects). On a full-caps backend this never triggers.
-            let renderable = if effect == "wobble" { self.caps.mesh } else { self.caps.shaders };
-            if !renderable {
+            // Reject a focus effect the active backend can't render — the same gate as
+            // `animate` (the focus trigger plays through `apply_effect`), so a capless
+            // backend still takes none/slide/reset and the error names the missing cap.
+            if let Some(needs) = missing_cap(self.caps, effect) {
                 return proto::Reply::Error(format!(
-                    "focus effect '{effect}' needs a shader/mesh-capable backend (the active backend can't render it)"
+                    "focus effect '{effect}' needs {needs} backend (the active backend can't render it)"
                 ));
             }
             self.config.anim.focus = effect.to_string();
@@ -2829,6 +2890,12 @@ impl App {
             }
             Event::MapNotify(e) if e.window != self.overlay => {
                 tracing::debug!(window = e.window, "map");
+                // An InputOnly window has no pixels. Like picom, keep it in the stack (its id
+                // still anchors restacks) but never mapped, so it can't occlude, force an
+                // unredirect, animate, or fail a pixmap/damage request.
+                if self.x.is_input_only(e.window).unwrap_or(false) {
+                    return;
+                }
                 self.windows.set_mapped(e.window, true);
                 self.refresh_identity(e.window); // identity first — the open spec may be rule-gated
                 // Start the open animation *before* (re)painting, so if this map

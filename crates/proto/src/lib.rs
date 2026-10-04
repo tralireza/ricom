@@ -116,8 +116,9 @@ pub fn effect_params(effect: &str) -> Option<&'static [(&'static str, &'static s
             ("easing", "ease-out | ease-in | linear"),
         ],
         "slide" => &[
-            ("dx", "x offset in px"),
-            ("dy", "y offset in px"),
+            ("edge", "off-screen offset past a side or corner: left | right | top | bottom | top-left | …"),
+            ("dx", "x offset in px (instead of edge)"),
+            ("dy", "y offset in px (instead of edge)"),
             ("duration", "seconds"),
             ("easing", "ease-out | ease-in | linear"),
         ],

@@ -89,8 +89,9 @@ drain_depth = 0.9        # animate drain: drain this far then hold (0..1; 1 = to
 # Block params (all fields optional unless noted):
 #   opacity   { from, easing }
 #   scale     { from, axis = "both"|"x"|"y", easing }   # x/y = directional stretch
-#   translate { dx, dy, edge = "left"|"right"|"top"|"bottom", easing }
-#             #   edge = slide fully off that screen edge; else use dx/dy (px)
+#   translate { dx, dy, edge = "left"|"right"|"top"|"bottom"|"top-left"|…, easing }
+#             #   edge = slide fully off that screen edge, or past a corner ("top-left",
+#             #   "top-right", "bottom-left", "bottom-right": a diagonal); else use dx/dy (px)
 #   wobble    { spring, friction }
 #   wave      { amplitude, wavelength, speed, axis = "x"|"y", duration } # sinusoidal (per-pixel)
 #   ripple    { amplitude, wavelength, speed, r0, duration }           # radial refraction (GPU)

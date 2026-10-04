@@ -348,16 +348,21 @@ pub enum Easing {
     Linear,
 }
 
-/// Screen edge a `translate` starts from (open) / slides toward (close), when
-/// `edge` is given instead of explicit `dx`/`dy`. The offset is sized at runtime
-/// to move the window fully off that edge.
+/// Screen edge (or corner) a `translate` starts from (open) / slides toward (close),
+/// when `edge` is given instead of explicit `dx`/`dy`. The offset is sized at runtime
+/// to move the window fully off that edge; a corner moves it off both of its edges
+/// (a diagonal). Kebab-case names: `left` … `bottom`, `top-left` … `bottom-right`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum Edge {
     Left,
     Right,
     Top,
     Bottom,
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
 }
 
 /// Which axis/axes a `scale` block affects (always about the window centre).
@@ -407,7 +412,7 @@ pub enum Primitive {
         easing: Easing,
     },
     /// Pixel translate: either explicit `dx`/`dy` (offset away from rest), or an
-    /// `edge` the window slides from (open) / to (close).
+    /// `edge` (side or corner) the window slides from (open) / to (close).
     Translate {
         #[serde(default)]
         dx: f32,

@@ -32,7 +32,15 @@ pub struct WinInfo {
     pub width: u16,
     pub height: u16,
     pub border_width: u16,
+    /// Viewable *and* drawable — see [`composited`]: an InputOnly window has no pixels,
+    /// so it never counts as mapped (nothing names a pixmap for it or lets it occlude).
     pub mapped: bool,
+}
+
+/// Whether a window has pixels on screen to composite: viewable and not InputOnly
+/// (picom likewise leaves InputOnly windows unmanaged).
+fn composited(map_state: MapState, class: WindowClass) -> bool {
+    map_state == MapState::VIEWABLE && class != WindowClass::INPUT_ONLY
 }
 
 /// The display ricom reports on, per RandR (see [`XConn::display_info`]).
@@ -175,10 +183,16 @@ impl XConn {
                 width: geo.width,
                 height: geo.height,
                 border_width: geo.border_width,
-                mapped: attr.map_state == MapState::VIEWABLE,
+                mapped: composited(attr.map_state, attr.class),
             });
         }
         Ok(out)
+    }
+
+    /// Whether `win` is an InputOnly window (no pixels — never composited). Errors if
+    /// the window is gone.
+    pub fn is_input_only(&self, win: Window) -> Result<bool> {
+        Ok(self.conn.get_window_attributes(win)?.reply()?.class == WindowClass::INPUT_ONLY)
     }
 
     /// Become the compositing manager by owning `_NET_WM_CM_S<screen>`.
