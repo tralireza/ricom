@@ -1,3 +1,5 @@
+[![CI](https://github.com/tralireza/ricom/actions/workflows/ci.yml/badge.svg)](https://github.com/tralireza/ricom/actions/workflows/ci.yml)
+
 # ricom 🦀
 
 A robust **X11 compositor written from scratch in Rust** — a clean reimplementation of
