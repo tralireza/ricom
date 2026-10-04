@@ -700,9 +700,9 @@ impl XrenderBackend {
         self.draw_run(back, sw, sh, x, y, px, fill, s);
     }
 
-    /// Draw the FPS HUD onto `back` — panel + fps/ms numbers + optional render-time graph +
-    /// optional 1m/5m/15m load block — anchored to `hud.corner`. Ported from the GL layout;
-    /// plain text (no outline), square panel (no rounding) in this first cut.
+    /// Draw the FPS HUD onto `back` — panel + fps/ms numbers + optional display line + optional
+    /// render-time graph + optional 1m/5m/15m load block — anchored to `hud.corner`. Ported from
+    /// the GL layout; plain text (no outline), square panel (no rounding) in this first cut.
     fn draw_hud(&self, back: Picture, hud: &Hud, sw: i32, sh: i32) {
         if self.text_font.borrow().is_none() {
             return;
@@ -734,10 +734,14 @@ impl XrenderBackend {
         let load_cell = if has_load { self.text_line_height(load_px) } else { 0.0 };
         let load_gap = if has_load { 8.0 * s } else { 0.0 };
         let load_block_h = if has_load { load_gap + load_pitch + load_cell } else { 0.0 };
-        let content_w = tw.max(load_w);
+        // Display line under the numbers, set like the load block (policy: `hud_display_text`).
+        let disp = hud.display.as_ref().map(|d| hud_display_text(d, tw, |t| self.measure(load_px, t).0));
+        let disp_h = if disp.is_some() { self.text_line_height(load_px) } else { 0.0 };
+        let top_h = th + disp_h; // text rows above the graph
+        let content_w = tw.max(disp.as_ref().map_or(0.0, |(_, w)| *w)).max(load_w);
         let bar_w = if hud.graph { (content_w / HUD_GRAPH_SAMPLES as f32).max(1.0) } else { 0.0 };
         let panel_w = content_w + pad * 2.0;
-        let panel_h = th + graph_gap + graph_h + load_block_h + pad * 2.0;
+        let panel_h = top_h + graph_gap + graph_h + load_block_h + pad * 2.0;
         let a = hud.opacity;
         let (px, py) = hud_anchor(hud.corner, sw as f32, sh as f32, panel_w, panel_h, margin);
         self.fill_rect(back, sw, sh, px, py, panel_w, panel_h, [0.05, 0.05, 0.07, 0.72 * a]);
@@ -745,7 +749,7 @@ impl XrenderBackend {
             let samples = self.render_samples.borrow();
             if !samples.is_empty() {
                 let gx = px + pad;
-                let gy = py + pad + th + graph_gap;
+                let gy = py + pad + top_h + graph_gap;
                 for (i, &ms) in samples.iter().enumerate() {
                     let bx = gx + i as f32 * bar_w;
                     if bx >= gx + content_w {
@@ -763,6 +767,7 @@ impl XrenderBackend {
         let x0 = px + pad;
         let ny = py + pad;
         let col = [0.90, 1.0, 0.95, a];
+        let lcol = [0.80, 0.88, 1.0, a]; // secondary text: display line + load block
         // Outlined when `hud.outline` (reads without the panel), else plain — matches GL.
         let hstyle = if hud.outline { self.text_style(s, a) } else { TEXT_STYLE_NONE };
         let fw = self.measure(text_px, &fps_s).0;
@@ -772,13 +777,16 @@ impl XrenderBackend {
         let mw = self.measure(text_px, &ms_s).0;
         self.draw_styled(back, sw, sh, mx0 + msw - mw, ny, text_px, col, &hstyle, &ms_s);
         self.draw_styled(back, sw, sh, mx0 + msw, ny, text_px, col, &hstyle, sep2);
+        // Display line in its own row under the numbers, left-aligned with the load labels.
+        if let Some((ds, _)) = &disp {
+            self.draw_styled(back, sw, sh, x0, ny + th, load_px, lcol, &hstyle, ds);
+        }
         if let Some(l) = &hud.load {
-            let lcol = [0.80, 0.88, 1.0, a];
             let rows: [(&str, [Option<f32>; 3]); 2] = [
                 ("fps", [Some(l.fps[0]), Some(l.fps[1]), Some(l.fps[2])]),
                 ("ms", [l.render_ms[0], l.render_ms[1], l.render_ms[2]]),
             ];
-            let mut ly = py + pad + th + graph_gap + graph_h + load_gap;
+            let mut ly = py + pad + top_h + graph_gap + graph_h + load_gap;
             for (label, vals) in rows {
                 self.draw_styled(back, sw, sh, x0, ly, load_px, lcol, &hstyle, label);
                 for (k, v) in vals.iter().enumerate() {

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 
 use anyhow::{bail, Context, Result};
 use x11rb::connection::{Connection, RequestConnection};
+use x11rb::protocol::randr::{ModeFlag, ModeInfo};
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ChangeWindowAttributesAux, ConnectionExt as _, CreateWindowAux, EventMask,
     GrabMode, MapState, ModMask, Window, WindowClass,
@@ -32,6 +33,18 @@ pub struct WinInfo {
     pub height: u16,
     pub border_width: u16,
     pub mapped: bool,
+}
+
+/// The display ricom reports on, per RandR (see [`XConn::display_info`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DisplayInfo {
+    /// RandR output (connector) name, e.g. `"DP-2"`; empty if unreadable.
+    pub output: String,
+    /// The CRTC's screen-space size in px (post-rotation).
+    pub width: u16,
+    pub height: u16,
+    /// The mode's vertical refresh (Hz); `None` if it carries no timings.
+    pub refresh_hz: Option<f64>,
 }
 
 impl XConn {
@@ -269,27 +282,40 @@ impl XConn {
         Ok(())
     }
 
-    /// Current display refresh rate (Hz) from the first enabled CRTC's mode
-    /// (`dot_clock / (htotal * vtotal)`). `None` if RandR reports nothing usable.
-    pub fn refresh_hz(&self) -> Option<f64> {
+    /// The display ricom reports on (HUD readout + render budget): the RandR primary
+    /// output when it's lit, else the first enabled CRTC and its first output. `None`
+    /// if RandR reports no enabled CRTC.
+    pub fn display_info(&self) -> Option<DisplayInfo> {
         use x11rb::protocol::randr::ConnectionExt as _;
         let res = self.conn.randr_get_screen_resources_current(self.root).ok()?.reply().ok()?;
-        for &crtc in &res.crtcs {
-            let Ok(cookie) = self.conn.randr_get_crtc_info(crtc, res.config_timestamp) else {
-                continue;
-            };
-            let Ok(info) = cookie.reply() else { continue };
-            if info.mode == 0 {
-                continue; // disabled CRTC
-            }
-            if let Some(m) = res.modes.iter().find(|m| m.id == info.mode) {
-                let total = m.htotal as f64 * m.vtotal as f64;
-                if total > 0.0 {
-                    return Some(m.dot_clock as f64 / total);
-                }
-            }
-        }
-        None
+        let ts = res.config_timestamp;
+        let output_info = |o: u32| self.conn.randr_get_output_info(o, ts).ok()?.reply().ok();
+        // An enabled CRTC's info; `None` for a disabled one (mode 0).
+        let crtc_info = |c: u32| {
+            let info = self.conn.randr_get_crtc_info(c, ts).ok()?.reply().ok()?;
+            (info.mode != 0).then_some(info)
+        };
+        let primary = self.conn.randr_get_output_primary(self.root).ok().and_then(|c| c.reply().ok());
+        let lit_primary = primary
+            .filter(|p| p.output != 0)
+            .and_then(|p| output_info(p.output))
+            .filter(|o| o.crtc != 0)
+            .and_then(|o| Some((o.name, crtc_info(o.crtc)?)));
+        let (name, crtc) = match lit_primary {
+            Some(v) => v,
+            None => res.crtcs.iter().find_map(|&c| {
+                let info = crtc_info(c)?;
+                let name = info.outputs.first().and_then(|&o| output_info(o)).map(|o| o.name);
+                Some((name.unwrap_or_default(), info))
+            })?,
+        };
+        let refresh_hz = res.modes.iter().find(|m| m.id == crtc.mode).and_then(mode_refresh);
+        Some(DisplayInfo {
+            output: String::from_utf8_lossy(&name).into_owned(),
+            width: crtc.width,
+            height: crtc.height,
+            refresh_hz,
+        })
     }
 
     /// MANUAL-redirect all top-levels. NOTE: after this the server stops drawing
@@ -564,3 +590,22 @@ impl XConn {
         Ok((reply.focus > 1).then_some(reply.focus))
     }
 }
+
+/// Vertical refresh (Hz) of a RandR mode, computed as `xrandr` does: dot clock over the
+/// pixels per frame, doublescan doubling and interlace halving the line count (so an
+/// interlaced mode reports its field rate). `None` for a mode with no timings.
+pub fn mode_refresh(m: &ModeInfo) -> Option<f64> {
+    let flags = u32::from(m.mode_flags);
+    let mut lines = m.vtotal as f64;
+    if flags & u32::from(ModeFlag::DOUBLE_SCAN) != 0 {
+        lines *= 2.0;
+    }
+    if flags & u32::from(ModeFlag::INTERLACE) != 0 {
+        lines /= 2.0;
+    }
+    let total = m.htotal as f64 * lines;
+    (m.dot_clock > 0 && total > 0.0).then_some(m.dot_clock as f64 / total)
+}
+
+#[cfg(test)]
+mod tests;

@@ -149,11 +149,13 @@ video with a picture-in-picture corner overlay. Composited tear-free.*
 
 *Per-window opacity, fade in/out, and left+bottom drop shadows — composited tear-free.*
 
-![ricom's on-demand FPS HUD with the 1m/5m/15m load block, over running video](screenshots/ricom-fps.png)
+![ricom's on-demand FPS HUD — FPS and frame-time, the display mode line, a frame-time graph and the 1m/5m/15m load block, over running video](screenshots/ricom-fps.png)
 
-*The on-demand FPS HUD (toggled with `Super+Shift+F`) — FPS, frame-time, a rolling frame-time
-graph, and a `loadavg`-style 1m/5m/15m block (fps + GPU render time), drawn by the built-in SDF
-text engine over running video. The same figures are logged on `SIGUSR1`.*
+*The on-demand FPS HUD (toggled with `Super+Shift+F`) — FPS and frame-time, the display's mode and
+output name, a rolling frame-time graph, and a `loadavg`-style 1m/5m/15m block (fps + GPU render
+time), over running video. Shown on a 2160p screen, where the HUD scales to 2× — every glyph is
+rendered at its on-screen size, so the text stays crisp. The 1m/5m/15m figures are also logged on
+`SIGUSR1`.*
 
 ## Features
 
@@ -205,7 +207,8 @@ Working today:
   (arbitrary UTF-8 strings, crisp at any size, rasterised at runtime from a configurable TrueType
   font via `fontdue`) — ricom's first on-screen text.
   The hotkey's modifiers + arrow keys move it between corners live, and it auto-scales with resolution
-  (2× at 4K).
+  (2× at 4K). By default it also **auto-hops** to a random other corner every 5 minutes (fading out,
+  then back in), tuned by the `[fps] auto_move*` keys and toggled for the session with `ricomctl fps auto`.
 - **Load average** — a `loadavg`-style 1m/5m/15m rolling average of compositor FPS and GPU
   render time (from a per-second ring), shown as a block in the FPS HUD and logged on demand
   with `kill -USR1 $(pidof ricom)`. Damage-driven, so it reads ~idle during fullscreen bypass
@@ -221,8 +224,12 @@ Working today:
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
 
-**Not yet implemented:** the `glx` backend (the `xrender` backend has since landed — see above).
-See [Roadmap](#roadmap).
+**Not yet implemented:** a `glx` backend, and live per-window opacity / dim overrides over
+`ricomctl` — see [Roadmap](#roadmap).
+
+**Known behaviour:** an arrow-key HUD move pressed *during* an auto-hop (`auto_move_duration`,
+0.6 s by default) is ignored — the hop still lands in the corner it picked. Press again once it
+has settled.
 
 ## How it works
 
@@ -436,7 +443,12 @@ enabled = false                 # start with the FPS HUD visible (also toggled b
 hotkey = "Super+Shift+F"        # toggle shortcut (XGrabKey); its modifiers + arrows move corners live
 corner = "bottom-left"          # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true                    # rolling frame-time graph under the numbers
+display = true                  # resolution@refresh line under the numbers (+ output name if it fits)
 scale = 1.0                     # size multiplier on top of auto screen-height scaling (4K = 2×)
+auto_move = true                # hop to a random other corner every interval (fade out, then in)
+auto_move_interval = 300.0      # seconds between hops (5 min)
+auto_move_duration = 0.6        # seconds one hop takes
+auto_move_avoid = []            # corners a hop never lands on, e.g. ["top-left"]
 
 # Per-window rules (none by default). Each [[rule]] has a `match` (all conditions must hold —
 # class/instance/window_type exact, title substring, fullscreen state) plus the fields it
@@ -484,6 +496,7 @@ socket at `$XDG_RUNTIME_DIR/ricom-<display>.sock` (falling back to
 ricomctl list                 # tracked windows (id, class, opacity, geometry, title)
 ricomctl inspect 0x1a00007    # one window's details
 ricomctl fps toggle           # flip the FPS HUD
+ricomctl fps auto off         # stop the HUD's corner auto-hop (on|off|toggle; session-only; reload reverts)
 ricomctl unredir off          # force compositing at fullscreen (on|off|toggle; effects show on fullscreen)
 ricomctl reload               # re-read the config (same as SIGHUP)
 ricomctl notify "hello" 3     # on-screen toast for 3s (top-center; effect via [osd] open/close)
@@ -520,11 +533,14 @@ FocusChange, per-rule exemptible); and a **Unix-socket control channel** (`ricom
 live `list` / `inspect` / `animate` / `set` / `effects` / `fps toggle` / `unredir` / `reload` over a per-`$DISPLAY` socket.
 Plus **unredir-if-possible** — a lone fullscreen window bypasses the compositor and page-flips straight to
 the display (live-toggled via `ricomctl unredir`) — and an **`above`** rule that keeps matching windows
-composited on top regardless of X stacking.
+composited on top regardless of X stacking. And a second render backend: a pure-x11rb **XRender**
+renderer behind the same `Backend` trait (RENDER + XFIXES, tear-free via Present, buffer-age partial
+repaint), picked with `backend = "xrender"` / `--backend xrender` — effects it can't draw fall back
+to a fade.
 
 Next:
 
-1. Alternative render backends (xrender / glx).
+1. A third render backend, `glx` (OpenGL via GLX rather than EGL).
 2. Live per-window opacity / dim overrides over `ricomctl` (animation overrides already ship via
    `animate` / `set`).
 

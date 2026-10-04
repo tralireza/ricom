@@ -270,6 +270,51 @@ pub struct HudLoad {
     pub render_ms: [Option<f32>; 3],
 }
 
+/// The display the HUD reports on — resolution, refresh and connector, from RandR.
+/// Shown on its own line under the HUD's numbers (see [`hud_display_text`]).
+pub struct HudDisplay {
+    /// Screen-space size in px (post-rotation).
+    pub width: u32,
+    pub height: u32,
+    /// Vertical refresh (Hz); `None` if the mode carries no usable timing.
+    pub refresh_hz: Option<f32>,
+    /// RandR output (connector) name, e.g. `"DP-2"`; empty if unknown.
+    pub output: String,
+}
+
+impl HudDisplay {
+    /// `"3840x2160@60Hz"` — resolution plus refresh (no `@…Hz` when unknown).
+    pub fn mode_label(&self) -> String {
+        match self.refresh_hz {
+            Some(hz) => format!("{}x{}@{}Hz", self.width, self.height, format_hz(hz)),
+            None => format!("{}x{}", self.width, self.height),
+        }
+    }
+}
+
+/// A refresh rate at xrandr's two decimals, trailing zeros dropped: `60`, `59.94`, `143.86`.
+fn format_hz(hz: f32) -> String {
+    let s = format!("{hz:.2}");
+    s.trim_end_matches('0').trim_end_matches('.').to_string()
+}
+
+/// The HUD's display line: `"3840x2160@60Hz  DP-2"`, or the mode alone when the output
+/// name is unknown or the full line would be wider than `max_w` (the numbers line, so the
+/// name never widens the panel; the mode always shows). `measure` is the backend's text
+/// width at the line's size. Returns the text and its measured width.
+pub fn hud_display_text(d: &HudDisplay, max_w: f32, measure: impl Fn(&str) -> f32) -> (String, f32) {
+    let mode = d.mode_label();
+    if !d.output.is_empty() {
+        let full = format!("{mode}  {}", d.output);
+        let w = measure(&full);
+        if w <= max_w {
+            return (full, w);
+        }
+    }
+    let w = measure(&mode);
+    (mode, w)
+}
+
 /// One frame's HUD data, drawn by [`Backend::present_windows`] when `Some`. The
 /// graph itself is fed by the backend's own GPU render-time samples.
 pub struct Hud {
@@ -283,6 +328,8 @@ pub struct Hud {
     pub scale: f32,
     /// Current display refresh rate (Hz) — one refresh interval is the render budget.
     pub refresh_hz: f32,
+    /// Display line under the numbers (resolution · refresh · output); `None` = off.
+    pub display: Option<HudDisplay>,
     /// Optional 1m/5m/15m load block, shown under the graph (`Super+Shift+L`).
     pub load: Option<HudLoad>,
     /// Outline the HUD text (per `RenderParams` text style) so it reads without the

@@ -70,3 +70,33 @@ fn backend_is_object_safe_and_swappable() {
         }
     );
 }
+
+fn display(output: &str, hz: Option<f32>) -> HudDisplay {
+    HudDisplay { width: 3840, height: 2160, refresh_hz: hz, output: output.to_string() }
+}
+
+#[test]
+fn hud_display_mode_label() {
+    // xrandr's two decimals, trailing zeros trimmed; no `@…Hz` without a timing.
+    assert_eq!(display("", Some(60.0)).mode_label(), "3840x2160@60Hz");
+    assert_eq!(display("", Some(59.9997)).mode_label(), "3840x2160@60Hz");
+    assert_eq!(display("", Some(59.94)).mode_label(), "3840x2160@59.94Hz");
+    assert_eq!(display("", Some(143.856)).mode_label(), "3840x2160@143.86Hz");
+    assert_eq!(display("", Some(74.9)).mode_label(), "3840x2160@74.9Hz");
+    assert_eq!(display("", Some(120.0)).mode_label(), "3840x2160@120Hz");
+    assert_eq!(display("", None).mode_label(), "3840x2160");
+}
+
+#[test]
+fn hud_display_text_never_widens_for_the_name() {
+    let w = |t: &str| t.len() as f32 * 10.0; // fake font: 10 px per char
+    let d = display("DP-2", Some(60.0));
+    // Full line = 20 chars = 200 px: fits a 260 px numbers line, and exactly 200.
+    assert_eq!(hud_display_text(&d, 260.0, w), ("3840x2160@60Hz  DP-2".to_string(), 200.0));
+    assert_eq!(hud_display_text(&d, 200.0, w).0, "3840x2160@60Hz  DP-2");
+    // Any narrower and the name would widen the panel → the mode alone (14 chars).
+    assert_eq!(hud_display_text(&d, 199.0, w), ("3840x2160@60Hz".to_string(), 140.0));
+    // The mode shows even when it alone is wider; no output name → the mode alone.
+    assert_eq!(hud_display_text(&d, 50.0, w).0, "3840x2160@60Hz");
+    assert_eq!(hud_display_text(&display("", Some(60.0)), 1e6, w).0, "3840x2160@60Hz");
+}

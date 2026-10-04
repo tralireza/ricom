@@ -255,18 +255,21 @@ pub struct Fps {
     pub corner: String,
     /// Draw the rolling frame-time graph beneath the numbers.
     pub graph: bool,
+    /// Show a display line under the numbers: resolution@refresh, plus the RandR output
+    /// name (e.g. `DP-2`) when it fits without widening the HUD.
+    pub display: bool,
     /// Extra size multiplier for the HUD, on top of the automatic screen-height
     /// scaling (`1.0` = auto only; e.g. `1.5` = 1.5× larger).
     pub scale: f32,
     /// Outline the HUD text (using the `[font]` outline/shadow style) so it reads
     /// without the panel. `false` (default) = plain text; the panel gives contrast.
     pub outline: bool,
-    /// Auto-hop: every `auto_move_interval` seconds the HUD fade-slides to a random
-    /// different corner. `true` (default). Live-toggleable via `ricomctl fps auto`.
+    /// Auto-hop: every `auto_move_interval` seconds the HUD fades out, then back in at a
+    /// random different corner. `true` (default). Live-toggleable via `ricomctl fps auto`.
     pub auto_move: bool,
     /// Seconds between auto-hops (default `300.0` = 5 min).
     pub auto_move_interval: f64,
-    /// Fade-slide duration of one auto-hop, in seconds (default `0.6`).
+    /// Duration of one auto-hop (fade out, then in), in seconds (default `0.6`).
     pub auto_move_duration: f64,
     /// Corners the auto-hop must never pick as a *destination*, e.g.
     /// `["top-left", "bottom-right"]`. Empty (the code default) = all four corners
@@ -931,6 +934,7 @@ impl Default for Fps {
             hotkey: "Super+Shift+F".to_string(),
             corner: "top-right".to_string(),
             graph: true,
+            display: true,
             scale: 1.0,
             outline: false,
             auto_move: true,
@@ -1046,6 +1050,7 @@ impl Config {
         chg!("fps.hotkey", prev.fps.hotkey, self.fps.hotkey);
         chg!("fps.corner", prev.fps.corner, self.fps.corner);
         chg!("fps.graph", prev.fps.graph, self.fps.graph);
+        chg!("fps.display", prev.fps.display, self.fps.display);
         chg!("fps.scale", prev.fps.scale, self.fps.scale);
         chg!("fps.outline", prev.fps.outline, self.fps.outline);
         chg!("fps.auto_move_avoid", prev.fps.auto_move_avoid, self.fps.auto_move_avoid);

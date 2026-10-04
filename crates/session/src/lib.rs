@@ -24,8 +24,8 @@ use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{NotifyDetail, NotifyMode, Place, Window};
 
 use backend::{
-    Backend, BackendCaps, Burn, DrainParams, Hud, HudCorner, HudLoad, Osd, Quad, RippleParams,
-    WaveParams, WindowDraw,
+    Backend, BackendCaps, Burn, DrainParams, Hud, HudCorner, HudDisplay, HudLoad, Osd, Quad,
+    RippleParams, WaveParams, WindowDraw,
 };
 pub use backend_factory::make_backend;
 use region::{Rect, Region};
@@ -40,7 +40,7 @@ const SPIN_DEFAULT_DEG: f64 = 360.0;
 use config::{Axis, Category, Config, Edge, FocusSource, OsdEffect, Primitive, RuleResult, WindowMatch};
 use wm::anim::Fade;
 use wm::{Win, WindowId, WindowStack};
-use xconn::XConn;
+use xconn::{DisplayInfo, XConn};
 
 mod hotkey;
 
@@ -694,6 +694,9 @@ pub struct App {
     rng: u64,
     /// Cached display refresh rate (Hz) for the HUD graph's budget; refreshed on RandR.
     refresh_hz: f64,
+    /// The display the HUD reports (RandR primary, else the first lit output) — the
+    /// source of `refresh_hz`; refreshed on RandR. `None` if RandR reported nothing.
+    display: Option<DisplayInfo>,
     /// Rolling frame-rate meter, sampled each composite while redirected.
     fps_meter: FpsMeter,
     /// 1m/5m/15m compositor-load ring, fed one sample per composited frame; shown
@@ -767,7 +770,10 @@ impl App {
     pub fn new(config: Config, config_path: Option<PathBuf>) -> Result<Self> {
         let x = XConn::connect()?;
         x.setup_extensions()?;
-        let refresh_hz = x.refresh_hz().unwrap_or(60.0);
+        // Not named `display`: tracing's macros import `field::display`, which would shadow it.
+        let disp = x.display_info();
+        tracing::info!(display = ?disp, "display");
+        let refresh_hz = disp.as_ref().and_then(|d| d.refresh_hz).unwrap_or(60.0);
         Ok(App {
             x,
             windows: WindowStack::new(),
@@ -798,6 +804,7 @@ impl App {
             automove_timer: None,
             rng: seed_rng(),
             refresh_hz,
+            display: disp,
             fps_meter: FpsMeter::new(),
             load: LoadTracker::new(Instant::now()),
             #[cfg(unix)]
@@ -2614,6 +2621,12 @@ impl App {
                 corner,
                 scale: self.config.fps.scale,
                 refresh_hz: self.refresh_hz as f32,
+                display: self.display.as_ref().filter(|_| self.config.fps.display).map(|d| HudDisplay {
+                    width: d.width.into(),
+                    height: d.height.into(),
+                    refresh_hz: d.refresh_hz.map(|hz| hz as f32),
+                    output: d.output.clone(),
+                }),
                 load: hud_load,
                 outline: self.config.fps.outline,
                 opacity,
@@ -3001,8 +3014,14 @@ impl App {
                     self.x.root_height = e.height;
                 }
                 // The mode (and thus refresh rate) may have changed — re-read it for
-                // the HUD graph budget, even when the resolution is unchanged.
-                self.refresh_hz = self.x.refresh_hz().unwrap_or(self.refresh_hz);
+                // the HUD readout + graph budget, even when the resolution is unchanged.
+                if let Some(d) = self.x.display_info() {
+                    if self.display.as_ref() != Some(&d) {
+                        tracing::info!(display = ?d, "display changed");
+                    }
+                    self.refresh_hz = d.refresh_hz.unwrap_or(self.refresh_hz);
+                    self.display = Some(d);
+                }
                 // A new resolution changes the fullscreen threshold — re-decide.
                 self.update_redirection();
                 self.damage_full();

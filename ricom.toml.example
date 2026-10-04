@@ -148,13 +148,15 @@ hotkey = "Super+Shift+F" # toggle the HUD (XGrabKey); the hotkey's modifiers + a
                          # between corners live (e.g. Super+Shift+Left)
 corner = "top-right"     # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true             # draw the rolling frame-time graph under the numbers
+display = true           # show resolution@refresh on a line under the numbers, plus the
+                         # output name (e.g. DP-2) when it fits without widening the HUD
 scale = 1.0              # size multiplier on top of automatic screen-height scaling (4K = 2x)
 outline = false          # outline the HUD text (using the [font] outline/shadow style) so it
                          # reads without the panel; false = plain text (panel gives contrast)
-auto_move = true         # every auto_move_interval seconds the HUD fade-slides to a random
-                         # different corner (live toggle: ricomctl fps auto on|off|toggle)
+auto_move = true         # every auto_move_interval seconds the HUD fades out, then back in at a
+                         # random different corner (live toggle: ricomctl fps auto on|off|toggle)
 auto_move_interval = 300.0        # seconds between auto-hops (300 = 5 min)
-auto_move_duration = 0.6          # fade-slide duration of one hop, in seconds
+auto_move_duration = 0.6          # duration of one hop (fade out, then in), in seconds
 auto_move_avoid = ["bottom-left"] # corners the auto-hop must NEVER land on (destinations only —
                          # the `corner` above may still start here, then it hops away and won't
                          # return). [] = all four in play; listing all four = auto-move never hops

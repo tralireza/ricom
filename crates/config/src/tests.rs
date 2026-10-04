@@ -40,6 +40,7 @@ fn defaults_match_compiled_behaviour() {
     assert_eq!(c.fps.hotkey, "Super+Shift+F");
     assert_eq!(c.fps.corner, "top-right");
     assert!(c.fps.graph);
+    assert!(c.fps.display);
     assert_eq!(c.fps.scale, 1.0);
     assert!(c.fps.auto_move_avoid.is_empty()); // code default: no forbidden corners
     assert_eq!(c.default_opacity, 1.0);
@@ -137,6 +138,7 @@ enabled = true
 hotkey = "Control+Alt+P"
 corner = "top-left"
 graph = false
+display = false
 scale = 2.0
 [anim]
 duration = 0.4
@@ -163,6 +165,7 @@ ember_hot = [0.75, 0.25, 0.05]
     assert_eq!(c.fps.hotkey, "Control+Alt+P");
     assert_eq!(c.fps.corner, "top-left");
     assert!(!c.fps.graph);
+    assert!(!c.fps.display);
     assert_eq!(c.fps.scale, 2.0);
     assert_eq!(c.anim.scale_from, 0.7);
     assert_eq!((c.anim.wobble_spring, c.anim.wobble_friction), (500.0, 20.0));

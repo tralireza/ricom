@@ -1312,7 +1312,7 @@ impl GlBackend {
     }
 
     /// Draw the FPS HUD — a translucent panel, an optional frame-time graph, and
-    /// the numbers — anchored to `hud.corner`.
+    /// the numbers (+ an optional display line under them) — anchored to `hud.corner`.
     fn draw_hud(&self, hud: &Hud, sw: i32, sh: i32) {
         // No usable font → no HUD text (the compositor still runs).
         let Some(text) = self.text.as_ref() else { return };
@@ -1357,15 +1357,21 @@ impl GlBackend {
         let load_gap = if has_load { 8.0 * s } else { 0.0 };
         // Two rows: gap + one inter-row pitch + one cell height.
         let load_block_h = if has_load { load_gap + load_pitch + load_cell } else { 0.0 };
+        // Optional display line under the numbers (`3840x2160@60Hz  DP-2`), set like the
+        // load block. The output name shows only while the line fits under the numbers, so
+        // it never widens the panel (`hud_display_text`); the mode always shows.
+        let disp = hud.display.as_ref().map(|d| hud_display_text(d, tw, |t| text.measure(load_px, t).0));
+        let disp_h = if disp.is_some() { text.line_height(load_px) } else { 0.0 };
+        let top_h = th + disp_h; // text rows above the graph
         // Panel width is fixed by the text/load block (never the graph), so it stays a
         // constant size from the first frame. The graph then FILLS that width: exactly
         // HUD_GRAPH_SAMPLES bars span it, so the bar width self-adjusts to any font/DPI
         // — the graph reaches full width at a full ring, and 120 samples is kept at any
         // resolution (the bars widen/narrow, the count doesn't change).
-        let content_w = tw.max(load_w);
+        let content_w = tw.max(disp.as_ref().map_or(0.0, |(_, w)| *w)).max(load_w);
         let bar_w = if hud.graph { (content_w / HUD_GRAPH_SAMPLES as f32).max(1.0) } else { 0.0 };
         let panel_w = content_w + pad * 2.0;
-        let panel_h = th + graph_gap + graph_h + load_block_h + pad * 2.0;
+        let panel_h = top_h + graph_gap + graph_h + load_block_h + pad * 2.0;
         let a = hud.opacity;
         // Anchor the panel to its corner. Auto-hops are an in-place fade (opacity
         // only), so there is no cross-corner slide to interpolate here.
@@ -1382,7 +1388,7 @@ impl GlBackend {
         // Green = plenty of headroom, amber = tight, red = at/over budget (missed vsync).
         if hud.graph && !samples.is_empty() {
             let gx = px + pad;
-            let gy = py + pad + th + graph_gap;
+            let gy = py + pad + top_h + graph_gap;
             for (i, &ms) in samples.iter().enumerate() {
                 let bx = gx + i as f32 * bar_w;
                 if bx >= gx + content_w {
@@ -1411,6 +1417,7 @@ impl GlBackend {
         let x0 = px + pad;
         let ny = py + pad;
         let col = [0.90, 1.0, 0.95, a];
+        let lcol = [0.80, 0.88, 1.0, a]; // secondary text: display line + load block
         let fw = text.measure(text_px, &fps_s).0;
         text.draw_styled(&self.gl, sw, sh, x0 + numw - fw, ny, text_px, col, &hstyle, &fps_s);
         text.draw_styled(&self.gl, sw, sh, x0 + numw, ny, text_px, col, &hstyle, sep1);
@@ -1418,14 +1425,17 @@ impl GlBackend {
         let mw = text.measure(text_px, &ms_s).0;
         text.draw_styled(&self.gl, sw, sh, mx0 + msw - mw, ny, text_px, col, &hstyle, &ms_s);
         text.draw_styled(&self.gl, sw, sh, mx0 + msw, ny, text_px, col, &hstyle, sep2);
+        // Display line in its own row under the numbers, left-aligned with the load labels.
+        if let Some((ds, _)) = &disp {
+            text.draw_styled(&self.gl, sw, sh, x0, ny + th, load_px, lcol, &hstyle, ds);
+        }
         // Load block under the graph: label + three right-aligned value columns.
         if let Some(l) = &hud.load {
-            let lcol = [0.80, 0.88, 1.0, a];
             let rows: [(&str, [Option<f32>; 3]); 2] = [
                 ("fps", [Some(l.fps[0]), Some(l.fps[1]), Some(l.fps[2])]),
                 ("ms", [l.render_ms[0], l.render_ms[1], l.render_ms[2]]),
             ];
-            let mut ly = py + pad + th + graph_gap + graph_h + load_gap;
+            let mut ly = py + pad + top_h + graph_gap + graph_h + load_gap;
             for (label, vals) in rows {
                 text.draw_styled(&self.gl, sw, sh, x0, ly, load_px, lcol, &hstyle, label);
                 for (k, v) in vals.iter().enumerate() {
