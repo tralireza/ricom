@@ -30,3 +30,44 @@ fn composited_skips_input_only() {
     assert!(!composited(MapState::UNVIEWABLE, WindowClass::INPUT_OUTPUT));
     assert!(!composited(MapState::UNMAPPED, WindowClass::INPUT_OUTPUT));
 }
+
+/// `find_client` over a fake tree — `(window, children)` pairs; the windows in `managed`
+/// carry `WM_STATE` — returning the client and the round trips (probe calls) it took.
+fn search(top: Window, tree: &[(Window, Vec<Window>)], managed: &[Window]) -> (Option<Window>, usize) {
+    let mut trips = 0;
+    let found = find_client(top, |level, descend| {
+        trips += 1;
+        level
+            .iter()
+            .map(|w| {
+                let children = tree.iter().find(|(id, _)| id == w).map(|(_, c)| c.clone());
+                (managed.contains(w), children.filter(|_| descend).unwrap_or_default())
+            })
+            .collect()
+    });
+    (found, trips)
+}
+
+#[test]
+fn find_client_follows_icccm() {
+    // A non-reparenting WM marks the top-level itself: one round trip.
+    assert_eq!(search(1, &[(1, vec![2])], &[1]), (Some(1), 1));
+    // A reparenting WM's frame holds the client one level down: one trip per level.
+    assert_eq!(search(1, &[(1, vec![2])], &[2]), (Some(2), 2));
+    // Breadth-first: a client one level down beats a deeper match under an earlier
+    // sibling (decoration window 2).
+    assert_eq!(search(1, &[(1, vec![2, 3]), (2, vec![4])], &[3, 4]), (Some(3), 2));
+    // Nothing managed (an override-redirect popup, or no WM): none, and the search ends
+    // at the leaves rather than probing empty levels.
+    assert_eq!(search(1, &[(1, vec![2])], &[]), (None, 2));
+}
+
+#[test]
+fn find_client_stops_at_the_depth_cap() {
+    // A chain 1 → 2 → 3 → 4 → 5: WM_STATE CLIENT_SEARCH_DEPTH (3) levels down is found…
+    let chain = [(1, vec![2]), (2, vec![3]), (3, vec![4]), (4, vec![5])];
+    assert_eq!(CLIENT_SEARCH_DEPTH, 3);
+    assert_eq!(search(1, &chain, &[4]), (Some(4), 4));
+    // …one level deeper isn't.
+    assert_eq!(search(1, &chain, &[5]), (None, 4));
+}

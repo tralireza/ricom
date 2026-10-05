@@ -330,7 +330,7 @@ pub struct Hud {
     pub refresh_hz: f32,
     /// Display line under the numbers (resolution · refresh · output); `None` = off.
     pub display: Option<HudDisplay>,
-    /// Optional 1m/5m/15m load block, shown under the graph (`Super+Shift+L`).
+    /// 1m/5m/15m load block, shown under the graph; `None` = off.
     pub load: Option<HudLoad>,
     /// Outline the HUD text (per `RenderParams` text style) so it reads without the
     /// panel. `false` = plain text (the panel provides contrast).

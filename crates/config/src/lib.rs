@@ -93,6 +93,10 @@ pub struct Rule {
     pub open: Option<AnimSel>,
     /// Override the close animation. `None` = use the global `[anim] close`.
     pub close: Option<AnimSel>,
+    /// Override the show animation. `None` = use the global `[anim] show`.
+    pub show: Option<AnimSel>,
+    /// Override the hide animation. `None` = use the global `[anim] hide`.
+    pub hide: Option<AnimSel>,
     /// Override the move/resize animation. `None` = use the global `[anim] move`.
     #[serde(rename = "move")]
     pub r#move: Option<AnimSel>,
@@ -127,6 +131,8 @@ pub struct RuleResult {
     /// Per-window animation overrides, already expanded from preset/spec.
     pub open: Option<AnimSpec>,
     pub close: Option<AnimSpec>,
+    pub show: Option<AnimSpec>,
+    pub hide: Option<AnimSpec>,
     pub r#move: Option<AnimSpec>,
     /// Resolved focus effect name (`None` = fall back to `[anim] focus`).
     pub focus: Option<String>,
@@ -212,8 +218,8 @@ pub enum OsdEffect {
 }
 
 /// On-screen notification ("toast") shown by `ricomctl notify` — a top-center
-/// banner drawn by the compositor via the SDF text engine. `open`/`close` pick
-/// how it appears and disappears.
+/// banner drawn by the compositor, its text in the [`Font`] face. `open`/`close`
+/// pick how it appears and disappears.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Osd {
@@ -242,7 +248,7 @@ pub struct Osd {
 }
 
 /// On-demand FPS / frame-time HUD, toggled by a global hotkey. Drawn by the
-/// compositor via the SDF text engine; damage-driven (updates only while the
+/// compositor in the [`Font`] face; damage-driven (updates only while the
 /// screen is repainting).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -308,23 +314,24 @@ pub struct Font {
 }
 
 /// Burn / dissolve close animation: the window disintegrates on animated noise
-/// with a glowing ember front. These two size knobs are live-tunable (reload with
-/// `SIGHUP`, then close a window to see the change). The on/off switch, duration,
-/// and propagation mode are still compiled-in for now (Phase 4 remainder).
+/// with a glowing ember front. These knobs set its look and are live-tunable
+/// (reload with `SIGHUP`, then close a window to see the change). The effect is
+/// picked like any other (`close = "burn"`) and runs for that spec's `duration`
+/// (default `[anim] duration`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Burn {
     /// Segment/hole granularity (shader `u_segscale`): higher = finer, smaller
-    /// patches; lower = chunkier. Default `9.0`.
+    /// patches; lower = chunkier. Default `36.0`.
     pub seg_scale: f32,
     /// Ember hot-band half-width (shader `u_ember`): smaller = a thinner, tighter
-    /// glowing edge (also crisps the dissolve front). Default `0.13`.
+    /// glowing edge (also crisps the dissolve front). Default `0.07`.
     pub ember_width: f32,
     /// Cooler trailing ember colour (RGB `0.0..=1.0`), at the edge of the glow.
-    /// Default `[0.6, 0.05, 0.0]` (dark red). Lower for a moodier smoulder.
+    /// Default `[0.28, 0.02, 0.0]` (dark red). Lower for a moodier smoulder.
     pub ember_cool: [f32; 3],
     /// Hottest leading-edge ember colour (RGB `0.0..=1.0`). Default
-    /// `[1.0, 0.8, 0.25]` (bright yellow). Lower for a darker fire.
+    /// `[0.75, 0.22, 0.04]` (deep orange). Lower for a darker fire.
     pub ember_hot: [f32; 3],
 }
 
@@ -332,8 +339,14 @@ pub struct Burn {
 /// (not serialised); `session` asks for a spec per category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Category {
+    /// The window maps for the first time.
     Open,
+    /// The window goes for good: destroyed, or its client left the WM's frame.
     Close,
+    /// A window seen before maps again (workspace switch, un-minimise).
+    Show,
+    /// The window unmaps but lives on (workspace switch, minimise).
+    Hide,
     Move,
 }
 
@@ -502,10 +515,10 @@ impl Primitive {
     }
 
     /// Whether this block is meaningful for `cat` (used by [`Config::validate`]).
-    /// open/close accept any transform; move only geometry blocks.
+    /// open/close/show/hide accept any transform; move only geometry blocks.
     fn valid_for(&self, cat: Category) -> bool {
         match cat {
-            Category::Open | Category::Close => true,
+            Category::Open | Category::Close | Category::Show | Category::Hide => true,
             Category::Move => matches!(self, Primitive::Wobble { .. } | Primitive::Translate { .. }),
         }
     }
@@ -572,7 +585,7 @@ fn expand_preset(name: &str) -> Option<Vec<Primitive>> {
             Scale { from: Some(0.0), axis: Axis::Both, easing: Easing::EaseIn },
             Translate { dx: 0.0, dy: 0.0, edge: Some(Edge::Bottom), easing: Easing::EaseIn },
         ],
-        // Rotate in/out about the centre (with a fade); half-turn by default.
+        // Rotate in/out about the centre (with a fade); a full turn by default.
         "spin" => vec![opacity, Spin { degrees: None, easing: Easing::EaseOut }],
         // Traveling ripple: one-shot that rings down (see `[anim] wave_*`).
         "wave" => vec![Wave { amplitude: None, wavelength: None, speed: None, axis: Axis::X, duration: None }],
@@ -742,7 +755,7 @@ pub fn anim_spec_from(effect: &str, params: &[(String, String)]) -> Result<AnimS
     Ok(AnimSpec { duration, blocks: vec![block] })
 }
 
-/// Open / close / move animation selection + shared primitive param defaults.
+/// Open / close / show / hide / move animation selection + shared primitive param defaults.
 /// Replaces the old `[fade]` and `[animation]` blocks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -786,10 +799,17 @@ pub struct Anim {
     /// HOLDS, `0.0`..`1.0` (`1` ≈ a vanishing point). `0.9` (default) = a tiny point.
     /// (`close = "drain"` always drains fully; this only affects the `animate` path.)
     pub drain_depth: f32,
-    /// Open animation (window mapped). Default preset `"pop"`.
+    /// Open animation (window mapped for the first time). Default preset `"pop"`.
     pub open: AnimSel,
-    /// Close animation (window unmapped/destroyed). Default preset `"fade"`.
+    /// Close animation (window destroyed, or its client left the WM's frame). Default
+    /// preset `"fade"`.
     pub close: AnimSel,
+    /// Show animation (a window seen before maps again: workspace switch,
+    /// un-minimise). Default preset `"fade"`.
+    pub show: AnimSel,
+    /// Hide animation (window unmapped but not closed: workspace switch, minimise).
+    /// Default preset `"fade"`.
+    pub hide: AnimSel,
     /// Move/resize animation. Default preset `"wobble"`.
     #[serde(rename = "move")]
     pub r#move: AnimSel,
@@ -805,6 +825,8 @@ impl Anim {
         match cat {
             Category::Open => &self.open,
             Category::Close => &self.close,
+            Category::Show => &self.show,
+            Category::Hide => &self.hide,
             Category::Move => &self.r#move,
         }
     }
@@ -897,6 +919,8 @@ impl Default for Anim {
             drain_depth: 0.9,
             open: AnimSel::Preset("pop".into()),
             close: AnimSel::Preset("fade".into()),
+            show: AnimSel::Preset("fade".into()),
+            hide: AnimSel::Preset("fade".into()),
             r#move: AnimSel::Preset("wobble".into()),
             focus: "none".into(),
         }
@@ -1039,6 +1063,8 @@ impl Config {
         chg!("anim.drain_depth", prev.anim.drain_depth, self.anim.drain_depth);
         chg!("anim.open", prev.anim.open, self.anim.open);
         chg!("anim.close", prev.anim.close, self.anim.close);
+        chg!("anim.show", prev.anim.show, self.anim.show);
+        chg!("anim.hide", prev.anim.hide, self.anim.hide);
         chg!("anim.move", prev.anim.r#move, self.anim.r#move);
         chg!("anim.focus", prev.anim.focus, self.anim.focus);
         chg!("shadow.enabled", prev.shadow.enabled, self.shadow.enabled);
@@ -1131,6 +1157,12 @@ impl Config {
                 if let Some(s) = &rule.close {
                     r.close = Some(expand_sel(s));
                 }
+                if let Some(s) = &rule.show {
+                    r.show = Some(expand_sel(s));
+                }
+                if let Some(s) = &rule.hide {
+                    r.hide = Some(expand_sel(s));
+                }
                 if let Some(s) = &rule.r#move {
                     r.r#move = Some(expand_sel(s));
                 }
@@ -1147,6 +1179,8 @@ impl Config {
         let over = match cat {
             Category::Open => self.resolve(w).open,
             Category::Close => self.resolve(w).close,
+            Category::Show => self.resolve(w).show,
+            Category::Hide => self.resolve(w).hide,
             Category::Move => self.resolve(w).r#move,
         };
         over.unwrap_or_else(|| expand_sel(self.anim.sel(cat)))
@@ -1160,6 +1194,8 @@ impl Config {
         for (label, sel, cat) in [
             ("anim.open", &self.anim.open, Category::Open),
             ("anim.close", &self.anim.close, Category::Close),
+            ("anim.show", &self.anim.show, Category::Show),
+            ("anim.hide", &self.anim.hide, Category::Hide),
             ("anim.move", &self.anim.r#move, Category::Move),
         ] {
             validate_sel(label, sel, cat, &mut warns);
@@ -1186,6 +1222,12 @@ impl Config {
             }
             if let Some(s) = &rule.close {
                 validate_sel(&format!("rule[{i}].close"), s, Category::Close, &mut warns);
+            }
+            if let Some(s) = &rule.show {
+                validate_sel(&format!("rule[{i}].show"), s, Category::Show, &mut warns);
+            }
+            if let Some(s) = &rule.hide {
+                validate_sel(&format!("rule[{i}].hide"), s, Category::Hide, &mut warns);
             }
             if let Some(s) = &rule.r#move {
                 validate_sel(&format!("rule[{i}].move"), s, Category::Move, &mut warns);

@@ -12,5 +12,5 @@ region = { version = "0.1.0", path = "../region" }
 backend = { version = "0.1.0", path = "../backend" }
 x11-dl = "2.21.0"
 # Pure-Rust TrueType rasteriser (no C deps). Glyphs are rasterised on demand and
-# turned into a runtime SDF glyph cache; see `text.rs`.
+# kept in a runtime glyph cache, one entry per glyph and pixel size; see `text.rs`.
 fontdue = "0.9"

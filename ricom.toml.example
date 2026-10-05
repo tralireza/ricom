@@ -10,6 +10,17 @@
 #   ricomctl unredir on|off|toggle
 unredir = true
 
+# Repaint only the region that changed each frame (buffer-age partial repaint);
+# false repaints the whole screen every frame.
+use_damage = true
+
+# Render backend, read at startup only (a reload doesn't switch it): "gl" (EGL +
+# OpenGL) or "xrender" (pure X11 RENDER, no GL). xrender has no shaders, wobble
+# mesh or scaling, so effects that need them fall back to a fade (or are skipped),
+# and it draws no blur, shadows or rounded corners.
+# Override for one run with:  ricom --backend gl|xrender
+backend = "gl"
+
 # Composite background colour (RGB, 0.0-1.0), seen where neither a window nor the
 # wallpaper covers. A wallpaper set the usual way (xwallpaper, feh, hsetroot, … —
 # anything publishing _XROOTPMAP_ID) is drawn under every window, live.
@@ -23,17 +34,20 @@ corner_radius = 0.0
 default_opacity = 1.0
 
 # ── Animations ───────────────────────────────────────────────────────────────
-# Each lifecycle transition — open (map), close (unmap/destroy), move (resize) —
-# plays a set of composable "blocks" (primitives) that layer together. Pick a
-# named PRESET, or compose blocks explicitly (see below). Per-window overrides go
-# on a [[rule]] (open/close/move keys), so an empty `match = {}` rule is a global
-# default and a specific rule tunes one app.
+# Each lifecycle transition plays a set of composable "blocks" (primitives) that
+# layer together: open (map), close (unmap/destroy), show / hide (the WM maps /
+# unmaps a window it keeps, e.g. on a workspace switch), move (resize).
+# Pick a named PRESET, or compose blocks explicitly (see below). Per-window
+# overrides go on a [[rule]] (open/close/show/hide/move keys), so an empty
+# `match = {}` rule is a global default and a specific rule tunes one app.
+# With no WM, and for menus / popups, every unmap closes and every map opens.
 #
-# Primitives:  opacity · scale · translate · wobble · wave · ripple · burn  (burn owns alpha)
+# Primitives:  opacity · scale · translate · wobble · wave · ripple · spin · drain · burn
+#              (burn owns alpha)
 #
 # Presets:
 #   none     instant — no animation
-#   fade     opacity only
+#   fade     opacity only                                (default `close`, `show`, `hide`)
 #   pop      opacity + scale-about-centre                (default `open`)
 #   slide    opacity + translate in/out past a screen edge
 #   drop     opacity + translate downward (close)
@@ -48,13 +62,16 @@ default_opacity = 1.0
 #   ripple   radial "drop in a lake" — per-pixel refraction from the centre out (GPU)
 #   drain    whirlpool — content spirals + shrinks into a vanishing point, no self-fade (GPU)
 [anim]
-# Tip: set any of these live with `ricomctl set <open|close|move|focus> <effect> [k=v…]`
+# Tip: set any of these live with `ricomctl set <open|close|show|hide|move|focus> <effect> [k=v…]`
 # (session-only — a `ricomctl reload`/SIGHUP reverts to this file). `ricomctl effects` lists params.
-open  = "pop"           # window mapped
-close = "fade"          # window unmapped/destroyed
+open  = "pop"           # window appears (first map, or a map after a close)
+close = "fade"          # window goes for good (destroyed / withdrawn; any unmap with no WM)
+show  = "fade"          # the WM brings back a window it hid (workspace switch, un-minimise)
+hide  = "fade"          # the WM unmaps a window but keeps it (workspace switch, minimise)
 move  = "wobble"        # window moved/resized
 focus = "none"          # in-place effect when a window gains focus: wave | ripple | wobble |
-                        # spin | pop | stretch | unroll | slide | none. Per-window: [[rule]] focus = …
+                        # spin | pop | stretch | unroll | slide | reset (snap back to rest) |
+                        # none. Per-window: [[rule]] focus = …
 duration = 0.2          # default seconds for opacity / scale / translate
 scale_from = 0.85       # default `scale` start factor (open) / end factor (close)
 wobble_spring = 350.0   # default wobble spring stiffness k (higher = snappier)
@@ -95,6 +112,7 @@ drain_depth = 0.9        # animate drain: drain this far then hold (0..1; 1 = to
 #   wobble    { spring, friction }
 #   wave      { amplitude, wavelength, speed, axis = "x"|"y", duration } # sinusoidal (per-pixel)
 #   ripple    { amplitude, wavelength, speed, r0, duration }           # radial refraction (GPU)
+#   spin      { degrees, easing }                                      # rotation (GPU), default 360°
 #   drain     { turns, duration, turbulence }                          # whirlpool (GPU)
 #   burn      # no params here — the dissolve look comes from [burn] below
 
@@ -120,7 +138,8 @@ focus = "ewmh"      # focus source: "ewmh" = root _NET_ACTIVE_WINDOW (needs an E
 
 [osd]
 # On-screen toast shown by `ricomctl notify "text" [secs]` — a top-center banner
-# drawn by the SDF text engine. `open`/`close` pick how it appears/disappears.
+# whose text is drawn in the [font] face below. `open`/`close` pick how it
+# appears/disappears.
 enabled = true      # false = ignore notify requests
 duration = 2.5      # default on-screen hold (seconds) when the command omits one
 scale = 1.0         # size multiplier on top of automatic screen-height scaling
@@ -158,9 +177,10 @@ auto_move = true         # every auto_move_interval seconds the HUD fades out, t
                          # random different corner (live toggle: ricomctl fps auto on|off|toggle)
 auto_move_interval = 300.0        # seconds between auto-hops (300 = 5 min)
 auto_move_duration = 0.6          # duration of one hop (fade out, then in), in seconds
-auto_move_avoid = ["bottom-left"] # corners the auto-hop must NEVER land on (destinations only —
-                         # the `corner` above may still start here, then it hops away and won't
-                         # return). [] = all four in play; listing all four = auto-move never hops
+auto_move_avoid = []              # corners the auto-hop must NEVER land on, e.g. ["bottom-left"]
+                         # (destinations only — the `corner` above or an arrow-key move may still
+                         # put it on one; the next hop leaves and won't return). [] = all four in
+                         # play; listing all four = auto-move never hops
 # The HUD also shows a 1m/5m/15m load block (fps + GPU render ms); the same
 # figures are logged on demand via  kill -USR1 $(pidof ricom)
 
@@ -188,16 +208,20 @@ shadow_color = [0.0, 0.0, 0.0]   # drop-shadow colour (RGB)
 # Per-window rules. Each [[rule]] has a `match` (all listed conditions must hold —
 # class/instance/window_type match exactly, title matches as a substring,
 # fullscreen matches state) plus the settings it overrides: opacity / blur /
-# shadow / corner_radius / unredir / above, and the per-category animations
-# open / close / move (a preset name or an explicit [rule.<cat>] block spec).
-# Rules apply in order, last match wins per field. A built-in rule already keeps
-# fullscreen windows opaque + unblurred; add your own to override. Examples
+# shadow / corner_radius / unredir / above / dim, the per-category animations
+# open / close / show / hide / move (a preset name or an explicit [rule.<cat>]
+# block spec) and the in-place `focus` effect. class/instance/window_type/title
+# are read from the app's own window (the one holding WM_STATE, which is what
+# `xprop` picks on a click), not from a frame the WM wraps around it. Rules apply
+# in order, last match wins per field. A built-in rule already keeps fullscreen
+# windows opaque, unblurred and undimmed; add your own to override. Examples
 # (uncomment to use):
 
 # [[rule]]
 # match = { class = "mpv" }         # video: never dim or blur, keep the burn on close
 # opacity = 1.0
 # blur = false
+# dim = false
 # shadow = false
 # close = "burn"
 
@@ -210,6 +234,7 @@ shadow_color = [0.0, 0.0, 0.0]   # drop-shadow colour (RGB)
 # [[rule]]
 # match = {}                        # global default via a catch-all rule:
 # close = "fade"                    # fade every window closed (same as [anim] close)
+# hide = "none"                     # …but drop hidden ones at once (workspace switch)
 
 # [[rule]]
 # match = { class = "com.mitchellh.ghostty" }  # frosted terminals (Ghostty's default

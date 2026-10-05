@@ -7,7 +7,7 @@
 //! (or a structural change) arrives. On exit the X server auto-releases our
 //! resources (redirect, overlay, pixmaps, damage), restoring normal drawing.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::f64::consts::PI;
 use std::os::fd::AsFd;
 use std::path::PathBuf;
@@ -37,6 +37,9 @@ const MAX_BUFFER_AGE: usize = 4;
 const WOBBLE_PAD: f32 = 8.0;
 /// Default `spin` rotation in degrees when a `Spin` block sets none (a full turn).
 const SPIN_DEFAULT_DEG: f64 = 360.0;
+/// How many levels `toplevel_of` climbs from a client (or a child window of one, where
+/// X input focus may sit) to its tracked top-level before giving up.
+const TOPLEVEL_SEARCH_DEPTH: usize = 8;
 use config::{Axis, Category, Config, Edge, FocusSource, OsdEffect, Primitive, RuleResult, WindowMatch};
 use wm::anim::Fade;
 use wm::{Win, WindowId, WindowStack};
@@ -324,10 +327,46 @@ fn squash_rect(rect: [f32; 4], factor: f32) -> [f32; 4] {
 }
 
 /// One compositable window for [`App::composite`]: quad, optional wobble mesh,
-/// optional burn, always-on-top flag (from the `above` rule), and optional spin
-/// angle (radians).
+/// optional burn, always-on-top flag (from the `above` rule), optional spin
+/// angle (radians), ripple / wave / drain params, and the window's id.
 type CompositeItem =
-    (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>, Option<RippleParams>, Option<WaveParams>, Option<DrainParams>);
+    (Quad, Option<Vec<[f32; 4]>>, Option<Burn>, bool, Option<f32>, Option<RippleParams>, Option<WaveParams>, Option<DrainParams>, WindowId);
+
+/// The windows painted over `id` in a frame whose rects overlap its own — what a
+/// window going out stays under while it plays out ([`lift_closing`]). `painted` runs
+/// bottom to top, with the rects drawn; `None` if `id` wasn't painted.
+fn covering(painted: &[(WindowId, Rect)], id: WindowId) -> Option<HashSet<WindowId>> {
+    let i = painted.iter().position(|&(w, _)| w == id)?;
+    let rect = painted[i].1;
+    Some(painted[i + 1..].iter().filter(|(_, r)| r.intersect(&rect).is_some()).map(|&(w, _)| w).collect())
+}
+
+/// Keep each window going out (closing or hiding, with a `lifts` snapshot of what
+/// covered it as it started — [`covering`]) over every window that has come to cover
+/// it since, a WM raising or growing a neighbour into its space: it moves to just
+/// above the highest such window. Earlier covers above that one still cover it; those
+/// below it end up under it. `items` run bottom to top; `key` gives an item's window
+/// id and rect.
+fn lift_closing<T>(items: &mut [T], lifts: &HashMap<WindowId, HashSet<WindowId>>, key: impl Fn(&T) -> (WindowId, Rect)) {
+    if lifts.is_empty() {
+        return;
+    }
+    // In stacking order, so the outcome doesn't hang on the map's iteration order.
+    let going: Vec<WindowId> = items.iter().map(|it| key(it).0).filter(|id| lifts.contains_key(id)).collect();
+    for id in going {
+        let Some(i) = items.iter().position(|it| key(it).0 == id) else {
+            continue;
+        };
+        let rect = key(&items[i]).1;
+        let over = (i + 1..items.len()).rev().find(|&j| {
+            let (w, r) = key(&items[j]);
+            !lifts[&id].contains(&w) && r.intersect(&rect).is_some()
+        });
+        if let Some(j) = over {
+            items[i..=j].rotate_left(1);
+        }
+    }
+}
 
 /// Axis-aligned bounding box of a rect rotated `angle` radians about its centre —
 /// the footprint/damage a spinning window covers. `rect` is `[x, y, w, h]`.
@@ -625,6 +664,29 @@ struct WinIdentity {
     title: String,
 }
 
+/// An `UnmapNotify` held until its event batch is drained: whether the window closed
+/// or was only hidden depends on what else the batch carries (see `classify_unmaps`).
+#[derive(Clone, Copy, Debug)]
+struct PendingUnmap {
+    id: WindowId,
+    /// A `DestroyNotify` for it arrived in the same batch.
+    destroyed: bool,
+    /// Its client sent the ICCCM withdraw notice (a synthetic `UnmapNotify`) in the batch.
+    withdrawn: bool,
+}
+
+/// What an unmap means once its batch is in. Only a window a WM manages can be hidden
+/// (another workspace, minimised); for anything else — no WM, an override-redirect
+/// popup — an unmap is its app taking it down. A managed window closes when it's
+/// destroyed, its client withdraws (ICCCM 4.1.4), or its client has left the frame.
+fn unmap_category(p: &PendingUnmap, managed: bool, client_left: bool) -> Category {
+    if p.destroyed || p.withdrawn || client_left || !managed {
+        Category::Close
+    } else {
+        Category::Hide
+    }
+}
+
 /// OSD text colours by kind: content (light), ack (green), error (red), cool (blue).
 const OSD_FG: [f32; 3] = [0.92, 0.98, 1.0];
 const OSD_ACK: [f32; 3] = [0.62, 1.0, 0.72];
@@ -683,8 +745,32 @@ pub struct App {
     gfx: HashMap<WindowId, WinGfx>,
     /// Cached per-window identity (WM_CLASS / type / title) for rule matching.
     identities: HashMap<WindowId, WinIdentity>,
-    /// The EWMH active (focused) window (`_NET_ACTIVE_WINDOW`), for inactive-dim.
-    /// `None` if no EWMH WM sets it → dimming stays inert.
+    /// Top-level → its ICCCM client (the `WM_STATE` holder) where the two differ: a
+    /// reparenting WM's frame → the app window inside it. Identity and the opacity
+    /// fallback are read from the client; a top-level that is its own client has no entry.
+    clients: HashMap<WindowId, WindowId>,
+    /// The reverse of `clients` (client → frame), so a client's `PropertyNotify`, the
+    /// EWMH active window and the X input focus resolve to the frame ricom composites.
+    client_frames: HashMap<WindowId, WindowId>,
+    /// Top-levels a WM manages: a `WM_STATE` holder sits at or below them
+    /// (`track_client`). Only these hide and show; with no WM to hide a window, its
+    /// unmap is the app closing it.
+    managed: HashSet<WindowId>,
+    /// Unmaps seen in the current event batch, classified (close or hide) once it's
+    /// drained — see `classify_unmaps`.
+    pending_unmaps: Vec<PendingUnmap>,
+    /// The last composite's windows, bottom to top, with the rects they were drawn at
+    /// — what a close or hide starting now snapshots (`covering`). Empty while
+    /// unredirected: nothing is composited.
+    painted: Vec<(WindowId, Rect)>,
+    /// A window going out (closing or hiding, its content intact) → the windows that
+    /// covered it as it started. Any other that covers it while it plays out — a WM
+    /// raising or growing a neighbour into its space — is drawn beneath it
+    /// (`lift_closing`). Lasts while the window is `closing`.
+    lifts: HashMap<WindowId, HashSet<WindowId>>,
+    /// The active (focused) top-level for inactive-dim: `_NET_ACTIVE_WINDOW` (or the X
+    /// input focus, per `[dim] focus`) resolved to the stack window holding it — the
+    /// frame, under a reparenting WM. `None` if nothing names one → dimming stays inert.
     active_window: Option<WindowId>,
     /// The wallpaper — the root pixmap a setter (xwallpaper, feh, …) published in
     /// `_XROOTPMAP_ID` — as `(pixmap, width, height)`, composited as the bottom layer.
@@ -850,6 +936,12 @@ impl App {
             caps: BackendCaps::all(), // replaced with the real caps when the backend is built
             gfx: HashMap::new(),
             identities: HashMap::new(),
+            clients: HashMap::new(),
+            client_frames: HashMap::new(),
+            managed: HashSet::new(),
+            pending_unmaps: Vec::new(),
+            painted: Vec::new(),
+            lifts: HashMap::new(),
             active_window: None,
             wallpaper: None,
             dirty: true,
@@ -1078,6 +1170,12 @@ impl App {
                 w.window, w.x, w.y, w.width, w.height, w.border_width, false, w.mapped,
             ));
             let _ = self.x.select_window_events(w.window);
+            // A reparenting WM's frame: identity + opacity come from its client. A managed
+            // window that is unmapped now is hidden (another workspace, minimised), so
+            // its next map is a show.
+            if self.track_client(w.window) && !w.mapped {
+                self.windows.mark_hidden(w.window);
+            }
             self.refresh_identity(w.window);
             // Already on screen at startup — show at its opacity with no fade-in.
             let o = self.read_opacity(w.window);
@@ -1616,8 +1714,9 @@ impl App {
 
     /// `ricomctl set <category> <effect> [k=v…]` — live-select a transition's effect
     /// (+ optional params), session-only: mutates `self.config.anim.<category>`, so a
-    /// `reload`/SIGHUP reverts. Takes effect on the next open/close/move (resolved
-    /// per-window). `focus` is a bare effect name (no params in the current model).
+    /// `reload`/SIGHUP reverts. Takes effect on the next open/close/show/hide/move
+    /// (resolved per-window). `focus` is a bare effect name (no params in the current
+    /// model).
     #[cfg(unix)]
     fn set_anim(&mut self, category: &str, effect: &str, params: &[(String, String)]) -> proto::Reply {
         use config::{AnimSel, Category};
@@ -1644,10 +1743,12 @@ impl App {
             let cat = match category {
                 "open" => Category::Open,
                 "close" => Category::Close,
+                "show" => Category::Show,
+                "hide" => Category::Hide,
                 "move" => Category::Move,
                 _ => {
                     return proto::Reply::Error(format!(
-                        "unknown category '{category}' (open|close|move|focus)"
+                        "unknown category '{category}' (open|close|show|hide|move|focus)"
                     ));
                 }
             };
@@ -1673,6 +1774,8 @@ impl App {
             match cat {
                 Category::Open => self.config.anim.open = sel,
                 Category::Close => self.config.anim.close = sel,
+                Category::Show => self.config.anim.show = sel,
+                Category::Hide => self.config.anim.hide = sel,
                 Category::Move => self.config.anim.r#move = sel,
             }
         }
@@ -1690,10 +1793,12 @@ impl App {
     fn get_anim(&self) -> proto::Reply {
         let cur = &self.config.anim;
         let def = config::Anim::default();
-        let mut anims = Vec::with_capacity(4);
+        let mut anims = Vec::with_capacity(6);
         for (event, c, d) in [
             ("open", &cur.open, &def.open),
             ("close", &cur.close, &def.close),
+            ("show", &cur.show, &def.show),
+            ("hide", &cur.hide, &def.hide),
             ("move", &cur.r#move, &def.r#move),
         ] {
             anims.push(proto::AnimInfo {
@@ -1723,27 +1828,18 @@ impl App {
         let rr = self.resolve_rules(id);
         let g = &self.config.anim;
         let mut overridden = Vec::new();
-        let open = match &rr.open {
+        let mut pick = |name: &str, rule: &Option<config::AnimSpec>, global: &config::AnimSel| match rule {
             Some(s) => {
-                overridden.push("open".to_string());
+                overridden.push(name.to_string());
                 s.label()
             }
-            None => g.open.label(),
+            None => global.label(),
         };
-        let close = match &rr.close {
-            Some(s) => {
-                overridden.push("close".to_string());
-                s.label()
-            }
-            None => g.close.label(),
-        };
-        let r#move = match &rr.r#move {
-            Some(s) => {
-                overridden.push("move".to_string());
-                s.label()
-            }
-            None => g.r#move.label(),
-        };
+        let open = pick("open", &rr.open, &g.open);
+        let close = pick("close", &rr.close, &g.close);
+        let show = pick("show", &rr.show, &g.show);
+        let hide = pick("hide", &rr.hide, &g.hide);
+        let r#move = pick("move", &rr.r#move, &g.r#move);
         let focus = match &rr.focus {
             Some(f) => {
                 overridden.push("focus".to_string());
@@ -1751,7 +1847,7 @@ impl App {
             }
             None => g.focus.clone(),
         };
-        proto::WinAnim { open, close, r#move, focus, overridden }
+        proto::WinAnim { open, close, show, hide, r#move, focus, overridden }
     }
 
     /// The focus-triggered effect for `id`: a matching rule's `focus`, else the
@@ -1780,9 +1876,14 @@ impl App {
     }
 
     /// Effective opacity target for a window: an explicit `_NET_WM_WINDOW_OPACITY`
-    /// wins; else a matching rule's `opacity`; else `config.default_opacity`.
+    /// wins — the window's own, else its client's (a reparenting WM needn't copy it to
+    /// the frame); else a matching rule's `opacity`; else `config.default_opacity`.
     fn read_opacity(&self, win: WindowId) -> f64 {
-        match self.x.get_window_opacity(win) {
+        let explicit = self.x.get_window_opacity(win).and_then(|o| match (o, self.clients.get(&win)) {
+            (None, Some(&c)) => self.x.get_window_opacity(c),
+            _ => Ok(o),
+        });
+        match explicit {
             Ok(Some(o)) => o, // explicit client opacity wins
             Ok(None) => self.resolve_rules(win).opacity.unwrap_or(self.config.default_opacity),
             Err(e) => {
@@ -1792,12 +1893,97 @@ impl App {
         }
     }
 
-    /// Read + cache a window's identity (WM_CLASS / type / title) for rule matching.
+    /// Read + cache a window's identity (WM_CLASS / type / title) for rule matching —
+    /// from its ICCCM client when a reparenting WM framed it. A window that's gone
+    /// keeps what was cached: a frame's client often dies before the frame does, and
+    /// the close effect still resolves from that identity.
     fn refresh_identity(&mut self, win: WindowId) {
-        let (instance, class) = self.x.get_wm_class(win).ok().flatten().unwrap_or_default();
-        let window_type = self.x.get_window_type(win).ok().flatten().unwrap_or_default();
-        let title = self.x.get_window_title(win).ok().flatten().unwrap_or_default();
+        let src = self.clients.get(&win).copied().unwrap_or(win);
+        let Ok(class) = self.x.get_wm_class(src) else {
+            return;
+        };
+        let (instance, class) = class.unwrap_or_default();
+        let window_type = self.x.get_window_type(src).ok().flatten().unwrap_or_default();
+        let title = self.x.get_window_title(src).ok().flatten().unwrap_or_default();
         self.identities.insert(win, WinIdentity { instance, class, window_type, title });
+    }
+
+    /// Find and record `top`'s ICCCM client (`xconn::client_window`) when it isn't
+    /// `top` itself, selecting `PropertyNotify` on it so a title / class / opacity
+    /// change reaches the frame. Returns whether `top` has a client at all, i.e. a WM
+    /// manages it (or it carries `WM_STATE` itself) — recorded in `managed`.
+    fn track_client(&mut self, top: WindowId) -> bool {
+        self.forget_client(top);
+        let managed = match self.x.client_window(top) {
+            Some(c) if c != top => {
+                let _ = self.x.select_window_events(c);
+                self.clients.insert(top, c);
+                self.client_frames.insert(c, top);
+                true
+            }
+            found => found.is_some(),
+        };
+        if managed {
+            self.managed.insert(top);
+        }
+        managed
+    }
+
+    /// Drop `top`'s frame ↔ client pairing, both directions, and its `managed` mark.
+    fn forget_client(&mut self, top: WindowId) {
+        self.managed.remove(&top);
+        if let Some(c) = self.clients.remove(&top)
+            && self.client_frames.get(&c) == Some(&top)
+        {
+            self.client_frames.remove(&c);
+        }
+    }
+
+    /// The tracked top-level holding `win`: `win` itself, the frame of a known client,
+    /// or whatever tracked window a walk up the tree reaches (a client not paired yet,
+    /// or a child window of one — X input focus may sit there). `None` if no tracked
+    /// window holds it.
+    fn toplevel_of(&self, win: WindowId) -> Option<WindowId> {
+        let mut w = win;
+        for _ in 0..TOPLEVEL_SEARCH_DEPTH {
+            if self.windows.get(w).is_some() {
+                return Some(w);
+            }
+            if let Some(&frame) = self.client_frames.get(&w) {
+                return Some(frame);
+            }
+            match self.x.parent_of(w) {
+                Some(p) if p != self.x.root => w = p,
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// A window leaves the stack for good (reaped after its close, destroyed, or
+    /// reparented into a frame): drop it with its gfx, cached identity, client pairing
+    /// and any unmap still waiting on its batch. A plain unmap, or an unredirect, keeps
+    /// identity and pairing.
+    fn drop_window(&mut self, id: WindowId) {
+        self.windows.remove(id);
+        self.release_gfx(id);
+        self.identities.remove(&id);
+        self.forget_client(id);
+        self.pending_unmaps.retain(|p| p.id != id);
+    }
+
+    /// A property feeding rule matching or opacity changed on `top` (or its client):
+    /// re-read the identity if `identity`, re-target the opacity, and repaint
+    /// (blur/shadow/corner re-resolve on the next composite).
+    fn props_changed(&mut self, top: WindowId, identity: bool) {
+        if identity {
+            self.refresh_identity(top);
+        }
+        let o = self.read_opacity(top);
+        let d = self.anim_duration();
+        self.windows.retarget_opacity(top, o, d);
+        self.ensure_frame_timer();
+        self.damage_full();
     }
 
     /// Re-read a window's identity only when we have nothing cached yet — either no
@@ -1869,19 +2055,20 @@ impl App {
         }
     }
 
-    /// The X-input-focused window mapped to a tracked top-level (else `None`) —
-    /// the `x11` dim focus source.
+    /// The tracked top-level holding the X input focus (else `None`) — the `x11` dim
+    /// focus source. Focus sits on a client (or a child of one), not on its frame.
     fn focused_top_level(&self) -> Option<WindowId> {
         let f = self.x.get_input_focus().ok().flatten()?;
-        self.windows.get(f).map(|_| f)
+        self.toplevel_of(f)
     }
 
     /// The current active window from the configured focus source — the root
-    /// `_NET_ACTIVE_WINDOW` (`ewmh`) or X input focus (`x11`). Used to (re)seed
-    /// `active_window` at startup and on reload.
+    /// `_NET_ACTIVE_WINDOW` (`ewmh`) or X input focus (`x11`) — resolved to its tracked
+    /// top-level (EWMH names the client). Seeds `active_window` at startup and on
+    /// reload, and re-reads it whenever the source changes.
     fn read_active_window(&self) -> Option<WindowId> {
         match self.config.dim.focus {
-            FocusSource::Ewmh => self.x.get_active_window().ok().flatten(),
+            FocusSource::Ewmh => self.x.get_active_window().ok().flatten().and_then(|w| self.toplevel_of(w)),
             FocusSource::X11 => self.focused_top_level(),
         }
     }
@@ -1902,13 +2089,14 @@ impl App {
     /// for removal (vs merely unmapped) on completion. Returns whether something
     /// visible was started — close sites use it to keep the "animate vs drop now"
     /// gate. Move is driven separately by `ConfigureNotify` (it needs old+new
-    /// rects), so this handles `Open`/`Close`.
+    /// rects), so this handles `Open`/`Close` — and `Show`/`Hide`, which play the
+    /// same way with their own specs.
     fn start_anim(&mut self, id: WindowId, cat: Category, destroyed: bool) -> bool {
         self.ensure_identity(id); // heal a startup-adopted blank so class/title rules match
         let spec = self.config.spec_for(&self.window_match(id), cat);
         let dur = spec.duration.unwrap_or(self.config.anim.duration);
         match cat {
-            Category::Open => {
+            Category::Open | Category::Show => {
                 // Clean slate so blocks absent from the spec leave their property
                 // at rest (a window re-mapped after fading/sliding out).
                 self.windows.reset_transforms(id);
@@ -1987,7 +2175,7 @@ impl App {
                 }
                 true
             }
-            Category::Close => {
+            Category::Close | Category::Hide => {
                 if spec.blocks.is_empty() {
                     return false; // "none" -> instant close, nothing to animate
                 }
@@ -2329,7 +2517,6 @@ impl App {
     }
 
     fn release_gfx(&mut self, win: WindowId) {
-        self.identities.remove(&win);
         if let Some(g) = self.gfx.remove(&win) {
             tracing::debug!(window = win, "release gfx");
             self.free_gfx(g);
@@ -2346,10 +2533,10 @@ impl App {
         }
         for (id, destroyed) in finished {
             tracing::debug!(window = id, destroyed, "fade-out complete");
-            self.release_gfx(id);
             if destroyed {
-                self.windows.remove(id);
+                self.drop_window(id);
             } else {
+                self.release_gfx(id);
                 self.windows.clear_closing(id);
             }
         }
@@ -2426,6 +2613,7 @@ impl App {
         // Nothing to paint while unredirected: the overlay is unmapped and the
         // fullscreen window draws straight to the screen.
         if !self.redirected {
+            self.painted.clear(); // no frame for a close or hide to snapshot
             return;
         }
         // Compute the HUD load block up front (it mutates the load ring) so it
@@ -2589,15 +2777,24 @@ impl App {
                     ripple,
                     wave,
                     drain,
+                    w.id,
                 ));
             }
         }
+        // A window going out stays over whatever has come to cover it since it started
+        // (a WM raising or growing a neighbour into its space). Its lift lasts while it
+        // is closing: the reap, a re-map or a drop ends it.
+        let key = |it: &CompositeItem| (it.8, Rect::from_xywh(it.0.x, it.0.y, it.0.w, it.0.h));
+        self.lifts.retain(|id, _| self.windows.get(*id).is_some_and(|w| w.closing));
+        lift_closing(&mut items, &self.lifts, key);
         // Always-on-top: stable-sort so `above` windows move to the end of the
         // bottom-to-top list (i.e. topmost), keeping relative order within each
         // group. The occlusion walk below then treats them as the top of the stack
         // — they occlude what's beneath and are never occluded by normal windows,
         // regardless of the X stacking order.
         items.sort_by_key(|it| it.3);
+        self.painted.clear();
+        self.painted.extend(items.iter().map(key));
         // Region-level occlusion: walk top-to-bottom, accumulating the region
         // covered by opaque windows above. Each window is drawn only in its
         // visible part (footprint ∩ screen − covered); an empty visible region
@@ -2613,7 +2810,7 @@ impl App {
         let sr = self.config.shadow.radius as i32;
         let mut covered = Region::new();
         let mut draws: Vec<WindowDraw> = Vec::with_capacity(items.len());
-        for (q, mesh, burn, _above, spin, ripple, wave, drain) in items.iter().rev() {
+        for (q, mesh, burn, _above, spin, ripple, wave, drain, _) in items.iter().rev() {
             let rect = Rect::from_xywh(q.x, q.y, q.w, q.h);
             // Footprint = the area the window might touch this frame. A spinner
             // sweeps its rotated bounding box; a wobbler can deform outside its rect
@@ -2836,6 +3033,10 @@ impl App {
     /// DRI3/GL client produces little fresh socket traffic after redirect, so
     /// the loop stalls. Loop flush+drain until a whole pass yields nothing, so
     /// no event is ever left buffered and every queued request is sent.
+    ///
+    /// Unmaps wait for their batch: a pass that drains dry with some pending settles
+    /// them (`classify_unmaps`), then loops again — classifying makes round trips, which
+    /// can queue fresh events inside x11rb just the same.
     fn drain_x_events(&mut self) {
         loop {
             let _ = self.x.flush();
@@ -2854,12 +3055,93 @@ impl App {
                 }
             }
             if !progressed {
-                break;
+                if self.pending_unmaps.is_empty() {
+                    break;
+                }
+                self.classify_unmaps();
             }
         }
     }
 
+    /// Settle the batch's unmaps: each window closes or hides (`unmap_category`) and
+    /// animates its last frame out if it has one (the pixmap is kept for that); else the
+    /// pixmap goes now, and a destroyed window with it. A hidden window stays in the
+    /// stack, marked so its next map is a show.
+    fn classify_unmaps(&mut self) {
+        let pending = std::mem::take(&mut self.pending_unmaps);
+        let left = self.clients_left(&pending);
+        for (p, client_left) in pending.iter().zip(left) {
+            let managed = self.managed.contains(&p.id);
+            let cat = unmap_category(p, managed, client_left);
+            tracing::debug!(
+                window = p.id, ?cat, managed, destroyed = p.destroyed, withdrawn = p.withdrawn,
+                client_left, "unmap settled"
+            );
+            if cat == Category::Hide {
+                self.windows.mark_hidden(p.id);
+            }
+            if self.gfx.contains_key(&p.id) && self.start_anim(p.id, cat, p.destroyed) {
+                // Its last frame is whole (a hide, or a window that is its own client), so
+                // keep it over whatever the WM raises or grows into its space while it
+                // goes. A frame whose client has left holds a black hole by now: no lift.
+                if (cat == Category::Hide || !self.clients.contains_key(&p.id))
+                    && let Some(over) = covering(&self.painted, p.id)
+                {
+                    self.lifts.insert(p.id, over);
+                }
+                self.ensure_frame_timer();
+            } else if p.destroyed {
+                self.drop_window(p.id);
+            } else {
+                self.release_gfx(p.id);
+            }
+        }
+    }
+
+    /// For each pending unmap, whether its window is a frame its client has left: the
+    /// client went back to root (`client_frames` lost it; the frame's `clients` entry
+    /// stays as the record), or it's gone or sits elsewhere. A client still paired
+    /// may be under a decoration wrapper, so climb from it — one batched round trip per
+    /// level, all the frames at once — until its frame turns up.
+    fn clients_left(&self, pending: &[PendingUnmap]) -> Vec<bool> {
+        let mut left = vec![false; pending.len()];
+        let mut climbing: Vec<(usize, WindowId)> = Vec::new();
+        for (i, p) in pending.iter().enumerate() {
+            if p.destroyed {
+                continue; // a close regardless
+            }
+            let Some(&c) = self.clients.get(&p.id) else {
+                continue; // its own client, or unmanaged
+            };
+            if self.client_frames.get(&c) == Some(&p.id) {
+                climbing.push((i, c));
+            } else {
+                left[i] = true;
+            }
+        }
+        for _ in 0..xconn::CLIENT_SEARCH_DEPTH {
+            if climbing.is_empty() {
+                break;
+            }
+            let wins: Vec<WindowId> = climbing.iter().map(|&(_, w)| w).collect();
+            let mut next = Vec::new();
+            for (&(i, _), parent) in climbing.iter().zip(self.x.parents(&wins)) {
+                match parent {
+                    Some(p) if p == pending[i].id => {} // still in its frame
+                    Some(p) if p != self.x.root => next.push((i, p)), // a wrapper: climb on
+                    _ => left[i] = true, // at root, or gone
+                }
+            }
+            climbing = next;
+        }
+        for (i, _) in climbing {
+            left[i] = true; // not found within reach of its frame
+        }
+        left
+    }
+
     fn handle_event(&mut self, ev: Event) {
+        let sent = ev.sent_event();
         match ev {
             Event::CreateNotify(e) if e.window != self.overlay => {
                 tracing::debug!(window = e.window, x = e.x, y = e.y, w = e.width, h = e.height, "create");
@@ -2876,14 +3158,14 @@ impl App {
                 self.windows.set_mapped(e.window, false);
                 // A CompositeNameWindowPixmap pixmap outlives the window, so we can
                 // keep compositing the last frame and animate it out; the window is
-                // reaped from the stack once the close completes. Nothing to animate
-                // (no gfx, already invisible, or close="none") -> drop now.
-                let has_gfx = self.gfx.contains_key(&e.window);
-                if has_gfx && self.start_anim(e.window, Category::Close, true) {
-                    self.ensure_frame_timer();
-                } else {
-                    self.windows.remove(e.window);
-                    self.release_gfx(e.window);
+                // reaped from the stack once the close completes. Its unmap still
+                // waiting on this batch becomes a close; a hide or close already running
+                // just reaps it at the end. Nothing running (no gfx, already invisible,
+                // or close="none") -> drop now.
+                if let Some(p) = self.pending_unmaps.iter_mut().find(|p| p.id == e.window) {
+                    p.destroyed = true;
+                } else if !self.windows.mark_destroyed(e.window) {
+                    self.drop_window(e.window);
                 }
                 self.update_redirection();
                 self.damage_full();
@@ -2896,13 +3178,28 @@ impl App {
                 if self.x.is_input_only(e.window).unwrap_or(false) {
                     return;
                 }
+                // Unmapped earlier in this same batch: it never left the screen, so
+                // neither that unmap nor this map plays an effect.
+                let before = self.pending_unmaps.len();
+                self.pending_unmaps.retain(|p| p.id != e.window);
+                let remapped = self.pending_unmaps.len() != before;
+                // A hidden window comes back with a show; any other map opens one.
+                let hidden = self.windows.get(e.window).is_some_and(|w| w.hidden);
+                let cat = if hidden { Category::Show } else { Category::Open };
+                tracing::debug!(window = e.window, ?cat, remapped, "map settled");
                 self.windows.set_mapped(e.window, true);
-                self.refresh_identity(e.window); // identity first — the open spec may be rule-gated
-                // Start the open animation *before* (re)painting, so if this map
+                // Identity first — the open/show spec may be rule-gated. Under a
+                // reparenting WM this is a frame, mapped once its client is inside: pair
+                // them, so identity and opacity are read from the client.
+                self.track_client(e.window);
+                self.refresh_identity(e.window);
+                // Start the open/show animation *before* (re)painting, so if this map
                 // triggers an unredir->redirect transition (redir_start paints
                 // immediately), that first frame already shows the resolved start
                 // state (e.g. opacity 0 / scaled-down) — no full-size/opacity flash.
-                self.start_anim(e.window, Category::Open, false);
+                if !remapped {
+                    self.start_anim(e.window, cat, false);
+                }
                 self.update_redirection();
                 // Always re-acquire on (re)map: a window that unmapped/closed kept its
                 // old named pixmap for the fade/burn, but that pixmap is now stale — a
@@ -2914,17 +3211,25 @@ impl App {
                 self.ensure_frame_timer();
                 self.damage_full();
             }
+            Event::UnmapNotify(e) if sent => {
+                // A client's ICCCM 4.1.4 withdraw notice, sent to the root after it unmaps
+                // its window — not a second unmap. It marks the real one, earlier in the
+                // batch, a close. (A framed client's notice usually beats its WM taking
+                // the frame down; that close shows as the client leaving the frame.)
+                tracing::debug!(window = e.window, "withdraw notice");
+                let top = self.client_frames.get(&e.window).copied().unwrap_or(e.window);
+                if let Some(p) = self.pending_unmaps.iter_mut().find(|p| p.id == top) {
+                    p.withdrawn = true;
+                }
+            }
             Event::UnmapNotify(e) => {
                 tracing::debug!(window = e.window, "unmap");
-                self.windows.set_mapped(e.window, false);
-                // Animate the last frame out if we have it (keep the pixmap); else
-                // drop now. Unmapped (not destroyed): keep the window in the stack.
-                let has_gfx = self.gfx.contains_key(&e.window);
-                if has_gfx && self.start_anim(e.window, Category::Close, false) {
-                    self.ensure_frame_timer();
-                } else {
-                    self.release_gfx(e.window);
+                // Close or hide? Only the whole batch tells (a destroy or a withdraw
+                // notice may follow), so the effect waits for `classify_unmaps`.
+                if self.windows.get(e.window).is_some_and(|w| w.is_mapped()) {
+                    self.pending_unmaps.push(PendingUnmap { id: e.window, destroyed: false, withdrawn: false });
                 }
+                self.windows.set_mapped(e.window, false);
                 self.update_redirection();
                 self.damage_full();
             }
@@ -2996,14 +3301,45 @@ impl App {
                 }
                 self.damage_full();
             }
-            Event::ReparentNotify(e) => {
-                if e.parent != self.x.root {
-                    tracing::debug!(window = e.window, parent = e.parent, "reparent (off-root)");
-                    self.windows.remove(e.window);
-                    self.release_gfx(e.window);
-                    self.update_redirection();
-                    self.damage_full();
+            Event::ReparentNotify(e) if e.parent != self.x.root => {
+                tracing::debug!(window = e.window, parent = e.parent, "reparent (off-root)");
+                self.drop_window(e.window);
+                // Into a frame that's already mapped (a reused one), so no MapNotify will
+                // pair them: pair now. A WM that sets `WM_STATE` only later pairs on that
+                // PropertyNotify instead.
+                if let Some(top) = self.toplevel_of(e.parent)
+                    && self.windows.get(top).is_some_and(|w| w.is_mapped())
+                    && self.track_client(top)
+                {
+                    self.props_changed(top, true);
                 }
+                self.update_redirection();
+                self.damage_full();
+            }
+            Event::ReparentNotify(e) if e.window != self.overlay => {
+                // Back onto root: a WM unmanaging the window, or the server restoring a
+                // dead WM's save-set. Track it like a new top-level: ReparentWindow stacks
+                // it on top, and a MapNotify follows if it's shown.
+                tracing::debug!(window = e.window, "reparent (to root)");
+                // Its old frame keeps the pairing, the record that its client has left.
+                let framed = self.client_frames.remove(&e.window).is_some();
+                if self.windows.get(e.window).is_some() {
+                    self.windows.raise(e.window); // root → root: only restacked
+                } else if let Ok(Some(w)) = self.x.win_info(e.window) {
+                    self.windows.add_top(Win::new(
+                        w.window, w.x, w.y, w.width, w.height, w.border_width, e.override_redirect, false,
+                    ));
+                    let _ = self.x.select_window_events(w.window);
+                    let o = self.read_opacity(w.window);
+                    self.windows.set_opacity_settled(w.window, o);
+                    // Out of its frame: if the WM is gone, the save-set maps it straight
+                    // back, the same window that was on screen — a show, not an open.
+                    if framed {
+                        self.windows.mark_hidden(w.window);
+                    }
+                }
+                self.update_redirection();
+                self.damage_full();
             }
             Event::CirculateNotify(e) => {
                 let on_top = e.place == Place::ON_TOP;
@@ -3022,7 +3358,7 @@ impl App {
                 if self.config.dim.focus == FocusSource::Ewmh
                     && self.x.atom("_NET_ACTIVE_WINDOW").is_ok_and(|a| a == e.atom)
                 {
-                    let new = self.x.get_active_window().ok().flatten();
+                    let new = self.read_active_window();
                     self.set_active_window(new);
                 }
                 // A setter published a new wallpaper (root pixmap) → re-read + repaint.
@@ -3034,20 +3370,34 @@ impl App {
                 }
             }
             Event::PropertyNotify(e) => {
+                // A client speaks for its frame, the window the stack holds.
+                let (top, paired) = if let Some(&frame) = self.client_frames.get(&e.window) {
+                    (frame, false)
+                } else if self.windows.get(e.window).is_some() {
+                    // `WM_STATE` on a top-level: a non-reparenting WM taking it on in place
+                    // (maybe only after its map), or letting it go — keep `managed` current.
+                    if self.x.atom("WM_STATE").is_ok_and(|a| a == e.atom) && !self.track_client(e.window) {
+                        self.managed.remove(&e.window);
+                    }
+                    (e.window, false)
+                } else {
+                    // Neither: only `WM_STATE` appearing matters — a WM just managed this
+                    // window in a frame. A frame that maps later pairs on its MapNotify; a
+                    // mapped one gets none, so pair it now.
+                    let managed = self.x.atom("WM_STATE").is_ok_and(|a| a == e.atom);
+                    let frame = if managed { self.toplevel_of(e.window) } else { None };
+                    let Some(top) = frame.filter(|&t| self.windows.get(t).is_some_and(|w| w.is_mapped())) else {
+                        return;
+                    };
+                    self.track_client(top);
+                    (top, true)
+                };
                 // Opacity, or an identity property (WM_CLASS/type/title) whose change
-                // could alter which rules match — re-read identity, re-target opacity,
-                // and repaint (blur/shadow/corner re-resolve on the next composite).
+                // could alter which rules match.
                 let opacity_atom = self.x.atom("_NET_WM_WINDOW_OPACITY").is_ok_and(|a| a == e.atom);
-                let identity_atom = self.is_identity_atom(e.atom);
-                if identity_atom {
-                    self.refresh_identity(e.window);
-                }
-                if opacity_atom || identity_atom {
-                    let o = self.read_opacity(e.window);
-                    let d = self.anim_duration();
-                    self.windows.retarget_opacity(e.window, o, d);
-                    self.ensure_frame_timer();
-                    self.damage_full();
+                let identity = paired || self.is_identity_atom(e.atom);
+                if opacity_atom || identity {
+                    self.props_changed(top, identity);
                 }
             }
             Event::FocusIn(e) | Event::FocusOut(e) if self.config.dim.focus == FocusSource::X11 => {

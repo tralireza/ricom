@@ -113,6 +113,40 @@ fn destroy_fade_out_marks_for_removal() {
 }
 
 #[test]
+fn hidden_lasts_until_the_next_map() {
+    let mut s = WindowStack::new();
+    s.add_top(win(1, true));
+    assert!(!s.get(1).unwrap().hidden);
+    s.set_mapped(1, false);
+    s.mark_hidden(1); // the unmap was a hide…
+    assert!(s.get(1).unwrap().hidden);
+    s.set_mapped(1, true); // …so this map is the show that ends it
+    assert!(!s.get(1).unwrap().hidden);
+    s.set_mapped(1, false); // a plain unmap (a close) doesn't hide
+    assert!(!s.get(1).unwrap().hidden);
+    s.mark_hidden(99); // untracked id → no-op, no panic
+    assert!(s.get(99).is_none());
+}
+
+#[test]
+fn destroy_mid_close_marks_without_restarting() {
+    let mut s = WindowStack::new();
+    s.add_top(win(1, true));
+    s.set_mapped(1, false);
+    assert!(!s.mark_destroyed(1)); // not closing → nothing to mark
+    assert!(s.begin_fade_out(1, 0.2, false)); // a hide…
+    s.advance_anims(0.1);
+    let mid = s.get(1).unwrap().fade.current();
+    assert!(s.mark_destroyed(1)); // …and the window is destroyed mid-fade
+    let w = s.get(1).unwrap();
+    assert!(w.closing && w.destroyed && w.fade.is_animating());
+    assert_eq!(w.fade.current(), mid); // the same fade, not restarted
+    s.advance_anims(0.2);
+    assert_eq!(s.finished_fadeouts(), vec![(1, true)]); // reaped as destroyed
+    assert!(!s.mark_destroyed(99)); // untracked
+}
+
+#[test]
 fn fade_in_cancels_pending_fade_out() {
     let mut s = WindowStack::new();
     s.add_top(win(1, true));
@@ -120,6 +154,19 @@ fn fade_in_cancels_pending_fade_out() {
     s.fade_in(1, 1.0, 0.2); // window re-mapped mid-fade-out
     assert!(!s.get(1).unwrap().closing);
     assert!(!s.get(1).unwrap().destroyed);
+}
+
+#[test]
+fn fade_in_resumes_a_fade_out_where_it_got_to() {
+    let mut s = WindowStack::new();
+    s.add_top(win(1, true));
+    s.begin_fade_out(1, 0.2, false); // hiding…
+    s.advance_anims(0.1);
+    let mid = s.get(1).unwrap().fade.current();
+    assert!(mid > 0.0 && mid < 1.0);
+    s.fade_in(1, 1.0, 0.2); // …shown again mid-fade: no flash to transparent
+    assert_eq!(s.get(1).unwrap().fade.current(), mid);
+    assert!(s.get(1).unwrap().fade.is_animating());
 }
 
 #[test]

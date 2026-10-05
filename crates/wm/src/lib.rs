@@ -105,6 +105,10 @@ pub struct Win {
     /// The X window is gone (DestroyNotify), so on fade-out completion it is
     /// removed from the stack rather than just released (kept if merely unmapped).
     pub destroyed: bool,
+    /// Unmapped by a *hide* — the window lives on (another workspace, minimised) — so
+    /// its next map is a *show*, not an *open*. Set by [`WindowStack::mark_hidden`],
+    /// cleared by that next map ([`WindowStack::set_mapped`]).
+    pub hidden: bool,
 }
 
 impl Win {
@@ -141,6 +145,7 @@ impl Win {
             drain: None,
             closing: false,
             destroyed: false,
+            hidden: false,
         }
     }
 
@@ -209,9 +214,21 @@ impl WindowStack {
         self.order.retain(|&w| w != id);
     }
 
+    /// Set a window's map state; a map clears [`Win::hidden`].
     pub fn set_mapped(&mut self, id: WindowId, mapped: bool) {
         if let Some(w) = self.wins.get_mut(&id) {
             w.map_state = if mapped { MapState::Mapped } else { MapState::Unmapped };
+            if mapped {
+                w.hidden = false;
+            }
+        }
+    }
+
+    /// Record that a window's unmap was a *hide*, so its next map shows it (see
+    /// [`Win::hidden`]).
+    pub fn mark_hidden(&mut self, id: WindowId) {
+        if let Some(w) = self.wins.get_mut(&id) {
+            w.hidden = true;
         }
     }
 
@@ -223,12 +240,14 @@ impl WindowStack {
         }
     }
 
-    /// Begin fading a window in from fully transparent to `target` over
-    /// `duration` seconds (a window just mapped). Cancels any pending fade-out.
+    /// Begin fading a window in to `target` over `duration` seconds (a window just
+    /// mapped): from fully transparent, or, re-mapped mid-close, from wherever the
+    /// fade-out had got to, so it doesn't flash. Cancels any pending fade-out.
     /// No-op if untracked.
     pub fn fade_in(&mut self, id: WindowId, target: f64, duration: f64) {
         if let Some(w) = self.wins.get_mut(&id) {
-            w.fade = Fade::animating(0.0, target, duration);
+            let from = if w.closing { w.fade.current() } else { 0.0 };
+            w.fade = Fade::animating(from, target, duration);
             w.closing = false;
             w.destroyed = false;
             w.burn = None;
@@ -319,6 +338,19 @@ impl WindowStack {
             Some(w) if w.fade.current() > 0.0 => {
                 w.closing = true;
                 w.destroyed |= destroyed;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Mark a closing window destroyed (its DestroyNotify arrived mid-close) without
+    /// touching the running effect, so it's removed once that finishes. Returns
+    /// `false` (marking nothing) if the window isn't closing or is untracked.
+    pub fn mark_destroyed(&mut self, id: WindowId) -> bool {
+        match self.wins.get_mut(&id) {
+            Some(w) if w.closing => {
+                w.destroyed = true;
                 true
             }
             _ => false,

@@ -324,3 +324,43 @@ fn wallpaper_draw_bottom_layer_clips() {
     assert_eq!((d.quad.w, d.quad.h), (300, 200));
     assert_eq!(clip_of(&d).area(), 100 * 100);
 }
+
+// ── unmap_category: close or hide, once the batch is in ────────────────────────
+
+#[test]
+fn unmap_category_hides_only_a_managed_window_left_whole() {
+    let p = |destroyed, withdrawn| PendingUnmap { id: 1, destroyed, withdrawn };
+    // A WM took a managed window down with its client still inside: another workspace,
+    // minimised — a hide.
+    assert_eq!(unmap_category(&p(false, false), true, false), Category::Hide);
+    // Anything else closes: destroyed, withdrawn by its client (ICCCM 4.1.4), its client
+    // gone from the frame, or no WM managing it (none running, an override-redirect popup).
+    assert_eq!(unmap_category(&p(true, false), true, false), Category::Close);
+    assert_eq!(unmap_category(&p(false, true), true, false), Category::Close);
+    assert_eq!(unmap_category(&p(false, false), true, true), Category::Close);
+    assert_eq!(unmap_category(&p(false, false), false, false), Category::Close);
+}
+
+// ── covering / lift_closing: a going window stays over newcomers ───────────────
+#[test]
+fn covering_snapshots_only_windows_above_that_overlap() {
+    let r = |x| Rect::from_xywh(x, 0, 100, 100);
+    // Bottom to top: 1 under it, 2 going, 3 over it and overlapping, 4 over it but clear.
+    let painted = [(1, r(0)), (2, r(50)), (3, r(120)), (4, r(300))];
+    assert_eq!(covering(&painted, 2), Some(HashSet::from([3])));
+    assert_eq!(covering(&painted, 9), None); // not painted last frame → no lift
+}
+
+#[test]
+fn lift_closing_raises_a_going_window_over_late_coverers_only() {
+    let r = |x| Rect::from_xywh(x, 0, 100, 100);
+    // Bottom to top: 1 going; 3 raised over it since; 2 covered it as it started; 4 clear.
+    let mut items = [(1, r(0)), (3, r(50)), (2, r(20)), (4, r(300))];
+    lift_closing(&mut items, &HashMap::from([(1, HashSet::from([2]))]), |&it| it);
+    assert_eq!(items.map(|(w, _)| w), [3, 1, 2, 4]); // over the newcomer, still under 2
+    // A workspace switch: 1 and 2 hiding (2 covered 1), 3 shown over both — both lift,
+    // keeping their own order.
+    let mut items = [(1, r(0)), (2, r(0)), (3, r(0))];
+    lift_closing(&mut items, &HashMap::from([(1, HashSet::from([2])), (2, HashSet::new())]), |&it| it);
+    assert_eq!(items.map(|(w, _)| w), [3, 1, 2]);
+}

@@ -43,6 +43,33 @@ fn composited(map_state: MapState, class: WindowClass) -> bool {
     map_state == MapState::VIEWABLE && class != WindowClass::INPUT_ONLY
 }
 
+/// How far below a top-level the ICCCM client is looked for: a reparenting WM keeps it
+/// one level down in its frame (two with a decoration wrapper); 3 leaves headroom.
+pub const CLIENT_SEARCH_DEPTH: usize = 3;
+
+/// The ICCCM client under a top-level: the first window carrying `WM_STATE` (a WM sets
+/// it on every window it manages), breadth-first and at most [`CLIENT_SEARCH_DEPTH`]
+/// levels below `top`, which counts too. `probe` answers a whole level at once — per
+/// window, whether it has `WM_STATE` and (when told to descend) its children — so over
+/// X the search costs one round trip per level (see `XConn::client_window`).
+fn find_client(top: Window, mut probe: impl FnMut(&[Window], bool) -> Vec<(bool, Vec<Window>)>) -> Option<Window> {
+    let mut level = vec![top];
+    for depth in 0..=CLIENT_SEARCH_DEPTH {
+        let mut next = Vec::new();
+        for (&w, (managed, children)) in level.iter().zip(probe(&level, depth < CLIENT_SEARCH_DEPTH)) {
+            if managed {
+                return Some(w);
+            }
+            next.extend(children);
+        }
+        if next.is_empty() {
+            return None;
+        }
+        level = next;
+    }
+    None
+}
+
 /// The display ricom reports on, per RandR (see [`XConn::display_info`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct DisplayInfo {
@@ -168,31 +195,75 @@ impl XConn {
         let children = self.conn.query_tree(self.root)?.reply()?.children;
         let mut out = Vec::with_capacity(children.len());
         for w in children {
-            let attr = match self.conn.get_window_attributes(w)?.reply() {
-                Ok(a) => a,
-                Err(_) => continue, // window may have vanished between calls
-            };
-            let geo = match self.conn.get_geometry(w)?.reply() {
-                Ok(g) => g,
-                Err(_) => continue,
-            };
-            out.push(WinInfo {
-                window: w,
-                x: geo.x,
-                y: geo.y,
-                width: geo.width,
-                height: geo.height,
-                border_width: geo.border_width,
-                mapped: composited(attr.map_state, attr.class),
-            });
+            out.extend(self.win_info(w)?);
         }
         Ok(out)
+    }
+
+    /// One window's geometry + map state (both requests in one round trip); `None` if
+    /// the window is gone.
+    pub fn win_info(&self, w: Window) -> Result<Option<WinInfo>> {
+        let attr = self.conn.get_window_attributes(w)?;
+        let geo = self.conn.get_geometry(w)?;
+        let (Ok(attr), Ok(geo)) = (attr.reply(), geo.reply()) else {
+            return Ok(None); // window may have vanished between calls
+        };
+        Ok(Some(WinInfo {
+            window: w,
+            x: geo.x,
+            y: geo.y,
+            width: geo.width,
+            height: geo.height,
+            border_width: geo.border_width,
+            mapped: composited(attr.map_state, attr.class),
+        }))
     }
 
     /// Whether `win` is an InputOnly window (no pixels — never composited). Errors if
     /// the window is gone.
     pub fn is_input_only(&self, win: Window) -> Result<bool> {
         Ok(self.conn.get_window_attributes(win)?.reply()?.class == WindowClass::INPUT_ONLY)
+    }
+
+    /// `top`'s ICCCM client (see `find_client`): `top` itself under a non-reparenting WM,
+    /// the frame's child under a reparenting one; `None` when nothing there is managed
+    /// (an override-redirect popup, or no WM at all).
+    pub fn client_window(&self, top: Window) -> Option<Window> {
+        let wm_state = self.atom("WM_STATE").ok()?;
+        find_client(top, |level, descend| {
+            // Every request for the level goes out before any reply is read.
+            let cookies: Vec<_> = level
+                .iter()
+                .map(|&w| {
+                    let state = self.conn.get_property(false, w, wm_state, AtomEnum::ANY, 0, 0).ok();
+                    (state, descend.then(|| self.conn.query_tree(w).ok()).flatten())
+                })
+                .collect();
+            cookies
+                .into_iter()
+                .map(|(state, tree)| {
+                    // Presence is what counts: a WM may leave WITHDRAWN set, not delete it.
+                    let managed = state.and_then(|c| c.reply().ok()).is_some_and(|r| r.type_ != x11rb::NONE);
+                    let children = tree.and_then(|c| c.reply().ok()).map(|r| r.children).unwrap_or_default();
+                    (managed, children)
+                })
+                .collect()
+        })
+    }
+
+    /// Each window's parent (one round trip for the lot); `None` where the window is
+    /// gone, or is the root.
+    pub fn parents(&self, wins: &[Window]) -> Vec<Option<Window>> {
+        let cookies: Vec<_> = wins.iter().map(|&w| self.conn.query_tree(w).ok()).collect();
+        cookies
+            .into_iter()
+            .map(|c| c.and_then(|c| c.reply().ok()).map(|r| r.parent).filter(|&p| p != x11rb::NONE))
+            .collect()
+    }
+
+    /// `win`'s parent — see [`parents`](Self::parents).
+    pub fn parent_of(&self, win: Window) -> Option<Window> {
+        self.parents(&[win]).pop().flatten()
     }
 
     /// Become the compositing manager by owning `_NET_WM_CM_S<screen>`.

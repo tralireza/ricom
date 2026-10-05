@@ -61,7 +61,7 @@ void main() {
         vec2 p = abs(v_tex * u_rect.zw - hs);
         float d = length(max(p - (hs - r), vec2(0.0))) - r;
         float aa = fwidth(d);
-        a *= 1.0 - smoothstep(-aa, aa, d);     // derivative-based AA (~2px), like the SDF text
+        a *= 1.0 - smoothstep(-aa, aa, d);     // derivative-based AA (~2px)
     }
     frag = vec4(texture(u_tex, v_tex).rgb * a, a);
 }
@@ -423,7 +423,7 @@ void main() {
         vec2 p = abs(v_tex * u_rect.zw - hs);
         float d = length(max(p - (hs - r), vec2(0.0))) - r;
         float aa = fwidth(d);
-        a *= 1.0 - smoothstep(-aa, aa, d);     // derivative-based AA (~2px), like the SDF text
+        a *= 1.0 - smoothstep(-aa, aa, d);     // derivative-based AA (~2px)
     }
     frag = vec4(u_color.rgb * a, a);
 }
@@ -1345,7 +1345,7 @@ impl GlBackend {
         let samples = self.render_samples.borrow();
         let graph_h = if hud.graph { 34.0 * s } else { 0.0 };
         let graph_gap = if hud.graph { 6.0 * s } else { 0.0 };
-        // Optional 1m/5m/15m load block (Super+Shift+L): a label column + three
+        // Optional 1m/5m/15m load block: a label column + three
         // right-aligned value columns, all measured — proportional-font-safe.
         let load_px = 15.0 * s;
         let has_load = hud.load.is_some();

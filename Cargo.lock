@@ -813,7 +813,6 @@ name = "xconn"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "region",
  "tracing",
  "x11rb",
 ]

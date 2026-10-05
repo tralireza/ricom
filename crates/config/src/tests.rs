@@ -567,6 +567,34 @@ fn spec_for_falls_back_to_global_default() {
 }
 
 #[test]
+fn show_hide_default_to_fade_and_take_rule_overrides() {
+    // A re-map / plain unmap fades by default, whatever open/close are set to.
+    let c: Config = toml::from_str("[anim]\nopen = \"slide\"\nclose = \"burn\"\n").unwrap();
+    let w = WindowMatch::default();
+    assert_eq!(c.spec_for(&w, Category::Show).blocks, FADE_BLOCKS);
+    assert_eq!(c.spec_for(&w, Category::Hide).blocks, FADE_BLOCKS);
+
+    // A rule overrides one category without touching its neighbours.
+    let t = r#"
+[[rule]]
+match = { class = "mpv" }
+hide = "pop"
+"#;
+    let c: Config = toml::from_str(t).unwrap();
+    let mpv = WindowMatch { class: "mpv".into(), ..Default::default() };
+    assert_eq!(c.spec_for(&mpv, Category::Hide).blocks.len(), 2); // pop = opacity + scale
+    assert_eq!(c.spec_for(&mpv, Category::Show).blocks, FADE_BLOCKS);
+    assert_eq!(c.spec_for(&mpv, Category::Close).blocks, FADE_BLOCKS);
+
+    // Both keys parse (deny_unknown_fields would reject a typo) and validate.
+    assert!(toml::from_str::<Config>("[anim]\nhidde = \"fade\"\n").is_err());
+    let c: Config = toml::from_str("[anim]\nshow = \"sparkle\"\n").unwrap();
+    assert!(c.validate().iter().any(|s| s.contains("anim.show") && s.contains("sparkle")));
+    let c: Config = toml::from_str("[[rule]]\nmatch = {}\nhide = \"sparkle\"\n").unwrap();
+    assert!(c.validate().iter().any(|s| s.contains("rule[0].hide")));
+}
+
+#[test]
 fn validate_warns_unknown_preset_and_bad_combo() {
     let c: Config = toml::from_str("[anim]\nopen = \"sparkle\"\n").unwrap();
     assert!(c.validate().iter().any(|s| s.contains("anim.open") && s.contains("sparkle")));

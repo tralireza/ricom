@@ -31,8 +31,8 @@ COMMANDS:
     unredir <state>   Fullscreen compositor bypass: on (allow, perf default) |
                       off (always composite, so effects show) | toggle
     list              List tracked windows
-    get               Show each transition's effect + params (open|close|move|focus),
-                      current vs the compiled default
+    get               Show each transition's (open|close|show|hide|move|focus)
+                      effect + params, current vs the compiled default
     inspect <win>     Show one window (id: decimal or 0x hex)
     notify <text> [s] Show an on-screen message for [s] seconds (default: config)
     version           Show ricom's version (on-screen toast + stdout)
@@ -41,7 +41,7 @@ COMMANDS:
                       (fx: spin|pop|stretch|unroll|slide|wobble|wave|ripple|drain|reset;
                        params override [anim] defaults, e.g. amplitude=0.1 duration=3)
     set <cat> <fx> [k=v …]  Live-select a transition's effect (session-only; a
-                      reload/SIGHUP reverts). cat: open|close|move|focus
+                      reload/SIGHUP reverts). cat: open|close|show|hide|move|focus
     font <path> [size]  Live-swap the on-screen text font (session-only; a
                       reload/SIGHUP reverts). size = global multiplier (default: keep)
     effects           List effects and their params
@@ -185,7 +185,7 @@ fn parse_command(args: &[String]) -> Result<Command, Exit> {
         }
         "set" => {
             let cat = a.next().ok_or_else(|| {
-                Exit::Usage("set needs a <category> (open|close|move|focus) and an <effect>\n".into())
+                Exit::Usage("set needs a <category> (open|close|show|hide|move|focus) and an <effect>\n".into())
             })?;
             let fx = a.next().ok_or_else(|| Exit::Usage("set needs an <effect> (see `ricomctl effects`)\n".into()))?;
             // Trailing key=value params (drained like the animate arm).
@@ -372,7 +372,15 @@ fn print_window_detail(w: &proto::WinInfo) {
     print_windows(std::slice::from_ref(w));
     if let Some(a) = &w.anim {
         println!("\nanim (effect per transition; (rule) = per-window override):");
-        for (cat, val) in [("open", &a.open), ("close", &a.close), ("move", &a.r#move), ("focus", &a.focus)] {
+        let rows = [
+            ("open", &a.open),
+            ("close", &a.close),
+            ("show", &a.show),
+            ("hide", &a.hide),
+            ("move", &a.r#move),
+            ("focus", &a.focus),
+        ];
+        for (cat, val) in rows {
             let tag = if a.overridden.iter().any(|o| o == cat) { "  (rule)" } else { "" };
             println!("  {cat:<6} {val}{tag}");
         }

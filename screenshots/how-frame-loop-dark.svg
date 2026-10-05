@@ -44,7 +44,7 @@
   <rect class="box" x="706" y="112" width="186" height="104" rx="10" stroke="#b389ff" stroke-width="1.4"/>
   <text x="799" y="138" class="t" font-size="13" font-weight="600" text-anchor="middle">present_windows</text>
   <text x="799" y="159" class="m" font-size="10.5" text-anchor="middle">textured quads + effects</text>
-  <text x="799" y="176" class="m" font-size="10.5" text-anchor="middle">shadow · blur · SDF HUD</text>
+  <text x="799" y="176" class="m" font-size="10.5" text-anchor="middle">shadow · blur · HUD text</text>
   <text x="799" y="197" class="code mono" font-size="10.5" text-anchor="middle">eglSwapBuffers → vsync</text>
 
   <!-- flow arrows -->

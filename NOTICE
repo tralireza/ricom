@@ -6,7 +6,7 @@ Fonts
 ricom bundles **no** font files or font-derived assets. On-screen text (the FPS
 HUD, OSD toasts, `ricomctl notify`) is rendered at runtime from a TrueType font
 supplied by the user via the `[font] path` setting in `ricom.toml`; glyphs are
-rasterised on demand into an in-memory SDF glyph cache (see
+rasterised on demand into an in-memory glyph cache (see
 `crates/backend-gl/src/text.rs`). No font is redistributed with ricom, so no
 third-party font license applies to this repository.
 

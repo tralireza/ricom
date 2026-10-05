@@ -20,7 +20,7 @@ https://github.com/user-attachments/assets/051b89cc-22a2-4cf1-8b9a-7aa63c9bef39
 ## Highlights
 
 - **A real animation engine — not a fixed effect list.** Every window transition (open · close ·
-  move) is a recipe over composable primitives — opacity, scale, translate, spring-wobble, GPU
+  show · hide · move) is a recipe over composable primitives — opacity, scale, translate, spring-wobble, GPU
   spin, radial ripple, noise-dissolve — chosen by a preset or hand-composed, applied globally or per-app, and
   live-reloaded from TOML on `SIGHUP`. Windows *boing* in, *spin* out, *stretch* open from a centre
   line, *dissolve* into embers, or slide off-screen — your call.
@@ -192,7 +192,7 @@ Working today:
   faded), soft **left+bottom drop shadows**, **rounded corners** (shadow follows the corner), and
   **background blur** — dual-Kawase frost behind translucent windows.
 - **Transition animations** — a composable **animation-block** system: each transition (open / close
-  / move) plays a set of layered primitives — **opacity, scale, translate, wobble, wave, ripple, burn, drain** — chosen by a
+  / show / hide / move) plays a set of layered primitives — **opacity, scale, translate, wobble, wave, ripple, burn, drain** — chosen by a
   named preset (`fade`, `pop`, `slide`, `drop`, `boing`, `burn`, `drain`, `wobble`, `stretch`, `unroll`, `minimize`, `spin`, `wave`, `ripple`) or an
   explicit block spec, set globally (`[anim]`) or per-window (`[[rule]]`). Includes the scale-about-centre
   **open/close "pop"**, **wobbly-windows** (a spring-mesh move/resize jelly on a dedicated GL mesh path),
@@ -216,10 +216,17 @@ Working today:
 - **Window rules** — per-window overrides matched on `WM_CLASS` (class/instance),
   `_NET_WM_WINDOW_TYPE`, title (substring), and fullscreen state, each setting `opacity` /
   `blur` / `shadow` / `corner_radius` / `unredir` / `above` / `dim`, plus the per-transition animations
-  `open` / `close` / `move` (a preset or explicit block spec; an empty `match = {}` is a global
+  `open` / `close` / `show` / `hide` / `move` (a preset or explicit block spec; an empty `match = {}` is a global
   default). Precedence: an explicit `_NET_WM_WINDOW_OPACITY` beats a rule, which beats a built-in
   "fullscreen → opaque + unblurred" rule, which beats the global `default_opacity`. Live-reloads
   with the rest of the config.
+- **Any window manager** — works under any X11 WM that doesn't composite (tiling or stacking,
+  reparenting or not) and with none, through plain ICCCM/EWMH — no WM-specific code. Rules, opacity
+  and focus dimming see the app's own window (the `WM_STATE` client) through any frame the WM wraps
+  around it; a window the WM only hides (a workspace switch, minimise) plays `hide` and later `show`
+  instead of `close` / `open`; and a window fading out on a hide — or on a close, when no WM frame
+  wraps it — stays on top of whatever the WM raises or re-tiles into its place, within the limits
+  under *Known behaviour* below.
 
 Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen + windowed video at
 1920×1080@60 (on par with picom), and 3840×2160@30 with fullscreen bypass.
@@ -230,6 +237,13 @@ Runs tear-free as the compositor on an Intel HD Graphics 630 (Mesa): fullscreen 
 **Known behaviour:** an arrow-key HUD move pressed *during* an auto-hop (`auto_move_duration`,
 0.6 s by default) is ignored — the hop still lands in the corner it picked. Press again once it
 has settled.
+
+**Known behaviour:** under a reparenting WM (one that wraps each window in a frame, e.g. i3), a
+*closing* window isn't kept on top of the neighbours the WM grows or raises into its place: by the
+time the WM takes the frame down, the app's window has already left it, so only an empty frame is
+left to fade. Hides — a workspace switch, minimise — are kept on top under any WM, unless the WM
+puts windows over the hiding one *before* unmapping it (i3 maps and re-tiles first) and ricom
+draws a frame in between; then the hide can play under them.
 
 ## How it works
 
@@ -409,6 +423,8 @@ ricom)`** to reload live — no restart. Every key is optional and falls back to
 
 ```toml
 unredir = true                  # false = always composite, even a lone fullscreen window
+use_damage = true               # repaint only what changed (buffer-age); false = full repaints
+backend = "gl"                  # "gl" (EGL + OpenGL) | "xrender" (no GL, fewer effects); read at startup
 background = [0.05, 0.05, 0.07]  # composite background colour (RGB, seen where no window or wallpaper covers)
 corner_radius = 0.0             # window corner radius in px (0 = square)
 default_opacity = 1.0           # opacity for windows with no _NET_WM_WINDOW_OPACITY and no rule
@@ -430,8 +446,10 @@ strength = 0.3                  # 0.0 = none, 1.0 = fully transparent (per-[[rul
 focus = "ewmh"                  # focus source: "ewmh" (_NET_ACTIVE_WINDOW) | "x11" (FocusChange, no EWMH WM)
 
 [anim]                          # per-transition animations built from composable blocks
-open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|wobble|stretch|unroll|minimize|spin
-close = "fade"                  # …or compose blocks explicitly (see ricom.toml.example)
+open  = "pop"                   # presets: none|fade|pop|slide|drop|boing|burn|drain|wobble|stretch|
+close = "fade"                  #   unroll|minimize|spin|wave|ripple, or compose blocks (ricom.toml.example)
+show  = "fade"                  # the WM brings back a window it hid (workspace switch, un-minimise)
+hide  = "fade"                  # the WM unmaps a window but keeps it (workspace switch, minimise)
 move  = "wobble"
 duration = 0.2                  # default seconds (opacity / scale / translate)
 scale_from = 0.85               # default `scale` start factor (open) / end factor (close)
@@ -441,7 +459,7 @@ wobble_friction = 14.0          # wobble velocity damping (higher = less jiggle)
 [fps]
 enabled = false                 # start with the FPS HUD visible (also toggled by the hotkey)
 hotkey = "Super+Shift+F"        # toggle shortcut (XGrabKey); its modifiers + arrows move corners live
-corner = "bottom-left"          # initial corner: top-left | top-right | bottom-left | bottom-right
+corner = "top-right"            # initial corner: top-left | top-right | bottom-left | bottom-right
 graph = true                    # rolling frame-time graph under the numbers
 display = true                  # resolution@refresh line under the numbers (+ output name if it fits)
 scale = 1.0                     # size multiplier on top of auto screen-height scaling (4K = 2×)
@@ -452,11 +470,13 @@ auto_move_avoid = []            # corners a hop never lands on, e.g. ["top-left"
 
 # Per-window rules (none by default). Each [[rule]] has a `match` (all conditions must hold —
 # class/instance/window_type exact, title substring, fullscreen state) plus the fields it
-# overrides; applied in order, last match wins. A built-in rule keeps fullscreen windows opaque.
+# overrides; applied in order, last match wins. A built-in rule keeps fullscreen windows opaque,
+# unblurred and undimmed.
 [[rule]]
 match = { class = "mpv" }       # video: never dim or blur
 opacity = 1.0
 blur = false
+dim = false
 shadow = false
 
 [[rule]]
@@ -525,7 +545,7 @@ loadavg-style 1m/5m/15m FPS + render-time meter (SIGUSR1 / HUD block), region-le
 culling (skip windows/pixels hidden behind an opaque one), `use-damage` partial repaint
 (EGL buffer-age; repaint only the changed region), and a composable transition-animation system —
 layered primitives (opacity / scale / translate / wobble / wave / ripple / spin / drain / burn) selected per
-transition (open / close / move) by a named preset or explicit block spec, globally or per-rule: pop,
+transition (open / close / show / hide / move) by a named preset or explicit block spec, globally or per-rule: pop,
 slide/drop, boing (spring-mesh spawn), wobbly-windows, burn dissolve, directional stretch/unroll,
 minimize (shrink-to-point genie), a GPU spin (rotate-about-centre), a traveling wave, a radial ripple
 (per-pixel refraction), and a whirlpool drain (a destructive close, or a non-destructive `animate` drain-to-a-point);

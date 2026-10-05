@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 /// Wire-protocol version. Bump on any incompatible `Command`/`Reply` change.
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// Raw X window id (mirrors `wm::WindowId`).
 pub type WinId = u32;
@@ -59,10 +59,10 @@ pub enum Command {
         params: Vec<(String, String)>,
     },
     /// Live-select the effect (preset name + optional params) for a transition category
-    /// (`open`/`close`/`move`/`focus`) — session-only (a `Reload`/SIGHUP reverts). The
-    /// server validates the category, effect, and each param.
+    /// (`open`/`close`/`show`/`hide`/`move`/`focus`) — session-only (a `Reload`/SIGHUP
+    /// reverts). The server validates the category, effect, and each param.
     SetAnim {
-        /// `"open"` | `"close"` | `"move"` | `"focus"`.
+        /// `"open"` | `"close"` | `"show"` | `"hide"` | `"move"` | `"focus"`.
         category: String,
         /// Preset / effect name (e.g. `pop`, `drain`, `wave`).
         effect: String,
@@ -71,8 +71,9 @@ pub enum Command {
         params: Vec<(String, String)>,
     },
     /// Report the current effect + resolved params for each transition category
-    /// (`open`/`close`/`move`/`focus`), alongside the compiled defaults → `Reply::Anims`.
-    /// Reflects live `SetAnim` overrides (a `Reload`/SIGHUP reverts to the config).
+    /// (`open`/`close`/`show`/`hide`/`move`/`focus`), alongside the compiled defaults →
+    /// `Reply::Anims`. Reflects live `SetAnim` overrides (a `Reload`/SIGHUP reverts to
+    /// the config).
     GetAnim,
     /// Toggle unredir-if-possible at runtime (session-only; a `Reload`/SIGHUP reverts
     /// to the config). `enable = Some(true)` allows a lone fullscreen window to bypass
@@ -242,10 +243,16 @@ pub struct WinInfo {
 pub struct WinAnim {
     pub open: String,
     pub close: String,
+    /// A map/unmap a WM made to show/hide the window (`#[serde(default)]`, like `hide`,
+    /// so a reply from a server without these categories still decodes).
+    #[serde(default)]
+    pub show: String,
+    #[serde(default)]
+    pub hide: String,
     #[serde(rename = "move")]
     pub r#move: String,
     pub focus: String,
-    /// Which of `open`/`close`/`move`/`focus` a rule overrides.
+    /// Which of `open`/`close`/`show`/`hide`/`move`/`focus` a rule overrides.
     pub overridden: Vec<String>,
 }
 
@@ -255,7 +262,7 @@ pub struct WinAnim {
 /// `proto` stays dependency-free.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnimInfo {
-    /// `"open"` | `"close"` | `"move"` | `"focus"`.
+    /// `"open"` | `"close"` | `"show"` | `"hide"` | `"move"` | `"focus"`.
     pub event: String,
     /// Current effect label (preset name, or composed block names).
     pub effect: String,
